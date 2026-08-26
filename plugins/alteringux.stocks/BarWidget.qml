@@ -37,9 +37,7 @@ BarWidget {
   // ---- derived, read by Panel.qml -----------------------------------
   readonly property var watchlistQuotes: watchlistConfig.tickers.map(function (t) {
     var raw = root.state.watchlist ? root.state.watchlist[t] : null
-    var q = Model.parseChartQuote(raw)
-    q.symbol = q.symbol || t // fall back to the configured ticker if the fetch failed
-    return q
+    return Model.parseChartQuote(raw, t)
   })
   readonly property var gainers: (state.gainers || []).map(Model.parseScreenerQuote)
   readonly property var losers: (state.losers || []).map(Model.parseScreenerQuote)
@@ -56,7 +54,7 @@ BarWidget {
     path: root.statePath
     watchChanges: true
     printErrors: false
-    onLoaded: root.state = JSON.parse(text() || "{}")
+    onLoaded: root.state = Model.parseState(text())
     onLoadFailed: root.state = Model.defaultState()
     onFileChanged: reload()
   }

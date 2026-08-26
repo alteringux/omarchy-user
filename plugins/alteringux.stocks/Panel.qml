@@ -24,8 +24,8 @@ Panel {
   readonly property var trendingSymbols: hostWidget ? hostWidget.trendingSymbols : []
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
 
-  // Panel-local, not persisted: resets to "all" each time the panel opens.
-  property string filterMode: "all" // "all" | "nearHigh" | "nearLow"
+  // Panel-local, not persisted: resets to FILTER_ALL each time the panel opens.
+  property string filterMode: Model.FILTER_ALL
 
   readonly property var filteredWatchlist: watchlistQuotes.filter(function (q) { return Model.passes52wFilter(q, root.filterMode) })
   readonly property var filteredGainers: gainers.slice(0, 5).filter(function (q) { return Model.passes52wFilter(q, root.filterMode) })
@@ -48,9 +48,9 @@ Panel {
   }
 
   readonly property var filterOptions: [
-    { key: "all", label: "All" },
-    { key: "nearHigh", label: "Near 52w High" },
-    { key: "nearLow", label: "Near 52w Low" }
+    { key: Model.FILTER_ALL, label: "All" },
+    { key: Model.FILTER_NEAR_HIGH, label: "Near 52w High" },
+    { key: Model.FILTER_NEAR_LOW, label: "Near 52w Low" }
   ]
 
   KeyboardPanel {

@@ -55,7 +55,18 @@ test("parseChartQuote marks a malformed/error response as not ok instead of thro
   assert.deepStrictEqual(q.series, [])
 })
 
-// ------------------------------------------------------- parseScreenerQuote
+test("parseChartQuote falls back to the requested ticker's symbol when the fetch failed", () => {
+  const q = Model.parseChartQuote(null, "AAPL")
+  assert.strictEqual(q.symbol, "AAPL")
+  assert.strictEqual(q.ok, false)
+})
+
+test("parseChartQuote prefers Yahoo's own symbol over the fallback when the fetch succeeded", () => {
+  const q = Model.parseChartQuote(RAW_CHART_AAPL, "aapl-typed-differently")
+  assert.strictEqual(q.symbol, "AAPL")
+})
+
+// ------------------------------------------------------------- parseScreenerQuote
 // Shape confirmed live against the day_gainers/day_losers screener endpoint.
 const RAW_SCREENER_ROW = {
   symbol: "ABCL",
@@ -77,6 +88,7 @@ test("parseScreenerQuote maps the screener's field names onto the common quote s
 })
 
 // ------------------------------------------------------ parseTrendingSymbols
+// Shape confirmed live against query1.finance.yahoo.com/v1/finance/trending/US.
 const RAW_TRENDING = {
   finance: { result: [{ quotes: [{ symbol: "DKS" }, { symbol: "INTU" }, { symbol: "ZM" }, { symbol: "OKLO" }] }] }
 }
@@ -87,6 +99,37 @@ test("parseTrendingSymbols returns bare symbols capped at the given limit", () =
 
 test("parseTrendingSymbols returns an empty list for a malformed response", () => {
   assert.deepStrictEqual(Model.parseTrendingSymbols({}, 5), [])
+})
+
+// ------------------------------------------------------------- parseState
+// Same tolerant-parse convention as alteringux.dashboard's Model.parseState:
+// a malformed/half-written state file falls back to defaults per-field
+// instead of throwing and blanking the whole panel.
+test("parseState returns defaults for empty input", () => {
+  assert.deepStrictEqual(Model.parseState(""), Model.defaultState())
+})
+
+test("parseState returns defaults for unparseable JSON instead of throwing", () => {
+  assert.deepStrictEqual(Model.parseState("{not json"), Model.defaultState())
+})
+
+test("parseState reads a well-formed state file", () => {
+  const raw = JSON.stringify({
+    updatedAt: "2026-01-01T00:00:00Z",
+    watchlist: { AAPL: RAW_CHART_AAPL },
+    gainers: [RAW_SCREENER_ROW],
+    losers: [],
+    trending: RAW_TRENDING
+  })
+  const s = Model.parseState(raw)
+  assert.strictEqual(s.updatedAt, "2026-01-01T00:00:00Z")
+  assert.deepStrictEqual(s.watchlist, { AAPL: RAW_CHART_AAPL })
+  assert.deepStrictEqual(s.gainers, [RAW_SCREENER_ROW])
+})
+
+test("parseState falls back to an empty gainers list when that field is malformed", () => {
+  const s = Model.parseState(JSON.stringify({ gainers: "not an array" }))
+  assert.deepStrictEqual(s.gainers, [])
 })
 
 // ------------------------------------------------------------- formatting
@@ -126,22 +169,22 @@ test("week52Position returns null when low/high are missing or degenerate", () =
   assert.strictEqual(Model.week52Position(150, 200, 200), null)
 })
 
-test("passes52wFilter 'all' accepts everything", () => {
-  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, "all"), true)
+test("passes52wFilter FILTER_ALL accepts everything", () => {
+  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, Model.FILTER_ALL), true)
 })
 
-test("passes52wFilter 'nearHigh' accepts only quotes in the top 10% of their range", () => {
-  assert.strictEqual(Model.passes52wFilter({ price: 195, week52Low: 100, week52High: 200 }, "nearHigh"), true)
-  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, "nearHigh"), false)
+test("passes52wFilter FILTER_NEAR_HIGH accepts only quotes in the top 10% of their range", () => {
+  assert.strictEqual(Model.passes52wFilter({ price: 195, week52Low: 100, week52High: 200 }, Model.FILTER_NEAR_HIGH), true)
+  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, Model.FILTER_NEAR_HIGH), false)
 })
 
-test("passes52wFilter 'nearLow' accepts only quotes in the bottom 10% of their range", () => {
-  assert.strictEqual(Model.passes52wFilter({ price: 105, week52Low: 100, week52High: 200 }, "nearLow"), true)
-  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, "nearLow"), false)
+test("passes52wFilter FILTER_NEAR_LOW accepts only quotes in the bottom 10% of their range", () => {
+  assert.strictEqual(Model.passes52wFilter({ price: 105, week52Low: 100, week52High: 200 }, Model.FILTER_NEAR_LOW), true)
+  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: 100, week52High: 200 }, Model.FILTER_NEAR_LOW), false)
 })
 
 test("passes52wFilter excludes quotes with no 52w range from nearHigh/nearLow", () => {
-  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: null, week52High: null }, "nearHigh"), false)
+  assert.strictEqual(Model.passes52wFilter({ price: 150, week52Low: null, week52High: null }, Model.FILTER_NEAR_HIGH), false)
 })
 
 // ----------------------------------------------------------------- movers

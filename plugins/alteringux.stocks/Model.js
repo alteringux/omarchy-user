@@ -9,6 +9,10 @@
 
 var NEAR_EDGE_FRACTION = 0.1 // "near 52w high/low" = top/bottom 10% of the range
 
+var FILTER_ALL = "all"
+var FILTER_NEAR_HIGH = "nearHigh"
+var FILTER_NEAR_LOW = "nearLow"
+
 function defaultWatchlist() {
   return { version: 1, tickers: [] }
 }
@@ -17,15 +21,38 @@ function defaultState() {
   return { version: 1, updatedAt: null, watchlist: {}, gainers: [], losers: [], trending: [] }
 }
 
+// Tolerant parse: missing/malformed sections fall back to empty defaults
+// rather than throwing, so a half-written or stale state file never crashes
+// the panel. Same convention as alteringux.dashboard's Model.parseState.
+function parseState(raw) {
+  var state = defaultState()
+  if (!raw || raw.length === 0) return state
+  try {
+    var parsed = JSON.parse(raw)
+    state.updatedAt = parsed.updatedAt || null
+    if (parsed.watchlist && typeof parsed.watchlist === "object") state.watchlist = parsed.watchlist
+    if (Array.isArray(parsed.gainers)) state.gainers = parsed.gainers
+    if (Array.isArray(parsed.losers)) state.losers = parsed.losers
+    if (parsed.trending !== undefined) state.trending = parsed.trending
+  } catch (e) {
+    console.warn("stocks: state parse failed:", e)
+  }
+  return state
+}
+
 // ---------------------------------------------------------------- parsing
 // Raw shape: query1.finance.yahoo.com/v8/finance/chart/<TICKER>. `chart`
 // bundles a live quote (via `meta`) and same-day intraday closes (via
 // `indicators.quote[0].close`) in a single call, which is why this is the
 // only endpoint the watchlist needs.
-function parseChartQuote(raw) {
+// `fallbackSymbol` covers a failed/malformed fetch, where Yahoo's response
+// carries no `meta.symbol` to identify which watchlist ticker it was for —
+// the caller (BarWidget.qml) knows that from the ticker it requested, so it
+// passes it through here rather than patching the result after the fact.
+function parseChartQuote(raw, fallbackSymbol) {
   var result = raw && raw.chart && raw.chart.result && raw.chart.result[0]
   if (!result || !result.meta) {
-    return { symbol: null, name: null, price: null, prevClose: null, changePct: null, week52High: null, week52Low: null, series: [], ok: false }
+    return { symbol: fallbackSymbol || null, name: null, price: null, prevClose: null, changePct: null, week52High: null, week52Low: null, series: [], ok: false }
   }
   var meta = result.meta
   var closes = (result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close) || []
@@ -35,7 +62,7 @@ function parseChartQuote(raw) {
   var changePct = (price !== undefined && prevClose) ? ((price - prevClose) / prevClose) * 100 : null
 
   return {
-    symbol: meta.symbol || null,
+    symbol: meta.symbol || fallbackSymbol || null,
     name: meta.shortName || meta.longName || meta.symbol || null,
     price: price !== undefined ? price : null,
     prevClose: prevClose !== undefined ? prevClose : null,
@@ -97,13 +124,13 @@ function week52Position(price, low, high) {
   return Math.max(0, Math.min(1, frac))
 }
 
-// filterMode: "all" | "nearHigh" | "nearLow"
+// filterMode: FILTER_ALL | FILTER_NEAR_HIGH | FILTER_NEAR_LOW
 function passes52wFilter(quote, filterMode) {
-  if (!filterMode || filterMode === "all") return true
+  if (!filterMode || filterMode === FILTER_ALL) return true
   var pos = week52Position(quote.price, quote.week52Low, quote.week52High)
   if (pos === null) return false
-  if (filterMode === "nearHigh") return pos >= 1 - NEAR_EDGE_FRACTION
-  if (filterMode === "nearLow") return pos <= NEAR_EDGE_FRACTION
+  if (filterMode === FILTER_NEAR_HIGH) return pos >= 1 - NEAR_EDGE_FRACTION
+  if (filterMode === FILTER_NEAR_LOW) return pos <= NEAR_EDGE_FRACTION
   return true
 }
 
@@ -179,8 +206,12 @@ function removeTicker(watchlist, symbol) {
 // mechanism has no `module` global, so this is a no-op there.
 if (typeof module !== "undefined") {
   module.exports = {
+    FILTER_ALL: FILTER_ALL,
+    FILTER_NEAR_HIGH: FILTER_NEAR_HIGH,
+    FILTER_NEAR_LOW: FILTER_NEAR_LOW,
     defaultWatchlist: defaultWatchlist,
     defaultState: defaultState,
+    parseState: parseState,
     parseChartQuote: parseChartQuote,
     parseScreenerQuote: parseScreenerQuote,
     parseTrendingSymbols: parseTrendingSymbols,
