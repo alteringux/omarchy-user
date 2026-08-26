@@ -192,8 +192,14 @@ Panel {
               required property var modelData
               Layout.fillWidth: true
               Layout.preferredWidth: 1
-              height: Style.space(96)
+              // Sized to the column's actual content (symbol + price + change
+              // + sparkline + 52w bar) rather than a guessed fixed height —
+              // a hardcoded height here previously ran a few px short of real
+              // font metrics, and with no clip, the sparkline/52w bar bled
+              // out the bottom of the card into the row below it.
+              Layout.preferredHeight: cardColumn.implicitHeight + Style.space(20)
               radius: Style.cornerRadius
+              clip: true
               color: Util.alpha(root.barForeground, 0.05)
               border.width: 1
               border.color: Util.alpha(root.barForeground, 0.14)
@@ -216,6 +222,7 @@ Panel {
               }
 
               Column {
+                id: cardColumn
                 anchors.left: parent.left
                 anchors.right: parent.right
                 anchors.top: parent.top
