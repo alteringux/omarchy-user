@@ -1,0 +1,5 @@
+# One plugin per hobby domain, not a shared catch-all dashboard
+
+A "Dashboard" plugin already exists (`alteringux.dashboard`): news, system updates, and notes cards under one bar icon, fed by a background refresh script writing to a shared state file. When scoping the next plugin — a stock market overview — the obvious-looking option was to add it as a fourth card to that existing dashboard, since both are "an overview with cards."
+
+We chose to give it its own plugin (`alteringux.stocks`) instead. Stock data has a different refresh cadence and data source than the existing dashboard's feeds, and a dedicated bar icon can show an at-a-glance price/ticker the way Pomodoro's icon shows live phase state — a card buried in a shared panel can't. More generally: as the plugin roster grows to cover more hobby domains, each domain gets its own plugin and bar icon rather than being folded into `alteringux.dashboard` as a catch-all. `alteringux.dashboard` stays scoped to its original news/system/notes content; it is not the umbrella for "anything overview-shaped."
