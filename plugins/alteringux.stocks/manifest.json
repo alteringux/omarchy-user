@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.stocks",
+  "name": "Stocks",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Personal stock watchlist with live price/change, 52-week range, and market-wide trending/movers",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Stocks",
+    "description": "Watchlist overview with top/worst movers, trending, and a 52-week filter",
+    "category": "Finance",
+    "allowMultiple": false
+  }
+}

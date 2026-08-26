@@ -1,0 +1,58 @@
+#!/bin/bash
+# Refreshes the stocks bar-widget's state file:
+#   - one Yahoo Finance chart call per watchlist ticker (passed as args) —
+#     gives both a live quote and a same-day intraday series in one request
+#   - day gainers / day losers (Yahoo's unofficial screener endpoint)
+#   - trending symbols (Yahoo's unofficial trending endpoint, bare tickers)
+# All three are free, keyless, and undocumented — this script only fetches
+# and bundles the raw JSON; Model.js (loaded by the QML side) does all the
+# shape-specific parsing, so a break in Yahoo's shape is a one-file fix.
+#
+# Usage: omarchy-stocks-refresh [TICKER...]
+
+set -uo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy"
+STATE_FILE="$STATE_DIR/stocks.json"
+mkdir -p "$STATE_DIR"
+
+UA="Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks-refresh"
+now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
+
+fetch() {
+  curl -fsS --max-time 8 -A "$UA" "$1" 2>/dev/null
+}
+
+# ------------------------------------------------------------- watchlist
+watchlist_json="{}"
+for ticker in "$@"; do
+  raw=$(fetch "https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=5m&range=1d")
+  [[ -z "$raw" ]] && raw='null'
+  parsed=$(echo "$raw" | jq -c '.' 2>/dev/null) || parsed='null'
+  watchlist_json=$(echo "$watchlist_json" | jq -c --arg t "$ticker" --argjson v "$parsed" '.[$t] = $v')
+done
+
+# ---------------------------------------------------------------- movers
+gainers_json="[]"
+raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&scrIds=day_gainers&count=8")
+[[ -n "$raw" ]] && gainers_json=$(echo "$raw" | jq -c '[.finance.result[0].quotes[]?]' 2>/dev/null) || gainers_json="[]"
+
+losers_json="[]"
+raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&scrIds=day_losers&count=8")
+[[ -n "$raw" ]] && losers_json=$(echo "$raw" | jq -c '[.finance.result[0].quotes[]?]' 2>/dev/null) || losers_json="[]"
+
+# -------------------------------------------------------------- trending
+trending_json="null"
+raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/trending/US")
+[[ -n "$raw" ]] && trending_json=$(echo "$raw" | jq -c '.' 2>/dev/null) || trending_json="null"
+
+# ------------------------------------------------------- write atomically
+tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+jq -n \
+  --argjson watchlist "$watchlist_json" \
+  --argjson gainers "$gainers_json" \
+  --argjson losers "$losers_json" \
+  --argjson trending "$trending_json" \
+  --arg now "$(now_iso)" \
+  '{version: 1, updatedAt: $now, watchlist: $watchlist, gainers: $gainers, losers: $losers, trending: $trending}' \
+  > "$tmp" && mv "$tmp" "$STATE_FILE"
