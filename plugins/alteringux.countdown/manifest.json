@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.countdown",
+  "name": "Countdown",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Bar widget for the spoken countdown timer (omarchy-countdown script)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Countdown",
+    "description": "Shows remaining time on a running countdown, with start/cancel controls",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

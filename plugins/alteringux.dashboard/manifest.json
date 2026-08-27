@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.dashboard",
+  "name": "Dashboard",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "News + status dashboard overlay: auto-fetched headlines and system status, plus a notes card you can push to from the Claude CLI",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Dashboard",
+    "description": "News/status dashboard with a card overlay",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

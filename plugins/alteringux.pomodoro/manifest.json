@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.pomodoro",
+  "name": "Pomodoro",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Pomodoro focus timer with phase tracking, stats, and configurable sounds",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Pomodoro",
+    "description": "Work/break timer with a stats + settings popup",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

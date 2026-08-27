@@ -202,6 +202,47 @@ function removeTicker(watchlist, symbol) {
   return { version: 1, tickers: tickers.filter(function (t) { return t.toUpperCase() !== normalized }) }
 }
 
+// ---------------------------------------------------- self-improvement
+// Engagement (which tickers the user actually clicks on, tracked by
+// bin/omarchy-stocks-engage) and AI commentary (bin/omarchy-stocks-commentary,
+// which asks the local `claude` CLI for a one-line take on a notable move in
+// a heavily-engaged ticker). Same tolerant-parse convention as parseState:
+// a missing/malformed file degrades to "no engagement data yet" rather than
+// throwing.
+function parseEngagement(raw) {
+  if (!raw || raw.length === 0) return {}
+  try {
+    var parsed = JSON.parse(raw)
+    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
+  } catch (e) {
+    return {}
+  }
+}
+
+function parseCommentary(raw) {
+  if (!raw || raw.length === 0) return {}
+  try {
+    var parsed = JSON.parse(raw)
+    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
+  } catch (e) {
+    return {}
+  }
+}
+
+// Most-clicked tickers surface first. Stable on ties (and for the
+// zero-engagement default) so the list doesn't jitter on every refresh.
+function sortByEngagement(quotes, engagement) {
+  var eng = engagement || {}
+  var indexed = (quotes || []).map(function (q, i) { return { q: q, i: i } })
+  indexed.sort(function (a, b) {
+    var ca = (eng[a.q.symbol] && eng[a.q.symbol].count) || 0
+    var cb = (eng[b.q.symbol] && eng[b.q.symbol].count) || 0
+    if (cb !== ca) return cb - ca
+    return a.i - b.i
+  })
+  return indexed.map(function (x) { return x.q })
+}
+
 // Exposed only for the Node test harness under test/; QML's JS import
 // mechanism has no `module` global, so this is a no-op there.
 if (typeof module !== "undefined") {
@@ -225,6 +266,9 @@ if (typeof module !== "undefined") {
     sparklinePath: sparklinePath,
     normalizeTicker: normalizeTicker,
     addTicker: addTicker,
-    removeTicker: removeTicker
+    removeTicker: removeTicker,
+    parseEngagement: parseEngagement,
+    parseCommentary: parseCommentary,
+    sortByEngagement: sortByEngagement
   }
 }

@@ -1,0 +1,83 @@
+#!/bin/bash
+# Self-improving step: for the tickers the user actually clicks on in the
+# panel (tracked by omarchy-stocks-engage), asks the local `claude` CLI
+# (already authenticated on this machine — no API key needed) for a short,
+# neutral one-line take on a notable price move, and caches it so the panel
+# can show context beyond the raw percentage.
+#
+# Rate-limited on two axes so this stays cheap and quiet:
+#   - only actually calls claude every REFRESH_EVERY invocations (this
+#     script is chained onto every price refresh, which runs every 2 min —
+#     see omarchy-stocks-refresh)
+#   - only regenerates a ticker's commentary once its move has shifted by
+#     at least 0.5pp since the cached take, so an unchanged price doesn't
+#     re-trigger a call next time it's due
+#
+# Called automatically from the end of omarchy-stocks-refresh. Safe to run
+# standalone: no-ops if there's no engagement data yet.
+
+set -uo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy"
+STATE_FILE="$STATE_DIR/stocks.json"
+ENGAGEMENT_FILE="$STATE_DIR/stocks-engagement.json"
+COMMENTARY_FILE="$STATE_DIR/stocks-commentary.json"
+COUNTER_FILE="$STATE_DIR/.stocks-commentary-counter"
+LOCK="$STATE_DIR/.stocks-commentary.lock"
+
+MOVE_THRESHOLD=2   # only comment on moves at least this many percent
+REFRESH_EVERY=5    # only actually call claude every Nth invocation
+MAX_TICKERS=3       # cap claude calls per run
+
+mkdir -p "$STATE_DIR"
+[[ -f "$COMMENTARY_FILE" ]] || echo '{}' > "$COMMENTARY_FILE"
+[[ -f "$ENGAGEMENT_FILE" ]] || exit 0
+[[ -f "$STATE_FILE" ]] || exit 0
+
+count=0
+[[ -f "$COUNTER_FILE" ]] && count=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" > "$COUNTER_FILE"
+(( count % REFRESH_EVERY != 0 )) && exit 0
+
+top_tickers=$(jq -r 'to_entries | map(select(.value.count > 0)) | sort_by(-.value.count) | .[:'"$MAX_TICKERS"'] | .[].key' "$ENGAGEMENT_FILE" 2>/dev/null)
+[[ -z "$top_tickers" ]] && exit 0
+
+# Run from a plain state directory (no CLAUDE.md/project context) so claude
+# answers the prompt directly instead of pulling in unrelated repo context.
+cd "$STATE_DIR" || exit 0
+
+while IFS= read -r ticker; do
+  [[ -z "$ticker" ]] && continue
+
+  quote=$(jq -c --arg t "$ticker" '.watchlist[$t]' "$STATE_FILE" 2>/dev/null)
+  [[ -z "$quote" || "$quote" == "null" ]] && continue
+
+  price=$(echo "$quote" | jq -r '.chart.result[0].meta.regularMarketPrice // empty' 2>/dev/null)
+  prev=$(echo "$quote" | jq -r '.chart.result[0].meta.previousClose // .chart.result[0].meta.chartPreviousClose // empty' 2>/dev/null)
+  [[ -z "$price" || -z "$prev" || "$prev" == "0" ]] && continue
+
+  change_pct=$(awk -v p="$price" -v pv="$prev" 'BEGIN { printf "%.2f", ((p - pv) / pv) * 100 }')
+  abs_change=$(awk -v c="$change_pct" 'BEGIN { print (c < 0 ? -c : c) }')
+  passes=$(awk -v a="$abs_change" -v t="$MOVE_THRESHOLD" 'BEGIN { print (a >= t) ? 1 : 0 }')
+  [[ "$passes" != "1" ]] && continue
+
+  cached_change=$(jq -r --arg t "$ticker" '.[$t].changePct // empty' "$COMMENTARY_FILE" 2>/dev/null)
+  if [[ -n "$cached_change" ]]; then
+    stale=$(awk -v a="$change_pct" -v b="$cached_change" 'BEGIN { d = a - b; if (d < 0) d = -d; print (d >= 0.5) ? 1 : 0 }')
+    [[ "$stale" != "1" ]] && continue
+  fi
+
+  prompt="${ticker} moved ${change_pct}% today (now \$${price}). In one short, plain-text sentence (no markdown, no hedging disclaimers, no financial advice), give a neutral, informative take on what kind of move this is for a stock."
+
+  text=$(timeout 25 claude -p "$prompt" 2>/dev/null | tr -d '\r' | head -c 300)
+  [[ -z "$text" ]] && continue
+
+  (
+    flock -x 200
+    tmp=$(mktemp "${COMMENTARY_FILE}.XXXXXX")
+    jq --arg t "$ticker" --arg text "$text" --arg cp "$change_pct" --arg now "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+      '.[$t] = { text: $text, changePct: ($cp | tonumber), generatedAt: $now }' \
+      "$COMMENTARY_FILE" > "$tmp" && mv "$tmp" "$COMMENTARY_FILE" || rm -f "$tmp"
+  ) 200>"$LOCK"
+done <<< "$top_tickers"

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.stopwatch",
+  "name": "Stopwatch",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Bar widget for the spoken stopwatch (omarchy-stopwatch script)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Stopwatch",
+    "description": "Shows elapsed time on a running stopwatch, with start/cancel controls and a configurable spoken interval",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

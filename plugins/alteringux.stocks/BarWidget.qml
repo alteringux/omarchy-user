@@ -28,17 +28,30 @@ BarWidget {
   readonly property string stateDir: home + "/.local/state/omarchy/"
   readonly property string statePath: stateDir + "stocks.json"
   readonly property string watchlistPath: stateDir + "stocks-watchlist.json"
+  // Self-improvement state: click counts per ticker, and AI commentary
+  // cached by bin/omarchy-stocks-commentary. Same "outside the plugin's own
+  // source dir" reasoning as statePath above.
+  readonly property string engagementPath: stateDir + "stocks-engagement.json"
+  readonly property string commentaryPath: stateDir + "stocks-commentary.json"
+  readonly property string engageScript: pluginDir + "/bin/omarchy-stocks-engage"
 
   property var state: Model.defaultState()
   property var watchlistConfig: Model.defaultWatchlist()
   property bool watchlistLoaded: false
   property bool refreshing: false
+  property var engagement: ({})
+  property var commentary: ({})
 
   // ---- derived, read by Panel.qml -----------------------------------
-  readonly property var watchlistQuotes: watchlistConfig.tickers.map(function (t) {
-    var raw = root.state.watchlist ? root.state.watchlist[t] : null
-    return Model.parseChartQuote(raw, t)
-  })
+  // Most-clicked tickers surface first — the panel's one piece of learned
+  // behavior; see Model.sortByEngagement.
+  readonly property var watchlistQuotes: Model.sortByEngagement(
+    watchlistConfig.tickers.map(function (t) {
+      var raw = root.state.watchlist ? root.state.watchlist[t] : null
+      return Model.parseChartQuote(raw, t)
+    }),
+    root.engagement
+  )
   readonly property var gainers: (state.gainers || []).map(Model.parseScreenerQuote)
   readonly property var losers: (state.losers || []).map(Model.parseScreenerQuote)
   readonly property var trendingSymbols: Model.parseTrendingSymbols(state.trending, 12)
@@ -57,6 +70,45 @@ BarWidget {
     onLoaded: root.state = Model.parseState(text())
     onLoadFailed: root.state = Model.defaultState()
     onFileChanged: reload()
+  }
+
+  // ------------------------------------------------- self-improvement state
+  FileView {
+    id: engagementFile
+    path: root.engagementPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.engagement = Model.parseEngagement(text())
+    onLoadFailed: root.engagement = {}
+    onFileChanged: reload()
+  }
+
+  FileView {
+    id: commentaryFile
+    path: root.commentaryPath
+    watchChanges: true
+    printErrors: false
+    onLoaded: root.commentary = Model.parseCommentary(text())
+    onLoadFailed: root.commentary = {}
+    onFileChanged: reload()
+  }
+
+  // Fire-and-forget: records a card click for Model.sortByEngagement and
+  // bin/omarchy-stocks-commentary to learn from. Not gated on `running`
+  // like refreshProc — clicks are rare enough that overlap isn't a concern,
+  // and each invocation is a fresh Process so consecutive clicks don't fight
+  // for the same one.
+  function engageTicker(symbol) {
+    var proc = engageProcComponent.createObject(root, { command: ["bash", root.engageScript, symbol] })
+    proc.running = true
+  }
+
+  Component {
+    id: engageProcComponent
+    Process {
+      running: false
+      onExited: destroy()
+    }
   }
 
   // ------------------------------------------------------ watchlist config
@@ -155,6 +207,8 @@ BarWidget {
     Qt.callLater(function() {
       stateFile.reload()
       watchlistFile.reload()
+      engagementFile.reload()
+      commentaryFile.reload()
     })
   }
 

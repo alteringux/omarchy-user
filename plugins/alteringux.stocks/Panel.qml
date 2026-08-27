@@ -23,6 +23,11 @@ Panel {
   readonly property var losers: hostWidget ? hostWidget.losers : []
   readonly property var trendingSymbols: hostWidget ? hostWidget.trendingSymbols : []
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
+  readonly property var commentary: hostWidget ? hostWidget.commentary : ({})
+  function commentaryFor(symbol) {
+    var c = root.commentary && root.commentary[symbol]
+    return c ? c.text : null
+  }
 
   // Panel-local, not persisted: resets to FILTER_ALL each time the panel opens.
   property string filterMode: Model.FILTER_ALL
@@ -204,6 +209,16 @@ Panel {
               border.width: 1
               border.color: Util.alpha(root.barForeground, 0.14)
 
+              // Added first (bottom of stacking order) so the × control
+              // below, added after, still gets priority over its own area.
+              // Clicking anywhere else on the card counts as engagement —
+              // see Model.sortByEngagement / bin/omarchy-stocks-commentary.
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (hostWidget) hostWidget.engageTicker(modelData.symbol)
+              }
+
               Text {
                 text: "×"
                 color: root.barForeground
@@ -287,6 +302,20 @@ Panel {
                     radius: width / 2
                     color: Color.accent
                   }
+                }
+
+                // AI commentary: only present once bin/omarchy-stocks-commentary
+                // has generated a take for this ticker (requires prior clicks
+                // + a notable move — see that script for the rate-limiting).
+                Text {
+                  visible: !!root.commentaryFor(modelData.symbol)
+                  text: root.commentaryFor(modelData.symbol) || ""
+                  width: parent.width
+                  wrapMode: Text.WordWrap
+                  color: root.barForeground
+                  opacity: 0.65
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
                 }
               }
             }

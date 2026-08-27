@@ -1,0 +1,26 @@
+#!/bin/bash
+# Records a click on a news item so future refreshes can rank it (and
+# anything with a similar title, on the rare day a story stays "top") ahead
+# of stories the user has ignored. Called from Panel.qml's onClicked handler.
+#
+# Usage: omarchy-dashboard-track "<news title>"
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=dashboard-common.sh
+source "$SCRIPT_DIR/dashboard-common.sh"
+
+ensure_state_file
+
+title="${1:-}"
+[[ -n "$title" ]] || exit 0
+
+(
+  flock 9
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+  jq -c --arg title "$title" --arg now "$(now_iso)" \
+    '.engagement //= {} | .engagement.news //= {} |
+     .engagement.news[$title] = { clicks: ((.engagement.news[$title].clicks // 0) + 1), lastAt: $now }' \
+    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
+) 9>"$LOCK_FILE"

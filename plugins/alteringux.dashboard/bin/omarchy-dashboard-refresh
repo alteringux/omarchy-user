@@ -1,0 +1,125 @@
+#!/bin/bash
+# Refreshes the dashboard bar-widget's state file with:
+#   - top Hacker News stories (free, no API key)
+#   - pending Omarchy/system updates (via omarchy-update-available)
+# Never touches the "notes" section, which is only ever written by
+# omarchy-dashboard-note. Safe to run repeatedly; leaves prior news/system
+# data in place if a fetch fails (e.g. no network).
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=dashboard-common.sh
+source "$SCRIPT_DIR/dashboard-common.sh"
+
+COUNTER_FILE="$STATE_DIR/dashboard-refresh-count"
+DIGEST_EVERY=5 # roughly every ~2.5h at the widget's 30-min refresh cadence
+
+ensure_state_file
+
+# ---------------------------------------------------------------- news
+# Fetch the story IDs, then pull all item bodies concurrently (curl
+# --parallel) into a scratch dir keyed by position, so a slow single
+# item can't serialize the whole refresh (~6 sequential 6s fetches
+# before). Order is preserved by reading the scratch files back in index
+# order. The scratch dir has a fixed name under $STATE_DIR (not mktemp) and
+# is wiped on entry + on EXIT: the shell SIGKILLs this Process on plugin
+# reload, which skips the EXIT trap, so a fixed path keeps at most one
+# stale dir around instead of leaking one per killed run.
+SCRATCH="$STATE_DIR/.dashboard-hn"
+news_json="null"
+ids=$(curl -fsS --max-time 6 'https://hacker-news.firebaseio.com/v0/topstories.json' 2>/dev/null | jq -c '.[0:6]' 2>/dev/null)
+if [[ -n "$ids" && "$ids" != "null" ]]; then
+  mapfile -t id_arr < <(echo "$ids" | jq -r '.[]' 2>/dev/null)
+  if ((${#id_arr[@]} > 0)); then
+    scratch="$SCRATCH"
+    rm -rf "$scratch"; mkdir -p "$scratch"
+    trap 'rm -rf "$scratch"' EXIT
+    curl_args=()
+    for i in "${!id_arr[@]}"; do
+      curl_args+=(-o "$scratch/$i.json" "https://hacker-news.firebaseio.com/v0/item/${id_arr[$i]}.json")
+    done
+    curl -fsS --max-time 8 --parallel --parallel-max 6 "${curl_args[@]}" 2>/dev/null || true
+
+    items="[]"
+    for i in "${!id_arr[@]}"; do
+      item=$(cat "$scratch/$i.json" 2>/dev/null)
+      [[ -z "$item" ]] && continue
+      entry=$(echo "$item" | jq -c '{
+        title: (.title // "Untitled"),
+        url: (.url // ("https://news.ycombinator.com/item?id=" + (.id|tostring))),
+        meta: (((.score // 0)|tostring) + " pts")
+      }' 2>/dev/null)
+      [[ -n "$entry" ]] && items=$(echo "$items" | jq -c --argjson e "$entry" '. + [$e]' 2>/dev/null)
+    done
+    # Only treat this as a usable news payload if at least one item came
+    # back — a fully throttled/offline fetch leaves news_json="null" so the
+    # merge step keeps the previously cached headlines instead of blanking
+    # the card.
+    if [[ "$(echo "$items" | jq 'length' 2>/dev/null)" -gt 0 ]]; then
+      news_json=$(jq -n --argjson items "$items" --arg now "$(now_iso)" '{updatedAt: $now, items: $items}')
+    fi
+  fi
+fi
+
+# -------------------------------------------------------------- system
+sys_lines=$(omarchy-update-available 2>/dev/null)
+sys_status=$?
+sys_items="[]"
+if [[ $sys_status -eq 0 && -n "$sys_lines" ]]; then
+  sys_items=$(printf '%s\n' "$sys_lines" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({text: .})')
+fi
+system_json=$(jq -n --argjson items "$sys_items" --arg now "$(now_iso)" '{updatedAt: $now, items: $items}')
+
+# ------------------------------------------------- engagement-weighted sort
+# Stories the user has actually clicked before (rare but possible for a
+# story that stays "top" across refreshes) surface first; everything else
+# keeps its original (score) order.
+if [[ "$news_json" != "null" ]]; then
+  engagement_json=$(jq -c '.engagement.news // {}' "$STATE_FILE" 2>/dev/null)
+  [[ -z "$engagement_json" || "$engagement_json" == "null" ]] && engagement_json='{}'
+  news_json=$(echo "$news_json" | jq -c --argjson eng "$engagement_json" \
+    '.items |= sort_by(-(($eng[.title].clicks) // 0))' 2>/dev/null || echo "$news_json")
+fi
+
+# ------------------------------------------------------- merge + write
+(
+  flock 9
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+  jq -c \
+    --argjson news "$news_json" \
+    --argjson system "$system_json" \
+    '(if $news != null then .news = $news else . end) | .system = $system' \
+    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
+) 9>"$LOCK_FILE"
+
+# --------------------------------------------------- self-improving digest
+# Every DIGEST_EVERY refreshes, ask the local `claude` CLI (already
+# authenticated — no API key needed) for a one-line glance summary of
+# what's currently on the dashboard. Cheap and infrequent by design.
+count=0
+[[ -f "$COUNTER_FILE" ]] && count=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
+count=$((count + 1))
+echo "$count" >"$COUNTER_FILE"
+
+if ((count % DIGEST_EVERY == 0)); then
+  notes_text=$(jq -r '.notes.items[]?.text' "$STATE_FILE" 2>/dev/null | head -5)
+  news_titles=$(jq -r '.news.items[]?.title' "$STATE_FILE" 2>/dev/null | head -5)
+  sys_text=$(jq -r '.system.items[]?.text' "$STATE_FILE" 2>/dev/null | head -5)
+
+  if [[ -n "$notes_text$news_titles$sys_text" ]]; then
+    prompt="Write ONE short, plain-text sentence (no markdown, no quotes) summarizing what's currently on this desktop dashboard, for a quick glance. Notes: ${notes_text:-none}
+Top headlines: ${news_titles:-none}
+System: ${sys_text:-none}"
+
+    digest=$(cd "$STATE_DIR" && timeout 45 claude -p "$prompt" 2>/dev/null || true)
+    if [[ -n "$digest" ]]; then
+      (
+        flock 9
+        tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+        jq -c --arg d "$digest" --arg now "$(now_iso)" '.digest = {text: $d, updatedAt: $now}' \
+          "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
+      ) 9>"$LOCK_FILE"
+    fi
+  fi
+fi

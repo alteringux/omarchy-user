@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.dictionary",
+  "name": "Dictionary",
+  "version": "1.0.0",
+  "author": "alteringux",
+  "description": "Look up a word: type or highlight it, get suggestions, pick one for a full overview",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Dictionary.qml"
+  }
+}

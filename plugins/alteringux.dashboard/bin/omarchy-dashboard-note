@@ -1,0 +1,46 @@
+#!/bin/bash
+# Pushes a freeform line onto the dashboard bar-widget's "Notes" card.
+# This is the manual/CLI-driven side of the dashboard: run it yourself, or
+# have a Claude Code session run it, to pin anything ("meeting moved to 3pm",
+# a reminder, a link) onto the overlay. Newest entries show first; the list
+# is capped at 20.
+#
+# Usage:
+#   omarchy-dashboard-note "text to add"
+#   omarchy-dashboard-note --clear
+
+set -uo pipefail
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=dashboard-common.sh
+source "$SCRIPT_DIR/dashboard-common.sh"
+
+ensure_state_file
+
+usage() {
+  echo "Usage: omarchy-dashboard-note \"text to add\"" >&2
+  echo "       omarchy-dashboard-note --clear" >&2
+  exit 1
+}
+
+[[ $# -ge 1 ]] || usage
+
+if [[ "$1" == "--clear" ]]; then
+  (
+    flock 9
+    tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+    jq -c '.notes.items = []' "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
+  ) 9>"$LOCK_FILE"
+  echo "Dashboard notes cleared."
+  exit 0
+fi
+
+text="$*"
+(
+  flock 9
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+  jq -c --arg text "$text" --arg now "$(now_iso)" \
+    '.notes.items = ([{text: $text, at: $now}] + .notes.items) | .notes.items |= .[0:20]' \
+    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
+) 9>"$LOCK_FILE"
+echo "Added to dashboard: $text"

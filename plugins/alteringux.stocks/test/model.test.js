@@ -48,6 +48,29 @@ test("parseChartQuote extracts price/prevClose/52w range and drops null closes f
   assert.ok(Math.abs(q.changePct - ((231.42 - 227.30) / 227.30) * 100) < 1e-9)
 })
 
+test("parseChartQuote reads the trimmed shape omarchy-stocks-refresh writes (meta + close series only)", () => {
+  // The refresh script now projects Yahoo's chart payload down to just these
+  // two paths (dropping the full open/high/low/volume + timestamp arrays) to
+  // keep stocks.json small. This guards that parse still works on that shape.
+  const trimmed = {
+    chart: { result: [{
+      meta: {
+        symbol: "MSFT", shortName: "Microsoft Corp.",
+        regularMarketPrice: 420.5, previousClose: 400.0,
+        fiftyTwoWeekHigh: 460.0, fiftyTwoWeekLow: 300.0
+      },
+      indicators: { quote: [{ close: [410, null, 415, 420.5] }] }
+    }] }
+  }
+  const q = Model.parseChartQuote(trimmed, "MSFT")
+  assert.strictEqual(q.ok, true)
+  assert.strictEqual(q.symbol, "MSFT")
+  assert.strictEqual(q.price, 420.5)
+  assert.strictEqual(q.prevClose, 400.0)
+  assert.strictEqual(q.week52High, 460.0)
+  assert.deepStrictEqual(q.series, [410, 415, 420.5])
+})
+
 test("parseChartQuote marks a malformed/error response as not ok instead of throwing", () => {
   const q = Model.parseChartQuote({ chart: { result: null, error: { description: "No data found" } } })
   assert.strictEqual(q.ok, false)
@@ -265,4 +288,39 @@ test("addTicker does not mutate the watchlist passed in", () => {
   const wl = Model.defaultWatchlist()
   Model.addTicker(wl, "NVDA")
   assert.deepStrictEqual(wl.tickers, [])
+})
+
+// ------------------------------------------------------- self-improvement
+test("parseEngagement returns an empty map for missing/malformed input", () => {
+  assert.deepStrictEqual(Model.parseEngagement(""), {})
+  assert.deepStrictEqual(Model.parseEngagement("{not json"), {})
+  assert.deepStrictEqual(Model.parseEngagement("[1,2]"), {})
+})
+
+test("parseEngagement reads a well-formed engagement file", () => {
+  const raw = JSON.stringify({ AAPL: { count: 3, lastClickedAt: "2026-01-01T00:00:00Z" } })
+  assert.deepStrictEqual(Model.parseEngagement(raw), { AAPL: { count: 3, lastClickedAt: "2026-01-01T00:00:00Z" } })
+})
+
+test("parseCommentary returns an empty map for missing/malformed input", () => {
+  assert.deepStrictEqual(Model.parseCommentary(""), {})
+  assert.deepStrictEqual(Model.parseCommentary("{not json"), {})
+})
+
+test("parseCommentary reads a well-formed commentary file", () => {
+  const raw = JSON.stringify({ AAPL: { text: "Notable move.", changePct: 3.2, generatedAt: "2026-01-01T00:00:00Z" } })
+  assert.deepStrictEqual(Model.parseCommentary(raw), { AAPL: { text: "Notable move.", changePct: 3.2, generatedAt: "2026-01-01T00:00:00Z" } })
+})
+
+test("sortByEngagement puts the most-clicked ticker first", () => {
+  const quotes = [{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }]
+  const engagement = { B: { count: 5 }, C: { count: 2 } }
+  const sorted = Model.sortByEngagement(quotes, engagement)
+  assert.deepStrictEqual(sorted.map(q => q.symbol), ["B", "C", "A"])
+})
+
+test("sortByEngagement is stable (preserves original order) on ties, including all-zero engagement", () => {
+  const quotes = [{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }]
+  assert.deepStrictEqual(Model.sortByEngagement(quotes, {}).map(q => q.symbol), ["A", "B", "C"])
+  assert.deepStrictEqual(Model.sortByEngagement(quotes, null).map(q => q.symbol), ["A", "B", "C"])
 })
