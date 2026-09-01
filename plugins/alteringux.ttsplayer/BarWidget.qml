@@ -48,7 +48,7 @@ BarWidget {
   readonly property string icon: {
     if (root.muted) return "\uf026"   // nf-fa-volume_off
     if (root.paused) return "\uf04c"  // nf-fa-pause
-    return "\uf028"                    // nf-fa-volume_up
+    return "\uf0a1"                    // nf-fa-bullhorn
   }
 
   // ── current.json: appear / change / disappear ─────────────────────────
@@ -122,6 +122,9 @@ BarWidget {
         if (root.active) root.applyState(null)
         return
       }
+      // A status run that was already in flight when we cleared: drop it so it
+      // can't re-bump elapsed/chunk state onto an idle widget.
+      if (!root.active) return
       root.playedIndex = s.played
       root.paused = s.paused
       root.muted = s.muted
