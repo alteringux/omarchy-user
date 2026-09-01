@@ -29,7 +29,7 @@
 # Options:
 #   --tag NAME            queue / stop namespace (default "default")
 #   --voice PATH|NAME     .onnx path, or a name under ~/.local/share/piper-voices
-#                         (default $PIPER_TTS_VOICE, else en_US-hfc_female-medium)
+#                         (default $PIPER_TTS_VOICE, else en_US-amy-medium)
 #   --workers N           parallel synth workers (default $PIPER_TTS_WORKERS or 3)
 #   --length-scale N      piper --length_scale     (higher = slower)
 #   --noise-scale N       piper --noise_scale
@@ -48,7 +48,7 @@ set -uo pipefail
 
 # ----------------------------------------------------------------- args
 TAG=default
-VOICE_ARG=${PIPER_TTS_VOICE:-en_US-hfc_female-medium}
+VOICE_ARG=${PIPER_TTS_VOICE:-en_US-amy-medium}
 WORKERS=${PIPER_TTS_WORKERS:-3}
 LENGTH_SCALE=""
 NOISE_SCALE=""
