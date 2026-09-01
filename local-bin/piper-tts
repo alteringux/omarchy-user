@@ -29,7 +29,7 @@
 # Options:
 #   --tag NAME            queue / stop namespace (default "default")
 #   --voice PATH|NAME     .onnx path, or a name under ~/.local/share/piper-voices
-#                         (default $PIPER_TTS_VOICE, else en_GB-cori-high)
+#                         (default $PIPER_TTS_VOICE, else en_US-hfc_female-medium)
 #   --workers N           parallel synth workers (default $PIPER_TTS_WORKERS or 3)
 #   --length-scale N      piper --length_scale     (higher = slower)
 #   --noise-scale N       piper --noise_scale
@@ -48,7 +48,7 @@ set -uo pipefail
 
 # ----------------------------------------------------------------- args
 TAG=default
-VOICE_ARG=${PIPER_TTS_VOICE:-en_GB-cori-high}
+VOICE_ARG=${PIPER_TTS_VOICE:-en_US-hfc_female-medium}
 WORKERS=${PIPER_TTS_WORKERS:-3}
 LENGTH_SCALE=""
 NOISE_SCALE=""
@@ -220,9 +220,14 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 0' TERM INT
 
-MAX_CHUNK="$MAX_CHUNK" FIRST_CHUNK=90 python3 - "$TEXT" "$WORK" <<'PY'
+# Text goes to a file, not argv: a long read (e.g. a multi-page story) blows
+# past Linux's 128 KB single-argument limit and execve fails with E2BIG.
+printf '%s' "$TEXT" > "$WORK/full.txt"
+MAX_CHUNK="$MAX_CHUNK" FIRST_CHUNK=90 python3 - "$WORK/full.txt" "$WORK" <<'PY'
 import os, re, sys
-text, work = sys.argv[1], sys.argv[2]
+with open(sys.argv[1], encoding="utf-8") as _fh:
+    text = _fh.read()
+work = sys.argv[2]
 maxc  = max(60, int(os.environ.get("MAX_CHUNK", "240")))
 first = max(30, int(os.environ.get("FIRST_CHUNK", "90")))
 
@@ -295,12 +300,17 @@ echo "$MYPGID" > "$PGID_FILE"
 # Written once we actually hold the playback queue (see call site after flock),
 # carrying the text so the widget's Loop button can replay it. Best-effort:
 # any failure here must never disrupt speech.
-_tts_publish_current() {
+_tts_publish_current() {   # $1 = path to a UTF-8 file holding the full text
   TTS_TAG="$TAG" TTS_VOICE="$VOICE_ARG" TTS_LS="${LENGTH_SCALE:-}" \
   TTS_PGID="$MYPGID" TTS_CHUNKS="$N" TTS_RUN="$RUN_BASE" \
   python3 - "$1" <<'PY' 2>/dev/null || true
 import json, os, sys, time
 run = os.environ["TTS_RUN"]
+try:
+    with open(sys.argv[1], encoding="utf-8") as _fh:
+        _text = _fh.read()
+except OSError:
+    _text = ""
 state = {
     "tag": os.environ.get("TTS_TAG", "default"),
     "voice": os.environ.get("TTS_VOICE", ""),
@@ -308,8 +318,8 @@ state = {
     "pgid": int(os.environ.get("TTS_PGID", "0") or 0),
     "started_at": int(time.time()),
     "chunks": int(os.environ.get("TTS_CHUNKS", "0") or 0),
-    "chars": len(sys.argv[1]),
-    "text": sys.argv[1],
+    "chars": len(_text),
+    "text": _text,
 }
 tmp = os.path.join(run, "current.json.tmp")
 with open(tmp, "w", encoding="utf-8") as fh:
@@ -360,7 +370,7 @@ if [[ $NO_QUEUE -eq 0 && -n "${LFD:-}" ]]; then
 fi                             # our workers keep synthesising while we wait.
 
 # We now own the queue: this job is the one voice about to be heard.
-_tts_publish_current "$TEXT"
+_tts_publish_current "$WORK/full.txt"
 
 play_raw() {   # $1 = path to a raw PCM file (may be a FIFO)
   "$PLAYER" "${RAWFLAGS[@]}" "${RATE_FLAG}${RATE}" "$1" 2>/dev/null
