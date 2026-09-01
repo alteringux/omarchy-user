@@ -7,9 +7,11 @@ eronews-feeds.json
 newsbar-feeds.json
 
 # ─── Kept local, never published: the newsbar left-half scrapers ───────
-# NewsBar.qml / MarqueeSegment.qml / manifest.json are also held to their
-# world-news-only form via `git update-index --skip-worktree` (see
-# newsbar-eronews-backup outside the repo).
+# The whole alteringux.newsbar plugin is held to its world-news-only form
+# via `git update-index --skip-worktree` (NewsBar.qml, MarqueeSegment.qml,
+# Marquee.qml, Model.js, manifest.json, test/model.test.js); the live copies
+# keep the Literotica half. Pristine copies + these scrapers live in
+# ~/.local/state/omarchy/newsbar-eronews-backup/.
 plugins/alteringux.newsbar/bin/eronews_fetch.py
 plugins/alteringux.newsbar/bin/eronews-read
 plugins/alteringux.newsbar/bin/omarchy-eronews-refresh
