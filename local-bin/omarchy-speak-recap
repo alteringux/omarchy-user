@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Speak the "next steps for self-improvement" from ~/Documents/terminal-recap-7d.md
+# aloud via Piper TTS. Run again while speaking to stop.
+#
+#   omarchy-speak-recap          speak now (used by the SUPER+ALT+W keybinding)
+#   omarchy-speak-recap --boot   speak only if enabled; used from autostart.lua
+#
+# Enable/disable the boot readout with `omarchy-speak-recap-toggle`.
+set -uo pipefail
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+RECAP="$HOME/Documents/terminal-recap-7d.md"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-recap"
+STATE_FILE="$STATE_DIR/state"   # "on" (default) or "off"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+
+# re-run while speaking => stop
+if "$PIPER_TTS" --tag recap --stop; then exit 0; fi
+
+if [[ "${1:-}" == "--boot" ]]; then
+  # Default ON when the state file is missing/unreadable.
+  if [[ -r "$STATE_FILE" ]] && [[ "$(cat "$STATE_FILE" 2>/dev/null)" == "off" ]]; then
+    exit 0
+  fi
+  sleep 6   # let the audio stack + notification daemon come up
+fi
+
+[[ -r "$RECAP" ]] || { echo "recap not found: $RECAP" >&2; exit 1; }
+
+TEXT=$(python3 - "$RECAP" <<'PY'
+import re, sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+
+# grab the numbered list under the "Next steps" heading
+m = re.search(r"Next steps for self-improvement\s*(.+?)(?:\n---|\Z)", src, re.S)
+body = m.group(1) if m else src
+
+WORDS = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight",
+         "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen"]
+
+def clean(s: str) -> str:
+    s = re.sub(r"`([^`]*)`", r"\1", s)                 # code spans
+    s = re.sub(r"\*\*([^*]*)\*\*", r"\1", s)           # bold
+    s = re.sub(r"\*([^*]*)\*", r"\1", s)               # italic
+    s = "".join(ch for ch in s if ch.isascii())        # drop emoji
+    s = s.replace('"', "").replace("#", " number ")
+    s = re.sub(r"\s+", " ", s).strip(" .-")
+    return s
+
+items = []
+for line in body.splitlines():
+    lm = re.match(r"\s*(\d+)\.\s+(.*)", line)
+    if not lm:
+        continue
+    n = int(lm.group(1))
+    # prefer the bolded headline; fall back to the first sentence
+    bm = re.search(r"\*\*(.+?)\*\*", lm.group(2))
+    head = bm.group(1) if bm else lm.group(2).split(". ")[0]
+    head = clean(head)
+    if head:
+        label = WORDS[n] if n < len(WORDS) else str(n)
+        items.append(f"{label}: {head}.")
+
+if not items:
+    sys.exit(1)
+
+intro = f"Weekly recap. {WORDS[len(items)] if len(items) < len(WORDS) else len(items)} self-improvement items from the last seven days."
+print(intro + " " + " ".join(items))
+PY
+) || { echo "failed to build recap text" >&2; exit 1; }
+
+notify-send -a "Weekly recap" "Weekly recap" "$TEXT" -i dialog-information 2>/dev/null || true
+
+printf '%s' "$TEXT" | "$PIPER_TTS" --tag recap --voice "$VOICE"

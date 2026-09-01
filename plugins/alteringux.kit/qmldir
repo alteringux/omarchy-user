@@ -1,0 +1,16 @@
+# Shared components for the alteringux.* shell plugins.
+#
+# No `module` line on purpose: this directory is pulled in by RELATIVE PATH
+# (`import "../alteringux.kit" as Kit`) from a sibling plugin, not registered
+# on a QML import path. Listing the components here (rather than relying on
+# Qt's implicit directory import) makes the dependency explicit and matches
+# how the stock shell declares qs.Commons / qs.Ui.
+#
+# BugGuard is a `.pragma library` JS resource, not a component: consumers reach
+# it as `Kit.BugGuard.create(pluginId, execFn)` and keep the returned guard.
+Store 1.0 Store.qml
+InlineEdit 1.0 InlineEdit.qml
+BugGuard 1.0 BugGuard.js
+Usage 1.0 Usage.qml
+EmptyState 1.0 EmptyState.qml
+singleton Palette 1.0 Palette.qml

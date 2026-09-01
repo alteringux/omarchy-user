@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# lid-suspend-toggle -- toggle whether closing the laptop lid suspends the machine.
+#
+# "Stay awake" is a user-session block inhibitor on logind's handle-lid-switch.
+# No root, no config edit: it clears on logout/reboot, so a forgotten toggle
+# can never leave the lid permanently dead. The Omarchy Hyprland lid binding
+# still locks the screen + blanks the internal panel on close; only the
+# suspend is suppressed.
+#
+#   lid-suspend-toggle          toggle and notify
+#   lid-suspend-toggle status   print "awake" (won't suspend) or "normal"
+set -euo pipefail
+
+UNIT="lid-stay-awake"
+
+is_active() { systemctl --user --quiet is-active "$UNIT" 2>/dev/null; }
+
+case "${1:-toggle}" in
+  status)
+    is_active && echo "awake" || echo "normal"
+    exit 0
+    ;;
+  toggle) ;;
+  *) echo "usage: lid-suspend-toggle [toggle|status]" >&2; exit 2 ;;
+esac
+
+if is_active; then
+  systemctl --user stop "$UNIT"
+  notify-send -a "Lid" -u low "Lid suspend: ON" "Closing the lid will suspend the laptop."
+else
+  systemd-run --user --unit="$UNIT" --collect \
+    --description="Inhibit lid-close suspend" \
+    systemd-inhibit --what=handle-lid-switch \
+      --who="lid-suspend-toggle" --why="User toggled stay-awake on lid close" \
+      --mode=block sleep infinity
+  notify-send -a "Lid" -u low "Lid suspend: OFF" "Laptop stays awake with the lid closed."
+fi

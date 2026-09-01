@@ -4,6 +4,7 @@ import Quickshell.Wayland
 import QtQuick
 import qs.Commons
 import qs.Ui
+import "../alteringux.kit" as Kit
 
 Item {
   id: root
@@ -49,24 +50,28 @@ Item {
     ? "Esc: back"
     : "↑↓: navigate  ·  Enter: select  ·  Esc: clear/close"
 
+  readonly property var guard: Kit.BugGuard.create("alteringux.dictionary", function(argv) { Quickshell.execDetached(argv) })
+
   function open(payloadJson) {
-    var payload = ({})
-    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+    guard.run("open", function() {
+      var payload = ({})
+      try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
 
-    root.opened = true
-    root.step = "search"
-    root.selectedIndex = 0
-    root.cursorActive = false
-    root.suggestions = []
-    root.resetOverview()
+      root.opened = true
+      root.step = "search"
+      root.selectedIndex = 0
+      root.cursorActive = false
+      root.suggestions = []
+      root.resetOverview()
 
-    var word = (payload.word || "").toString().trim()
-    root.setFilter(word)
+      var word = (payload.word || "").toString().trim()
+      root.setFilter(word)
 
-    suggestDailyProcess.command = ["omarchy-dictionary-suggest-daily", "refresh"]
-    suggestDailyProcess.running = true
+      suggestDailyProcess.command = ["omarchy-dictionary-suggest-daily", "refresh"]
+      suggestDailyProcess.running = true
 
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    })
   }
 
   function close() {
@@ -106,24 +111,28 @@ Item {
   }
 
   function runSuggest() {
-    if (!root.filterText) {
-      root.suggestions = []
-      suggestModel.clear()
-      return
-    }
-    suggestProcess.command = ["omarchy-dictionary-suggest-summaries", root.filterText, "8"]
-    suggestProcess.running = true
+    guard.run("runSuggest", function() {
+      if (!root.filterText) {
+        root.suggestions = []
+        suggestModel.clear()
+        return
+      }
+      suggestProcess.command = ["omarchy-dictionary-suggest-summaries", root.filterText, "8"]
+      suggestProcess.running = true
+    })
   }
 
   function applySuggestions(list) {
-    root.suggestions = list
-    suggestModel.clear()
-    for (var i = 0; i < list.length; i++) {
-      suggestModel.append({ word: list[i].word, summary: list[i].summary })
-    }
-    if (suggestModel.count === 0) root.selectedIndex = 0
-    else if (root.selectedIndex >= suggestModel.count) root.selectedIndex = suggestModel.count - 1
-    root.cursorActive = suggestModel.count > 0
+    guard.run("applySuggestions", function() {
+      root.suggestions = list
+      suggestModel.clear()
+      for (var i = 0; i < list.length; i++) {
+        suggestModel.append({ word: list[i].word, summary: list[i].summary })
+      }
+      if (suggestModel.count === 0) root.selectedIndex = 0
+      else if (root.selectedIndex >= suggestModel.count) root.selectedIndex = suggestModel.count - 1
+      root.cursorActive = suggestModel.count > 0
+    })
   }
 
   function moveSelection(delta) {
@@ -143,47 +152,55 @@ Item {
   }
 
   function selectWord(word) {
-    if (!word) return
-    root.step = "overview"
-    root.resetOverview()
-    root.overviewWord = word
-    root.overviewLoading = true
+    guard.run("selectWord", function() {
+      if (!word) return
+      root.step = "overview"
+      root.resetOverview()
+      root.overviewWord = word
+      root.overviewLoading = true
 
-    // Local lookup first (near-instant): shows a definition right away and
-    // hands the LLM call real GCIDE context instead of an empty hint.
-    lookupProcess.forWord = word
-    lookupProcess.command = ["omarchy-dictionary-lookup", word]
-    lookupProcess.running = true
+      // Local lookup first (near-instant): shows a definition right away and
+      // hands the LLM call real GCIDE context instead of an empty hint.
+      lookupProcess.forWord = word
+      lookupProcess.command = ["omarchy-dictionary-lookup", word]
+      lookupProcess.running = true
 
-    // Fire-and-forget usage signal: feeds the self-improving suggestion.
-    trackProcess.command = ["omarchy-dictionary-track", "lookup", word]
-    trackProcess.running = true
+      // Fire-and-forget usage signal: feeds the self-improving suggestion.
+      trackProcess.command = ["omarchy-dictionary-track", "lookup", word]
+      trackProcess.running = true
 
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    })
   }
 
   function toggleStar() {
-    if (!root.overviewWord) return
-    root.overviewStarred = !root.overviewStarred
-    starProcess.command = ["omarchy-dictionary-track", root.overviewStarred ? "star" : "unstar", root.overviewWord]
-    starProcess.running = true
+    guard.run("toggleStar", function() {
+      if (!root.overviewWord) return
+      root.overviewStarred = !root.overviewStarred
+      starProcess.command = ["omarchy-dictionary-track", root.overviewStarred ? "star" : "unstar", root.overviewWord]
+      starProcess.running = true
+    })
   }
 
   function applyLookup(word, data) {
-    if (word !== root.overviewWord) return // stale: user moved on to another word
-    if (data && data.found) {
-      root.overviewSummary = data.summary || ""
-      root.overviewRaw = data.raw || ""
-    }
-    overviewProcess.forWord = word
-    overviewProcess.command = ["omarchy-dictionary-overview", word, root.overviewSummary]
-    overviewProcess.running = true
+    guard.run("applyLookup", function() {
+      if (word !== root.overviewWord) return // stale: user moved on to another word
+      if (data && data.found) {
+        root.overviewSummary = data.summary || ""
+        root.overviewRaw = data.raw || ""
+      }
+      overviewProcess.forWord = word
+      overviewProcess.command = ["omarchy-dictionary-overview", word, root.overviewSummary]
+      overviewProcess.running = true
+    })
   }
 
   function applyOverview(word, data) {
-    if (word !== root.overviewWord) return // stale: user moved on to another word
-    root.overviewLoading = false
-    if (data && !data.error) root.overviewData = data
+    guard.run("applyOverview", function() {
+      if (word !== root.overviewWord) return // stale: user moved on to another word
+      root.overviewLoading = false
+      if (data && !data.error) root.overviewData = data
+    })
   }
 
   Timer {

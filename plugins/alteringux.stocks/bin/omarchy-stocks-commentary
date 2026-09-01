@@ -18,6 +18,11 @@
 
 set -uo pipefail
 
+# Catch a non-zero exit and hand it to the plugin bug-report pipeline.
+# Best-effort: absent guard file = no-op.
+OMARCHY_PLUGIN_ID="alteringux.stocks"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
 STATE_DIR="$HOME/.local/state/omarchy"
 STATE_FILE="$STATE_DIR/stocks.json"
 ENGAGEMENT_FILE="$STATE_DIR/stocks-engagement.json"

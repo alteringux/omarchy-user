@@ -1,0 +1,42 @@
+#!/bin/bash
+
+# omarchy:summary=Enable/disable automatic plugin bug reports and the journal watcher
+# omarchy:args=[on|off|status]
+# omarchy:examples=omarchy-plugin-bug-report-toggle off
+
+set -uo pipefail
+
+TOGGLE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles"
+KILL_SWITCH="$TOGGLE_DIR/plugin-bug-report-off"
+UNIT="omarchy-plugin-bug-watch.service"
+
+action=${1:-status}
+
+case "$action" in
+  on)
+    rm -f "$KILL_SWITCH"
+    systemctl --user enable --now "$UNIT" 2>/dev/null \
+      || echo "note: could not start $UNIT (no user session bus?)" >&2
+    echo "plugin bug reports: ON"
+    ;;
+  off)
+    mkdir -p "$TOGGLE_DIR"
+    : >"$KILL_SWITCH"
+    systemctl --user disable --now "$UNIT" 2>/dev/null || true
+    echo "plugin bug reports: OFF (kill switch at $KILL_SWITCH)"
+    ;;
+  status)
+    if [[ -e $KILL_SWITCH ]]; then
+      echo "plugin bug reports: OFF"
+    else
+      echo "plugin bug reports: ON"
+    fi
+    systemctl --user is-active "$UNIT" 2>/dev/null | sed 's/^/watcher: /' || true
+    running=$(pgrep -af 'omarchy-plugin-bug-report .*-p ' || true)
+    [[ -n $running ]] && echo "an agent is currently running"
+    ;;
+  *)
+    echo "usage: omarchy-plugin-bug-report-toggle [on|off|status]" >&2
+    exit 2
+    ;;
+esac

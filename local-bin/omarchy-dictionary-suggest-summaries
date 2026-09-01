@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Suggestions with one-line summaries, batched into a single sdcv call.
+# Usage: omarchy-dictionary-suggest-summaries <prefix> [limit]
+set -euo pipefail
+
+prefix="${1:-}"
+limit="${2:-8}"
+
+words_json=$(omarchy-dictionary-suggest "$prefix" "$limit")
+
+if [ "$words_json" = "[]" ]; then
+  echo "[]"
+  exit 0
+fi
+
+mapfile -t words < <(echo "$words_json" | jq -r '.[]')
+
+out="[]"
+for w in "${words[@]}"; do
+  entry=$(sdcv -n -j "$w" 2>/dev/null || true)
+  [ -n "$entry" ] || entry="[]"
+  summary=$(jq -r --arg w "$w" '
+    (map(select((.word // "") | ascii_downcase == ($w | ascii_downcase))) | .[0].definition // "") as $raw |
+    ($raw
+      | gsub("\\\\[a-zA-Z]+\\\\"; "")
+      | gsub("\\[[^]]*\\]"; "")
+      | gsub("\\{[^}]*\\}"; "")
+      | gsub("[\\r\\n]+"; " ")
+      | gsub("[ \\t]+"; " ")
+      | gsub("^ +| +$"; "")
+    ) | .[0:120]
+  ' <<< "$entry")
+  out=$(jq -c --arg w "$w" --arg s "$summary" '. + [{word: $w, summary: $s}]' <<< "$out")
+done
+
+echo "$out"

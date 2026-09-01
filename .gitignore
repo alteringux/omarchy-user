@@ -1,0 +1,46 @@
+# ─── Secrets ───────────────────────────────────────────────────────────
+ai-briefing/env
+ai-briefing/*.env
+
+# ─── Private feed lists (commit *.example.json templates instead) ───────
+eronews-feeds.json
+newsbar-feeds.json
+
+# ─── Kept local, never published: the newsbar left-half scrapers ───────
+# NewsBar.qml / MarqueeSegment.qml / manifest.json are also held to their
+# world-news-only form via `git update-index --skip-worktree` (see
+# newsbar-eronews-backup outside the repo).
+plugins/alteringux.newsbar/bin/eronews_fetch.py
+plugins/alteringux.newsbar/bin/eronews-read
+plugins/alteringux.newsbar/bin/omarchy-eronews-refresh
+
+# ─── Logs ─────────────────────────────────────────────────────────────
+*.log
+ai-briefing/last-briefing.log
+
+# ─── Timestamped backups (Omarchy writes these on every edit) ──────────
+*.bak
+*.bak.*
+*.orig
+plugins-backups/
+
+# ─── Fetched / generated wallpaper assets (reproducible from scripts) ──
+# Top-level slideshow pool filled by themes/gta-vi/fetch-wallpaper.sh
+/backgrounds/
+# Timestamped rotation history — the canonical <name>.png is kept
+themes/*/backgrounds/*-[0-9][0-9][0-9][0-9][0-9]*.png
+
+# ─── Runtime state written into the tree ──────────────────────────────
+defaults/agent
+motivator/.last-daily
+motivator/.lock
+motivator/.send-count
+motivator/scores.json
+motivator/motivation.svg
+
+# ─── Editor / worktrees / tooling ─────────────────────────────────────
+.claude/
+node_modules/
+__pycache__/
+*.pyc
+.DS_Store

@@ -11,6 +11,11 @@
 
 set -uo pipefail
 
+# Catch a non-zero exit (e.g. jq choking on a bad arg) and hand it to the
+# plugin bug-report pipeline. Best-effort: absent guard file = no-op.
+OMARCHY_PLUGIN_ID="alteringux.dashboard"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=dashboard-common.sh
 source "$SCRIPT_DIR/dashboard-common.sh"

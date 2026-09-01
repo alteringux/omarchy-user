@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Toggle looping background-noise playback of an .m4a from ~/Music/random.
+# First press: start playing the file on an infinite loop, no window, detached.
+# Second press: stop it. State is a single PID file under $XDG_RUNTIME_DIR.
+
+set -euo pipefail
+
+NOISE_DIR="${BG_NOISE_DIR:-$HOME/Music/random}"
+PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/bg-noise.pid"
+
+# Is the PID in $PIDFILE actually our mpv (not a reused PID)?
+is_ours() {
+	local pid=$1
+	[[ -n $pid ]] && [[ -r /proc/$pid/cmdline ]] || return 1
+	tr '\0' ' ' < "/proc/$pid/cmdline" | grep -q -- '--loop-file=inf'
+}
+
+# Already playing? -> stop.
+if [[ -f "$PIDFILE" ]]; then
+	pid=$(cat "$PIDFILE" 2>/dev/null || true)
+	rm -f "$PIDFILE"
+	if is_ours "$pid"; then
+		kill "$pid" 2>/dev/null || true
+		exit 0
+	fi
+fi
+
+# Pick the first .m4a in the noise dir (find matches dotfiles like ".m4a" too).
+FILE="$(find "$NOISE_DIR" -maxdepth 1 -type f -iname '*.m4a' 2>/dev/null | sort | head -n1)"
+if [[ -z "$FILE" ]]; then
+	echo "bg-noise-toggle: no .m4a found in $NOISE_DIR" >&2
+	exit 1
+fi
+
+nohup mpv --no-video --no-terminal --really-quiet \
+	--loop-file=inf --gapless-audio=yes --idle=no \
+	"$FILE" >/dev/null 2>&1 &
+echo $! > "$PIDFILE"
+disown

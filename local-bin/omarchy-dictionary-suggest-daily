@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+# Self-improving layer: learns from starred/frequently-looked-up words and
+# asks the local `claude` CLI (no API key needed) for a related word to
+# explore next. Cheap to call often -- refresh mode only hits claude once
+# the cache is >12h stale and there's actually signal to learn from.
+# Usage: omarchy-dictionary-suggest-daily [read|refresh]
+set -euo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy"
+STATE_FILE="$STATE_DIR/dictionary.json"
+LOCK_FILE="$STATE_DIR/.dictionary.lock"
+mkdir -p "$STATE_DIR"
+[[ -f "$STATE_FILE" ]] || echo '{"version":1,"lookups":{},"starred":{},"suggestion":null}' > "$STATE_FILE"
+
+mode="${1:-read}"
+
+emit_cached() {
+  jq -c '.suggestion // {}' "$STATE_FILE"
+}
+
+if [[ "$mode" == "read" ]]; then
+  emit_cached
+  exit 0
+fi
+
+last_at=$(jq -r '.suggestion.updatedAt // empty' "$STATE_FILE")
+if [[ -n "$last_at" ]]; then
+  last_epoch=$(date -d "$last_at" +%s 2>/dev/null || echo 0)
+  age=$(( $(date +%s) - last_epoch ))
+  if (( age < 43200 )); then
+    emit_cached
+    exit 0
+  fi
+fi
+
+words=$(jq -r '
+  (.starred | keys) as $starred |
+  (.lookups | to_entries | sort_by(-.value.count) | .[0:10] | map(.key)) as $frequent |
+  ($starred + $frequent | unique) | .[0:12] | join(", ")
+' "$STATE_FILE")
+
+if [[ -z "$words" ]]; then
+  emit_cached
+  exit 0
+fi
+
+prompt=$(cat <<EOF
+A user has looked up / starred these words in a desktop dictionary: $words
+Suggest ONE new, different word (not already in that list) they would likely enjoy learning next, related in theme or vocabulary level.
+Respond with ONLY a single minified JSON object, no markdown fences, no prose:
+{"word":"the suggested word","note":"one short sentence under 100 chars on why it fits, no markdown"}
+EOF
+)
+
+cd "$STATE_DIR"
+raw=$(timeout 30 claude -p --output-format text "$prompt" 2>/dev/null || true)
+parsed=$(echo "$raw" | jq -c '.' 2>/dev/null || echo "$raw" | grep -o '{.*}' | jq -c '.' 2>/dev/null || true)
+
+if [[ -z "$parsed" ]]; then
+  emit_cached
+  exit 0
+fi
+
+now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+exec 9>"$LOCK_FILE"
+flock 9
+tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+jq --argjson s "$parsed" --arg now "$now" '.suggestion = ($s + {updatedAt: $now})' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+jq -c '.suggestion' "$STATE_FILE"

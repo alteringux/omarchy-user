@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# Exact local dictionary lookup via sdcv (GCIDE). Fast/offline layer.
+# Usage: omarchy-dictionary-lookup <word>
+# Output: {"found": bool, "word": str, "summary": str, "raw": str}
+set -euo pipefail
+
+word="${1:-}"
+
+if [ -z "$word" ]; then
+  jq -n --arg word "$word" '{found: false, word: $word, summary: "", raw: ""}'
+  exit 0
+fi
+
+result=$(sdcv -n -j "$word" 2>/dev/null || true); [ -n "$result" ] || result="[]"
+
+jq --arg word "$word" '
+  (map(select((.word // "") | ascii_downcase == ($word | ascii_downcase))) | .[0]) as $match |
+  if $match == null then
+    {found: false, word: $word, summary: "", raw: ""}
+  else
+    ($match.definition // "") as $raw |
+    ($raw
+      | gsub("\\\\[a-zA-Z]+\\\\"; "")
+      | gsub("\\[[^]]*\\]"; "")
+      | gsub("\\{[^}]*\\}"; "")
+      | gsub("[\\r\\n]+"; " ")
+      | gsub("[ \\t]+"; " ")
+      | gsub("^ +| +$"; "")
+    ) as $clean |
+    {
+      found: true,
+      word: $word,
+      summary: ($clean | .[0:160]),
+      raw: $raw
+    }
+  end
+' <<< "$result"

@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "id": "alteringux.countdown",
   "name": "Countdown",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "author": "AlteringUX",
-  "description": "Bar widget for the spoken countdown timer (omarchy-countdown script)",
+  "description": "Days-until countdowns for upcoming events — add \"21 days · Visiting Disneyland\", watch them tick down in a scrolling bar marquee, manage the list from a popup panel",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Countdown",
-    "description": "Shows remaining time on a running countdown, with start/cancel controls",
+    "description": "Scrolling marquee of your event countdowns; click for an add/list overlay",
     "category": "Productivity",
     "allowMultiple": false
   }

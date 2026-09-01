@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.score",
+  "name": "Score",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Simple score tracker with increment, decrement, and reset",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Score",
+    "description": "Track and display a score counter",
+    "category": "Utility",
+    "allowMultiple": false
+  }
+}

@@ -1,0 +1,191 @@
+-- Keep only your personal keybinding overrides here. Add new bindings or
+-- unbind defaults before replacing them.
+
+-- Remap every PRINT-based default binding onto F4 (same modifiers).
+hl.unbind("PRINT")
+hl.unbind("ALT + PRINT")
+hl.unbind("SUPER + PRINT")
+hl.unbind("SUPER + CTRL + PRINT")
+o.bind("F4", "Screenshot", "omarchy-capture-screenshot")
+o.bind("ALT + F4", "Screenrecording", "omarchy-capture-screenrecording --stop-recording || omarchy-menu toggle trigger.capture.screenrecord")
+o.bind("SUPER + F4", "Color picker", "pkill hyprpicker || hyprpicker -a")
+o.bind("SUPER + CTRL + F4", "Extract text (OCR) from screenshot", "omarchy-capture-text")
+o.bind("SUPER + CTRL + ALT + F4", "Narrate screenshot (OCR + TTS, press again to stop)", "omarchy-narrate-screenshot")
+
+-- Pomodoro plugin (alteringux.pomodoro): -q so a keybinding no-ops
+-- silently instead of erroring when the shell isn't running.
+o.bind("SUPER + ALT + P", "Pomodoro start/pause", "omarchy-shell -q alteringux.pomodoro togglePause")
+o.bind("SUPER + ALT + S", "Pomodoro skip phase", "omarchy-shell -q alteringux.pomodoro skipPhase")
+o.bind("SUPER + ALT + R", "Pomodoro reset session", "omarchy-shell -q alteringux.pomodoro resetSession")
+
+-- Countdown plugin (alteringux.countdown): multi-entry "days until <event>"
+-- tracker. One key toggles the add/list overlay; the overlay takes a day
+-- count + a label and the bar shows a scrolling marquee of every countdown.
+o.bind("SUPER + ALT + C", "Countdowns: open panel", "omarchy-shell -q alteringux.countdown toggle")
+
+-- Panel-open shortcuts for the remaining alteringux.* shell plugins, so every
+-- one built so far has a desktop keybind. Pomodoro (P/S/R) and Countdown (C)
+-- above already carry their own; Dictionary is on SUPER + D further down.
+-- Dashboard has no IpcHandler of its own, so it rides the generic
+-- `shell toggle <id>` route (works because its bar widget exposes open/close/opened).
+o.bind("SUPER + ALT + J", "Pomodoro: open panel", "omarchy-shell -q alteringux.pomodoro toggle")
+o.bind("SUPER + ALT + O", "Score: open panel", "omarchy-shell -q alteringux.score toggle")
+o.bind("SUPER + ALT + L", "Stocks: open panel", "omarchy-shell -q alteringux.stocks toggle")
+o.bind("SUPER + ALT + U", "Stopwatch: open panel", "omarchy-shell -q alteringux.stopwatch toggle")
+o.bind("SUPER + ALT + H", "Dashboard: open panel", "omarchy-shell -q shell toggle alteringux.dashboard")
+
+-- Narrator: read selected/copied text aloud (press again to stop)
+o.bind("SUPER + ALT + N", "Narrate selection", "omarchy-narrate")
+
+-- Spoken notifications: toggle reading incoming notifications aloud (Piper TTS)
+o.bind("SUPER + ALT + V", "Spoken notifications: toggle", "omarchy-speak-notifications-toggle")
+
+-- Dictionary: highlight a word then press, or press with nothing selected
+-- to type one.
+o.bind("SUPER + D", "Dictionary lookup", "omarchy-dictionary-hotkey")
+
+-- See current bindings and descriptions:
+--   omarchy menu keybindings --print
+
+-- To disable every Omarchy default binding, set this in
+-- ~/.config/hypr/hyprland.lua before require("default.hypr.omarchy"), then add
+-- only the bindings you want below:
+--   omarchy_default_bindings = false
+
+-- To disable all preinstalled app/webapp bindings, set:
+--   omarchy_preinstalled_bindings = false
+
+-- Add a new binding.
+-- o.bind("SUPER + SHIFT + R", "SSH", "alacritty -e ssh your-server")
+
+-- Change an existing binding by unbinding it first, then binding the key again.
+-- This example changes SUPER+SPACE from the launcher to the Omarchy root menu.
+-- hl.unbind("SUPER + SPACE")
+-- o.bind("SUPER + SPACE", "Omarchy menu", "omarchy-menu toggle root")
+
+-- Disable a default binding without replacing it.
+-- hl.unbind("SUPER + SHIFT + B")
+
+-- Typing Trainer
+o.bind("SUPER + SHIFT + T", "Typing Trainer", "omarchy-launch-webapp http://localhost:8765")
+
+-- Voxtype: push-to-talk voice-to-text
+o.bind("SUPER + H", "Voxtype: toggle dictation", "voxtype record toggle")
+
+-- Toggle the clock widget in the Omarchy bar (shell.json hot-reloads)
+o.bind("SUPER + ALT + T", "Toggle bar clock", "omarchy-toggle-clock")
+
+-- Hide/show the top bar. The bottom news bar watches the same `bar-off` flag,
+-- so it hides and shows along with the top bar.
+hl.unbind("SUPER + SHIFT + B")
+o.bind("SUPER + SHIFT + B", "Toggle bar (top + bottom)", "omarchy-toggle-bar")
+
+-- Speak the current time aloud (Piper TTS; press again to stop).
+-- SUPER + ALT + T is taken by the bar-clock toggle above, so this lives on Y.
+o.bind("SUPER + ALT + Y", "Speak the time", "omarchy-speak-time")
+
+-- Speak a daily briefing aloud: date, weather, local happenings
+-- (wttr.in + Anthropic web search; press again to stop).
+o.bind("SUPER + ALT + B", "Speak daily briefing", "omarchy-speak-briefing")
+
+-- AI briefing notification on demand: same script the post-boot hook runs,
+-- via the `claude` CLI. Pops a desktop notification, no TTS.
+-- (SUPER + ALT + B is the spoken briefing above; this text one lives on Q.)
+o.bind("SUPER + ALT + Q", "AI briefing notification", "/home/alteringux/.config/omarchy/hooks/post-boot.d/briefing.sh")
+
+-- Speak an AI briefing of how the Australian share market is doing today:
+-- ASX 200 / All Ords / AUDUSD from Yahoo Finance (same keyless API as the
+-- alteringux.stocks plugin), then the day's top 10 gainers and top 10
+-- losers each with a one-line reason (Anthropic API + web search).
+-- Piper TTS; press again to stop. A re-press within 10 min replays.
+-- Lives on CTRL+ALT+L (pairs with the Stocks panel on SUPER+ALT+L); the
+-- old SUPER+ALT+F collided with Omarchy's default "Full width" action.
+o.bind("SUPER + CTRL + ALT + L", "Speak ASX market briefing", "omarchy-speak-asx")
+
+-- Speak the day's 10 most interesting Reddit stories (Piper TTS; press again
+-- to stop). Ranking self-tunes: subreddits you hear out float up, ones you
+-- stop early on sink. State in ~/.local/state/omarchy-speak-reddit/.
+o.bind("SUPER + ALT + I", "Speak top Reddit stories", "omarchy-speak-reddit")
+
+-- Speak the weekly "next steps for self-improvement" recap aloud
+-- (from ~/Documents/terminal-recap-7d.md; press again to stop).
+-- Also runs at login unless disabled with omarchy-speak-recap-toggle.
+o.bind("SUPER + ALT + W", "Speak weekly recap", "omarchy-speak-recap")
+
+-- Open Executive thin client (omarchy-executive)
+o.bind("SUPER + ALT + E", "Open Executive: chat", "omarchy-launch-or-focus-tui omarchy-executive repl")
+
+-- Logitech MX Keys examples:
+-- o.bind("SUPER + SHIFT + S", nil, "omarchy-capture-screenshot")
+-- o.bind("SUPER + PERIOD", nil, "omarchy-shell shell toggle omarchy.emojis")
+
+-- TTS dialogue overlay (~/Work/tts-dialogue-overlay): two synthetic voices
+-- hold a conversation with each other. D = the overlay itself, G = its
+-- settings panel, SHIFT+D = play/pause, SHIFT+ALT+D = skip a turn. The
+-- play/pause + skip binds drop a two-line flag file (action + nonce) that
+-- the running app polls; the app must already be up for those to do anything.
+o.bind("SUPER + ALT + D", "TTS dialogue: toggle overlay", "tts-dialogue-overlay --toggle")
+o.bind("SUPER + ALT + G", "TTS dialogue: settings panel", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-dialogue-overlay"; mkdir -p "$d"; { echo toggle; date +%s%N; } > "$d/settings.flag"']])
+o.bind("SUPER + SHIFT + D", "TTS dialogue: play/pause", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-dialogue-overlay"; mkdir -p "$d"; { echo toggle; date +%s%N; } > "$d/control.flag"']])
+o.bind("SUPER + SHIFT + ALT + D", "TTS dialogue: skip turn", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-dialogue-overlay"; mkdir -p "$d"; { echo skip; date +%s%N; } > "$d/control.flag"']])
+
+-- TTS roleplay overlay (~/Work/tts-roleplay-overlay): two synthetic voices act
+-- out a scene you set. Each character has a one-line role instruction on the
+-- card; the main input is the scene setter. A = show/hide the card (the scene
+-- keeps running in the background either way), ALT+CTRL+A = its settings panel,
+-- SHIFT+A = play/pause, SHIFT+CTRL+A = skip a turn. The flag-file binds need the
+-- app already running to do anything.
+o.bind("SUPER + ALT + A", "TTS roleplay: show/hide overlay", "tts-roleplay-overlay --visibility")
+-- The flag payload MUST be written in one shot (printf, not `{ echo; date; }`)
+-- so the app's file watcher never sees a half-written `cmd\n` — a split write
+-- makes it fire twice per press and cancel itself out.
+o.bind("SUPER + ALT + CTRL + A", "TTS roleplay: settings panel", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "toggle\n%s\n" "$(date +%s%N)" > "$d/settings.flag"']])
+o.bind("SUPER + SHIFT + A", "TTS roleplay: play/pause", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "toggle\n%s\n" "$(date +%s%N)" > "$d/control.flag"']])
+o.bind("SUPER + SHIFT + CTRL + A", "TTS roleplay: skip turn", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "skip\n%s\n" "$(date +%s%N)" > "$d/control.flag"']])
+
+-- Work showcase (~/Work/showcase/index.html): carousel intro of every
+-- project built so far. Single self-contained HTML file, opened app-mode.
+-- (SUPER+ALT+K is a preinstalled Omarchy binding for the Tmux keybindings
+-- cheatsheet, so this lives on Z.)
+o.bind("SUPER + ALT + Z", "Work showcase", "omarchy-launch-webapp file:///home/alteringux/Work/showcase/index.html")
+
+-- Video Shuffler (~/Work/video-shuffler): slice a video into fixed-length
+-- chunks and play them back in a random order; with Loop on it re-shuffles
+-- every restart. Single-instance -- a second press focuses the open window.
+o.bind("SUPER + ALT + M", "Video Shuffler", "/home/alteringux/Work/video-shuffler/video-shuffler")
+
+-- Background noise (~/.local/bin/bg-noise-toggle): play an .m4a from
+-- ~/Music/random on an infinite loop, no window, detached. Press again to
+-- stop. State is a PID file at $XDG_RUNTIME_DIR/bg-noise.pid.
+o.bind("SUPER + CTRL + ALT + M", "Background noise: loop/stop", "bg-noise-toggle")
+
+-- There is no "reopen a closed app with its state" in Hyprland -- once the
+-- process exits its unsaved state is gone -- so SUPER + W now HIDES the window
+-- instead: it is parked in the scratchpad special workspace, process and all
+-- state alive. SUPER + SHIFT + S pulls the most recently hidden window back to
+-- the current workspace and focuses it. A hidden window auto-closes 5 minutes
+-- later unless retrieved by then (see ~/.local/bin/omarchy-hide-window).
+-- The real "Close window" action lives on SUPER + SHIFT + W.
+hl.unbind("SUPER + W")
+hl.unbind("SUPER + SHIFT + W") -- was: Omawrite (preinstalled webapp binding)
+hl.unbind("SUPER + SHIFT + S") -- was: Google Maps (preinstalled webapp binding)
+o.bind("SUPER + W", "Hide window (scratchpad, auto-close 5 min)", "omarchy-hide-window")
+o.bind("SUPER + SHIFT + W", "Close window", hl.dsp.window.close())
+o.bind("SUPER + SHIFT + S", "Unhide last hidden window", "omarchy-hide-window --unhide")
+
+-- SUPER + ALT + DELETE hides every window at once -- same scratchpad-park +
+-- 5-min auto-close as SUPER + W, one reaper per window, then drop onto a clean
+-- workspace 1. Restore them one at a time with SUPER + SHIFT + S.
+-- (CTRL + ALT + DELETE keeps its Omarchy default: really close all windows.)
+-- This laptop's apple-spi-keyboard sends BackSpace for the key labelled
+-- "delete" (Delete needs Fn), so bind the BACKSPACE twin too -- same trick
+-- Omarchy uses for SUPER+CTRL+Delete / SUPER+CTRL+BACKSPACE.
+o.bind("SUPER + ALT + DELETE", "Hide all windows (scratchpad, auto-close 5 min)", "omarchy-hide-window --hide-all")
+o.bind("SUPER + ALT + BACKSPACE", "Hide all windows (scratchpad, auto-close 5 min)", "omarchy-hide-window --hide-all")
+
+-- Toggle lid-close suspend (~/.local/bin/lid-suspend-toggle). "OFF" holds a
+-- user-session handle-lid-switch block inhibitor so closing the lid no longer
+-- suspends -- the screen still locks + the internal panel blanks. Clears on
+-- reboot. SUPER+CTRL+L is Omarchy's Lock and SUPER+L its layout toggle, so
+-- this rides SHIFT.
+o.bind("SUPER + SHIFT + L", "Toggle lid-close suspend", "lid-suspend-toggle")

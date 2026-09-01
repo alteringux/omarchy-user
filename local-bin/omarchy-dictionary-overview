@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Rich word overview via the claude CLI. Fallback/enrichment layer.
+# Usage: omarchy-dictionary-overview <word> [local-summary-context]
+# Output: {"word": str, "pronunciation": str, "part_of_speech": str,
+#          "definitions": [str], "examples": [str], "synonyms": [str], "etymology": str}
+set -euo pipefail
+
+word="${1:-}"
+context="${2:-}"
+
+if [ -z "$word" ]; then
+  echo '{"error": "no word given"}' >&2
+  exit 1
+fi
+
+prompt=$(cat <<EOF
+Define the word "$word" for a desktop dictionary popup.
+${context:+Local dictionary context (may be noisy/archaic, use only as a hint): $context}
+Respond with ONLY a single minified JSON object, no markdown fences, no prose, matching exactly this shape:
+{"word":"$word","pronunciation":"IPA or phonetic spelling","part_of_speech":"e.g. noun, verb","definitions":["short clear definition", "..."],"examples":["one example sentence", "..."],"synonyms":["syn1","syn2"],"etymology":"one or two sentence plain-English origin"}
+Keep each definition and example under 120 characters. 2-3 definitions max, 1-2 examples max, up to 5 synonyms.
+EOF
+)
+
+raw=$(claude -p --output-format text "$prompt" 2>/dev/null)
+
+echo "$raw" | jq -c '.' 2>/dev/null || {
+  echo "$raw" | grep -o '{.*}' | jq -c '.' 2>/dev/null || echo '{"error": "unparseable response"}'
+}

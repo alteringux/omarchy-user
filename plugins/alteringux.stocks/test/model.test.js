@@ -124,6 +124,78 @@ test("parseTrendingSymbols returns an empty list for a malformed response", () =
   assert.deepStrictEqual(Model.parseTrendingSymbols({}, 5), [])
 })
 
+// ----------------------------------------------------------- parseSearchResults
+// Shape confirmed live against bin/omarchy-stocks-search (which trims
+// query1.finance.yahoo.com/v1/finance/search). Non-US listings keep their
+// Yahoo suffix so picking one adds that exact exchange's listing.
+const RAW_SEARCH_BHP = [
+  { symbol: "BHP", name: "BHP Group Limited", exch: "NYSE", type: "EQUITY" },
+  { symbol: "BHP.AX", name: "BHP Group Limited", exch: "Australian", type: "EQUITY" },
+  { symbol: "BHP.L", name: "BHP Group Limited", exch: "London", type: "EQUITY" }
+]
+
+test("parseSearchResults maps the trimmed search rows onto {symbol,name,exchange,type}", () => {
+  const rows = Model.parseSearchResults(RAW_SEARCH_BHP)
+  assert.strictEqual(rows.length, 3)
+  assert.deepStrictEqual(rows[1], { symbol: "BHP.AX", name: "BHP Group Limited", exchange: "Australian", type: "EQUITY" })
+})
+
+test("parseSearchResults keeps the .AX suffix so ASX listings stay distinct from the US line", () => {
+  const rows = Model.parseSearchResults(RAW_SEARCH_BHP)
+  assert.ok(rows.some(r => r.symbol === "BHP.AX"))
+  assert.ok(rows.some(r => r.symbol === "BHP"))
+})
+
+test("parseSearchResults also accepts Yahoo's raw {quotes:[...]} envelope", () => {
+  const raw = { quotes: [{ symbol: "cba.ax", longname: "Commonwealth Bank of Australia", exchDisp: "Australian", quoteType: "EQUITY" }] }
+  assert.deepStrictEqual(Model.parseSearchResults(raw), [
+    { symbol: "CBA.AX", name: "Commonwealth Bank of Australia", exchange: "Australian", type: "EQUITY" }
+  ])
+})
+
+test("parseSearchResults upper-cases the symbol, drops rows with no symbol, and de-dups", () => {
+  const rows = Model.parseSearchResults([
+    { symbol: "vas.ax", name: "Vanguard Australian Shares Index ETF", exch: "Australian", type: "ETF" },
+    { name: "no symbol here", exch: "ASX" },
+    { symbol: "VAS.AX", name: "dup", exch: "CXA", type: "ETF" }
+  ])
+  assert.deepStrictEqual(rows.map(r => r.symbol), ["VAS.AX"])
+})
+
+test("parseSearchResults caps the list at the given limit", () => {
+  assert.strictEqual(Model.parseSearchResults(RAW_SEARCH_BHP, 2).length, 2)
+})
+
+test("parseSearchResults returns an empty list for malformed input instead of throwing", () => {
+  assert.deepStrictEqual(Model.parseSearchResults(null), [])
+  assert.deepStrictEqual(Model.parseSearchResults({}), [])
+  assert.deepStrictEqual(Model.parseSearchResults("nope"), [])
+})
+
+// --------------------------------------------------------------- formatPrice
+test("parseChartQuote threads the listing currency through (AUD for .AX)", () => {
+  const q = Model.parseChartQuote({ chart: { result: [{
+    meta: { symbol: "CBA.AX", currency: "AUD", regularMarketPrice: 159.9, previousClose: 158.0, fiftyTwoWeekHigh: 185.59, fiftyTwoWeekLow: 120 },
+    indicators: { quote: [{ close: [158, 159.9] }] }
+  }] } })
+  assert.strictEqual(q.currency, "AUD")
+})
+
+test("formatPrice prefixes AUD with A$ and USD (or missing) with $", () => {
+  assert.strictEqual(Model.formatPrice(159.9, "AUD"), "A$159.90")
+  assert.strictEqual(Model.formatPrice(231.4, "USD"), "$231.40")
+  assert.strictEqual(Model.formatPrice(231.4, null), "$231.40")
+})
+
+test("formatPrice falls back to '<CODE> ' for a currency it has no symbol for", () => {
+  assert.strictEqual(Model.formatPrice(142, "SEK"), "SEK 142.00")
+})
+
+test("formatPrice renders an em dash for a missing/NaN price", () => {
+  assert.strictEqual(Model.formatPrice(null, "AUD"), "—")
+  assert.strictEqual(Model.formatPrice(undefined, "USD"), "—")
+})
+
 // ------------------------------------------------------------- parseState
 // Same tolerant-parse convention as alteringux.dashboard's Model.parseState:
 // a malformed/half-written state file falls back to defaults per-field
@@ -323,4 +395,19 @@ test("sortByEngagement is stable (preserves original order) on ties, including a
   const quotes = [{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }]
   assert.deepStrictEqual(Model.sortByEngagement(quotes, {}).map(q => q.symbol), ["A", "B", "C"])
   assert.deepStrictEqual(Model.sortByEngagement(quotes, null).map(q => q.symbol), ["A", "B", "C"])
+})
+
+// ----------------------------------------------------------- parseWatchlist
+test("parseWatchlist returns the empty default for empty / missing input", () => {
+  assert.deepStrictEqual(Model.parseWatchlist(""), Model.defaultWatchlist())
+  assert.deepStrictEqual(Model.parseWatchlist(null), Model.defaultWatchlist())
+})
+
+test("parseWatchlist reads a tickers array from a good file", () => {
+  assert.deepStrictEqual(Model.parseWatchlist(JSON.stringify({ tickers: ["AAPL", "TSLA"] })).tickers, ["AAPL", "TSLA"])
+})
+
+test("parseWatchlist ignores a non-array tickers field and degrades on bad JSON", () => {
+  assert.deepStrictEqual(Model.parseWatchlist(JSON.stringify({ tickers: "AAPL" })).tickers, [])
+  assert.deepStrictEqual(Model.parseWatchlist("{not json"), Model.defaultWatchlist())
 })

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.newsbar",
+  "name": "News Bar",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A second bar along the bottom of every monitor: a marquee of world/general-news headlines from configurable RSS/Atom sources (click to open in the browser). Hover any item for a one-line summary.",
+  "kinds": [
+    "service"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "NewsBar.qml"
+  }
+}

@@ -1,0 +1,209 @@
+#!/bin/bash
+# Dynamic spoken countdown using Piper TTS. Runs as a background systemd
+# --user unit so it survives closing the terminal; `cancel` stops it.
+set -euo pipefail
+
+VOICE_MODEL="$HOME/.local/share/piper-voices/en_GB-cori-high.onnx"
+PIPER_BIN="$HOME/.local/bin/piper"
+UNIT="omarchy-countdown"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-countdown"
+STATE_FILE="$STATE_DIR/state"
+CACHE_DIR="$HOME/Music/omarchy-countdown-cache"
+
+# Phrases repeat a lot across countdowns ("10 seconds remaining.", etc.), so
+# cache each rendered clip by a hash of its text and only call Piper on a
+# cache miss.
+speak() {
+  local text=$1
+  local hash cache_file
+  hash=$(printf '%s' "$text" | sha256sum | cut -d' ' -f1)
+  cache_file="$CACHE_DIR/$hash.wav"
+
+  if [[ ! -s "$cache_file" ]]; then
+    mkdir -p "$CACHE_DIR"
+    "$PIPER_BIN" --model "$VOICE_MODEL" --output_file "$cache_file" --quiet <<<"$text" >/dev/null 2>&1 || true
+  fi
+
+  pw-play "$cache_file" 2>/dev/null || true
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  omarchy-countdown <minutes> [label] [--loop]          Start a spoken countdown (minutes) in the background
+  omarchy-countdown --seconds <n> [label] [--loop]      Start a spoken Quick countdown (1-10s, counts every second)
+  omarchy-countdown status                              Show time remaining
+  omarchy-countdown cancel                              Stop the running countdown
+EOF
+}
+
+cmd_cancel() {
+  if systemctl --user stop "${UNIT}.service" 2>/dev/null; then
+    rm -f "$STATE_FILE"
+    echo "Countdown cancelled."
+  else
+    echo "No countdown running."
+  fi
+}
+
+cmd_status() {
+  if [[ -f "$STATE_FILE" ]]; then
+    local end_epoch label now remaining
+    end_epoch=$(jq -r '.end_epoch' "$STATE_FILE")
+    label=$(jq -r '.label' "$STATE_FILE")
+    now=$(date +%s)
+    remaining=$((end_epoch - now))
+    if ((remaining > 0)) && systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null; then
+      echo "${label:-Countdown}: $((remaining / 60))m $((remaining % 60))s remaining"
+    else
+      echo "No countdown running."
+      rm -f "$STATE_FILE"
+    fi
+  else
+    echo "No countdown running."
+  fi
+}
+
+# Internal: actual foreground loop, invoked inside the systemd unit.
+# mode is "minutes" or "seconds" (the Quick countdown); loop repeats the
+# whole cycle indefinitely (only `cancel` stops it), skipping the intro
+# announcement/notification on repeats so it doesn't talk over itself.
+run_countdown() {
+  local mode=$1 duration=$2 label=${3:-} loop=${4:-0}
+  local total_seconds
+  if [[ "$mode" == "seconds" ]]; then
+    total_seconds=$duration
+  else
+    total_seconds=$((duration * 60))
+  fi
+
+  local cycle=0
+  while true; do
+    local start end
+    start=$(date +%s)
+    end=$((start + total_seconds))
+
+    mkdir -p "$STATE_DIR"
+    jq -n --argjson end_epoch "$end" --argjson total_seconds "$total_seconds" --arg label "$label" \
+      --argjson loop "$([[ "$loop" == 1 ]] && echo true || echo false)" \
+      '{end_epoch: $end_epoch, total_seconds: $total_seconds, label: $label, loop: $loop}' >"$STATE_FILE"
+
+    if ((cycle == 0)); then
+      local intro
+      if [[ "$mode" == "seconds" ]]; then
+        intro="Starting a ${duration} second countdown."
+      else
+        intro="Starting a ${duration} minute countdown."
+      fi
+      [[ -n "$label" ]] && intro="${intro% countdown.} countdown for ${label}."
+      speak "$intro"
+      notify-send "Countdown started" "${label:-$intro}" 2>/dev/null || true
+    fi
+
+    announce_at() {
+      local elapsed=$1 text=$2
+      local target=$((start + elapsed)) now sleep_for
+      now=$(date +%s)
+      sleep_for=$((target - now))
+      ((sleep_for > 0)) && sleep "$sleep_for"
+      speak "$text"
+    }
+
+    if [[ "$mode" == "seconds" ]]; then
+      local s
+      for ((s = duration; s >= 1; s--)); do
+        announce_at $((total_seconds - s)) "$s"
+      done
+    else
+      local m
+      for ((m = duration - 1; m >= 1; m--)); do
+        local word="minutes"
+        ((m == 1)) && word="minute"
+        announce_at $((total_seconds - m * 60)) "${m} ${word} remaining."
+      done
+      local sec
+      for sec in 50 40 30 20 10; do
+        announce_at $((total_seconds - sec)) "${sec} seconds remaining."
+      done
+    fi
+
+    announce_at "$total_seconds" "${label:+$label: }Time is up."
+
+    if [[ "$loop" != 1 ]]; then
+      notify-send "Countdown finished" "${label:-Time is up}" 2>/dev/null || true
+      break
+    fi
+
+    cycle=$((cycle + 1))
+  done
+
+  rm -f "$STATE_FILE"
+}
+
+main() {
+  case "${1:-}" in
+    --run)
+      shift
+      run_countdown "$@"
+      ;;
+    cancel)
+      cmd_cancel
+      ;;
+    status)
+      cmd_status
+      ;;
+    -h | --help | "")
+      usage
+      ;;
+    *)
+      local mode="minutes" duration="" label="" loop=0
+      local positionals=()
+      while (($#)); do
+        case "$1" in
+          --seconds)
+            mode="seconds"
+            ;;
+          --loop)
+            loop=1
+            ;;
+          *)
+            positionals+=("$1")
+            ;;
+        esac
+        shift
+      done
+
+      duration=${positionals[0]:-}
+      label=${positionals[1]:-}
+
+      if [[ "$mode" == "seconds" ]]; then
+        if ! [[ "$duration" =~ ^[0-9]+$ ]] || ((duration < 1 || duration > 10)); then
+          echo "Error: --seconds must be an integer between 1 and 10" >&2
+          exit 1
+        fi
+      else
+        if ! [[ "$duration" =~ ^[0-9]+$ ]] || ((duration < 1)); then
+          echo "Error: minutes must be a positive integer" >&2
+          exit 1
+        fi
+      fi
+
+      if systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null; then
+        echo "A countdown is already running. Run 'omarchy-countdown cancel' first." >&2
+        exit 1
+      fi
+
+      systemd-run --user --unit="$UNIT" --collect \
+        --description="Omarchy spoken countdown" \
+        -- "$0" --run "$mode" "$duration" "$label" "$loop"
+
+      local unit="minute"
+      [[ "$mode" == "seconds" ]] && unit="second"
+      local loop_msg=""
+      ((loop)) && loop_msg=", looping"
+      echo "Countdown started for ${duration} ${unit}(s)${label:+ ($label)}${loop_msg}."
+      ;;
+  esac
+}
+
+main "$@"

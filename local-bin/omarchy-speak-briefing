@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# Speaks a daily briefing aloud via Piper TTS: date, weather, and what's
+# happening locally. Run again while speaking to stop.
+#
+# Weather comes from wttr.in (no key). "What's happening" uses the Anthropic
+# API with web search, reusing the key in ~/.config/omarchy/ai-briefing/env.
+# Both parts degrade gracefully if offline or unconfigured.
+set -uo pipefail
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+ENV_FILE="$HOME/.config/omarchy/ai-briefing/env"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+# Override with LOCATION=... in the env file; blank = wttr.in IP geolocation.
+LOCATION=""
+
+if "$PIPER_TTS" --tag briefing --stop; then exit 0; fi
+
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+HOUR=$(date +%-H)
+if   (( HOUR < 12 )); then GREETING="Good morning"
+elif (( HOUR < 18 )); then GREETING="Good afternoon"
+else GREETING="Good evening"; fi
+DOM=$(date +%-d)
+case $DOM in
+  1|21|31) ORD="st" ;; 2|22) ORD="nd" ;; 3|23) ORD="rd" ;; *) ORD="th" ;;
+esac
+DATE_LINE="It's $(date '+%A, the '"$DOM$ORD"' of %B')."
+
+# --- Weather -------------------------------------------------------------
+# One wttr.in call; emits "<place>\t<spoken weather sentence>".
+WX=$(curl -s --max-time 10 "https://wttr.in/${LOCATION}?format=j1" 2>/dev/null | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    cc=d['current_condition'][0]; w=d['weather'][0]
+    place=d.get('nearest_area',[{}])[0].get('areaName',[{'value':''}])[0]['value']
+    desc=cc['weatherDesc'][0]['value'].lower()
+    rain=max(int(h['chanceofrain']) for h in w['hourly'])
+    loc=(' in '+place) if place else ''
+    s=f\"Right now{loc} it's {desc}, {cc['temp_C']} degrees, feeling like {cc['FeelsLikeC']}. \"
+    s+=f\"Today's range is {w['mintempC']} to {w['maxtempC']} degrees\"
+    s+=(f', with about a {rain} percent chance of rain.' if rain>=20 else ', and little chance of rain.')
+    print(place + chr(9) + s)
+except Exception:
+    sys.exit(1)
+")
+if [[ -n "$WX" ]]; then
+  PLACE="${WX%%$'\t'*}"
+  WEATHER="${WX#*$'\t'}"
+else
+  PLACE=""
+  WEATHER="I couldn't reach the weather service right now."
+fi
+[[ -z "$LOCATION" && -n "$PLACE" ]] && LOCATION="$PLACE"
+
+# --- What's happening ----------------------------------------------------
+happenings() {
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
+  local where="$LOCATION"
+  [[ -z "$where" ]] && return 1
+  local resp
+  resp=$(curl -sS https://api.anthropic.com/v1/messages --max-time 45 \
+    -H "x-api-key: $ANTHROPIC_API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -d "$(jq -n --arg where "$where" --arg day "$(date '+%A %-d %B %Y')" '{
+      model:"claude-haiku-4-5-20251001",
+      max_tokens:350,
+      tools:[{type:"web_search_20250305",name:"web_search",max_uses:3}],
+      messages:[{role:"user",content:("Its \($day). Give a spoken briefing of whats happening today in \($where): 2 to 3 items across local news, events, transport disruptions or sport, plus any weather warnings. Plain text only. No markdown, no headings, no URLs, no citations. 3 to 5 short sentences to be read aloud. Start immediately with the first item. Do NOT say that you are searching, do NOT write phrases like \"based on the search results\" or \"heres your briefing\".")}]
+    }')") || return 1
+  printf '%s' "$resp" | python3 -c "
+import json,sys
+try:
+    d=json.load(sys.stdin)
+    if 'error' in d: sys.exit(1)
+    import re
+    out=' '.join(b['text'].strip() for b in d['content'] if b.get('type')=='text')
+    out=' '.join(out.split())
+    # Drop leading meta chatter the model sometimes prepends.
+    meta=re.compile(r\"(i'll search|let me search|i will search|based on (the |my )?search|here'?s your|here is your|searching for)\", re.I)
+    parts=re.split(r'(?<=[.!?])\s+', out)
+    while parts and meta.search(parts[0]):
+        parts.pop(0)
+    out=' '.join(parts).strip()
+    if not out: sys.exit(1)
+    print(out)
+except Exception:
+    sys.exit(1)
+" || return 1
+}
+
+HAPPENINGS=$(happenings) || HAPPENINGS=""
+
+# --- Assemble & speak --------------------------------------------------
+TEXT="$GREETING. $DATE_LINE $WEATHER"
+[[ -n "$HAPPENINGS" ]] && TEXT="$TEXT $HAPPENINGS"
+TEXT="$TEXT Have a good day."
+
+notify-send -a "Daily briefing" "$GREETING" "$TEXT" -i weather-clear 2>/dev/null || true
+
+printf '%s' "$TEXT" | "$PIPER_TTS" --tag briefing --voice "$VOICE"

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.timers",
+  "name": "Timers",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live activity timers — start a labelled clock, watch it count up from when you added it, cross it off when done",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Timers",
+    "description": "Labelled count-up timers shown as a card list in a popup overlay",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

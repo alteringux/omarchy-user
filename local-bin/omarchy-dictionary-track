@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Records dictionary usage signal (lookups + stars) that
+# omarchy-dictionary-suggest-daily learns from.
+# Usage: omarchy-dictionary-track <lookup|star|unstar> <word>
+set -euo pipefail
+
+STATE_DIR="$HOME/.local/state/omarchy"
+STATE_FILE="$STATE_DIR/dictionary.json"
+LOCK_FILE="$STATE_DIR/.dictionary.lock"
+mkdir -p "$STATE_DIR"
+[[ -f "$STATE_FILE" ]] || echo '{"version":1,"lookups":{},"starred":{},"suggestion":null}' > "$STATE_FILE"
+
+action="${1:-}"
+word="${2:-}"
+
+if [[ -z "$action" || -z "$word" ]]; then
+  echo "usage: omarchy-dictionary-track <lookup|star|unstar> <word>" >&2
+  exit 1
+fi
+
+exec 9>"$LOCK_FILE"
+flock 9
+
+now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+
+case "$action" in
+  lookup)
+    jq --arg w "$word" --arg now "$now" \
+      '.lookups[$w] = {count: ((.lookups[$w].count // 0) + 1), lastAt: $now}' \
+      "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+    ;;
+  star)
+    jq --arg w "$word" '.starred[$w] = true' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+    ;;
+  unstar)
+    jq --arg w "$word" 'del(.starred[$w])' "$STATE_FILE" > "$tmp" && mv "$tmp" "$STATE_FILE"
+    ;;
+  *)
+    rm -f "$tmp"
+    echo "unknown action: $action" >&2
+    exit 1
+    ;;
+esac
+
+jq -c --arg w "$word" '{word: $w, starred: (.starred[$w] // false), count: (.lookups[$w].count // 0)}' "$STATE_FILE"

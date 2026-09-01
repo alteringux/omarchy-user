@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "perFeed": 8,
+  "maxHeadlines": 40,
+  "refreshMinutes": 5,
+  "feeds": [
+    {
+      "name": "BBC",
+      "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+      "category": "World"
+    },
+    {
+      "name": "NPR",
+      "url": "https://feeds.npr.org/1001/rss.xml"
+    },
+    {
+      "name": "Guardian",
+      "url": "https://www.theguardian.com/world/rss",
+      "category": "World"
+    },
+    {
+      "name": "Al Jazeera",
+      "url": "https://www.aljazeera.com/xml/rss/all.xml",
+      "category": "World"
+    },
+    {
+      "name": "AP",
+      "url": "https://feedx.net/rss/ap.xml",
+      "category": "World"
+    },
+    {
+      "name": "France 24",
+      "url": "https://www.france24.com/en/rss",
+      "category": "World"
+    },
+    {
+      "name": "CBC",
+      "url": "https://www.cbc.ca/webfeed/rss/rss-world",
+      "category": "World"
+    }
+  ]
+}

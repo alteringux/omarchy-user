@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock setsid: swallow the detached-reaper spawn so tests never fork the real
+# script. Log the args if asked.
+[ -n "${MOCK_SETSID_LOG:-}" ] && printf '%s\n' "$*" >> "$MOCK_SETSID_LOG"
+exit 0

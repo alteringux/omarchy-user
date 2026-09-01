@@ -62,6 +62,12 @@ if [[ -n "$ids" && "$ids" != "null" ]]; then
   fi
 fi
 
+# Catch a non-zero exit (jq/curl/claude choking) and hand it to the plugin
+# bug-report pipeline. Sourced after the scratch-dir EXIT trap above so it
+# chains rather than clobbers. Best-effort: absent guard file = no-op.
+OMARCHY_PLUGIN_ID="alteringux.dashboard"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
 # -------------------------------------------------------------- system
 sys_lines=$(omarchy-update-available 2>/dev/null)
 sys_status=$?

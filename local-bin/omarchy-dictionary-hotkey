@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# SUPER+D: open the dictionary popup. If text is highlighted (primary
+# selection), prefill and refresh it with that word; otherwise toggle open
+# with an empty search box.
+set -uo pipefail
+
+selection=$(wl-paste --primary --no-newline 2>/dev/null || true)
+word=$(printf '%s' "$selection" | tr -d '\n' | xargs 2>/dev/null || true)
+# Only ever prefill a single word/token, not an arbitrary highlighted blob.
+word=$(printf '%s' "$word" | awk '{print $1}')
+
+if [ -n "$word" ]; then
+  payload=$(jq -n --arg word "$word" '{word: $word}')
+  omarchy shell shell summon alteringux.dictionary "$payload"
+else
+  omarchy shell shell toggle alteringux.dictionary "{}"
+fi

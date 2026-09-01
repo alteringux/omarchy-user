@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Regenerate the local word-list cache used for dictionary suggestions.
+set -euo pipefail
+
+CACHE_DIR="$HOME/.local/share/omarchy-dictionary"
+WORDS_FILE="$CACHE_DIR/words.txt"
+IDX_FILE="/usr/share/stardict/dic/dictd_www.dict.org_gcide.idx"
+
+mkdir -p "$CACHE_DIR"
+
+python3 -c "
+words = []
+with open('$IDX_FILE', 'rb') as f:
+    data = f.read()
+i, n = 0, len(data)
+while i < n:
+    end = data.index(b'\\0', i)
+    words.append(data[i:end].decode('utf-8', 'replace'))
+    i = end + 1 + 8
+print('\n'.join(sorted(set(words), key=str.lower)))
+" > "$WORDS_FILE"

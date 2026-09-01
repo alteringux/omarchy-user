@@ -1,9 +1,11 @@
 import QtQuick
 import QtQuick.Layouts
 import QtQuick.Shapes
+import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Watchlist overview popup: hero top/worst mover, a 52-week-range filter,
 // a card grid per tracked ticker (price, change, sparkline, 52w position),
@@ -18,6 +20,8 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
+  readonly property var guard: Kit.BugGuard.create("alteringux.stocks", function(argv) { Quickshell.execDetached(argv) })
+
   readonly property var watchlistQuotes: hostWidget ? hostWidget.watchlistQuotes : []
   readonly property var gainers: hostWidget ? hostWidget.gainers : []
   readonly property var losers: hostWidget ? hostWidget.losers : []
@@ -31,6 +35,38 @@ Panel {
 
   // Panel-local, not persisted: resets to FILTER_ALL each time the panel opens.
   property string filterMode: Model.FILTER_ALL
+
+  // Ticker autocomplete (see hostWidget.searchTickers / bin/omarchy-stocks-search).
+  // searchIndex is the keyboard-highlighted row, -1 = none (raw text is added
+  // on Enter instead).
+  readonly property var searchResults: hostWidget ? hostWidget.searchResults : []
+  property int searchIndex: -1
+  onSearchResultsChanged: searchIndex = -1
+
+  function addSuggestion(symbol) {
+    if (hostWidget) {
+      hostWidget.addTicker(symbol)
+      hostWidget.clearSearchResults()
+    }
+    addField.text = ""
+    root.searchIndex = -1
+  }
+
+  // Enter / the Add button: take the highlighted suggestion if there is one,
+  // otherwise add whatever was typed verbatim (lets you paste "VOD.L" etc.
+  // without waiting for the dropdown).
+  function commitAdd() {
+    if (root.searchIndex >= 0 && root.searchIndex < root.searchResults.length) {
+      root.addSuggestion(root.searchResults[root.searchIndex].symbol)
+      return
+    }
+    if (hostWidget) {
+      hostWidget.addTicker(addField.text)
+      hostWidget.clearSearchResults()
+    }
+    addField.text = ""
+    root.searchIndex = -1
+  }
 
   readonly property var filteredWatchlist: watchlistQuotes.filter(function (q) { return Model.passes52wFilter(q, root.filterMode) })
   readonly property var filteredGainers: gainers.slice(0, 5).filter(function (q) { return Model.passes52wFilter(q, root.filterMode) })
@@ -252,7 +288,7 @@ Panel {
                   font.bold: true
                 }
                 Text {
-                  text: modelData.ok ? ("$" + modelData.price.toFixed(2)) : "no data"
+                  text: modelData.ok ? Model.formatPrice(modelData.price, modelData.currency) : "no data"
                   color: root.barForeground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
@@ -331,28 +367,110 @@ Panel {
           font.pixelSize: Style.font.bodySmall
         }
 
-        Row {
+        Column {
           width: content.width
-          spacing: Style.space(8)
+          spacing: Style.space(6)
 
-          TextField {
-            id: addField
-            width: parent.width - addButton.implicitWidth - parent.spacing
-            placeholderText: "Add ticker (e.g. MSFT)"
-            foreground: root.barForeground
-            onAccepted: {
-              if (hostWidget) hostWidget.addTicker(text)
-              text = ""
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+
+            TextField {
+              id: addField
+              width: parent.width - addButton.implicitWidth - parent.spacing
+              placeholderText: "Add ticker — e.g. MSFT, or search “Commonwealth Bank”"
+              foreground: root.barForeground
+              onTextChanged: if (hostWidget) hostWidget.searchTickers(text)
+              // Arrow keys move the dropdown highlight; Esc clears it (and
+              // only then falls through to the panel's own Esc-to-close).
+              Keys.onPressed: function (event) {
+                if (event.key === Qt.Key_Down && root.searchResults.length > 0) {
+                  root.searchIndex = (root.searchIndex + 1) % root.searchResults.length
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Up && root.searchResults.length > 0) {
+                  root.searchIndex = (root.searchIndex - 1 + root.searchResults.length) % root.searchResults.length
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape && root.searchResults.length > 0) {
+                  if (hostWidget) hostWidget.clearSearchResults()
+                  root.searchIndex = -1
+                  event.accepted = true
+                }
+              }
+              onAccepted: root.commitAdd()
+            }
+            Button {
+              id: addButton
+              text: "Add"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: root.commitAdd()
             }
           }
-          Button {
-            id: addButton
-            text: "Add"
-            foreground: root.barForeground
-            bordered: true
-            onClicked: {
-              if (hostWidget) hostWidget.addTicker(addField.text)
-              addField.text = ""
+
+          // Autocomplete dropdown. Rendered inline in the column flow (it
+          // pushes Trending down) rather than as a floating popup, so the
+          // panel's Flickable can't clip it.
+          Column {
+            width: parent.width
+            spacing: Style.space(3)
+            visible: root.searchResults.length > 0
+
+            Repeater {
+              model: root.searchResults
+              delegate: Rectangle {
+                required property var modelData
+                required property int index
+                width: parent.width
+                height: suggestRow.implicitHeight + Style.space(10)
+                radius: Style.cornerRadius
+                color: index === root.searchIndex
+                  ? Util.alpha(root.barForeground, 0.16)
+                  : Util.alpha(root.barForeground, 0.05)
+                border.width: 1
+                border.color: Util.alpha(root.barForeground, 0.12)
+
+                RowLayout {
+                  id: suggestRow
+                  anchors.left: parent.left
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.leftMargin: Style.space(9)
+                  anchors.rightMargin: Style.space(9)
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: modelData.symbol
+                    color: root.barForeground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: true
+                  }
+                  Text {
+                    text: modelData.name
+                    color: root.barForeground
+                    opacity: 0.7
+                    elide: Text.ElideRight
+                    Layout.fillWidth: true
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                  Text {
+                    text: modelData.exchange
+                    color: root.barForeground
+                    opacity: 0.55
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  hoverEnabled: true
+                  onContainsMouseChanged: if (containsMouse) root.searchIndex = index
+                  onClicked: root.addSuggestion(modelData.symbol)
+                }
+              }
             }
           }
         }

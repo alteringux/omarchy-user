@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Speaks the current time aloud, humanised ("It's a quarter past four in the
+# afternoon"), via Piper TTS. Run again while speaking to stop.
+set -uo pipefail
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+
+if "$PIPER_TTS" --tag time --stop; then exit 0; fi
+
+ONES=(zero one two three four five six seven eight nine ten eleven twelve \
+  thirteen fourteen fifteen sixteen seventeen eighteen nineteen)
+TENS=(zero ten twenty thirty forty fifty)
+
+num2words() { # 0..59
+  local n=$1
+  if (( n < 20 )); then
+    printf '%s' "${ONES[n]}"
+  else
+    local t=$(( n / 10 )) o=$(( n % 10 ))
+    if (( o == 0 )); then printf '%s' "${TENS[t]}"
+    else printf '%s-%s' "${TENS[t]}" "${ONES[o]}"; fi
+  fi
+}
+
+H24=$(date +%-H)
+M=$(date +%-M)
+
+# 12-hour clock hour, as a word
+h12=$(( H24 % 12 )); (( h12 == 0 )) && h12=12
+
+# "minutes" reads naturally only for non-multiples of five (people say
+# "twenty past six" but "eight minutes past six"); "one minute", not "one minutes".
+mins_word() { # $1 = minute count being spoken
+  local n=$1
+  if (( n % 5 == 0 )); then printf ''
+  elif (( n == 1 )); then printf ' minute'
+  else printf ' minutes'; fi
+}
+
+if (( M == 0 )); then
+  when="$(num2words "$h12") o'clock"
+elif (( M <= 30 )); then
+  case $M in
+    15) frac="a quarter past" ;;
+    30) frac="half past" ;;
+    *)  frac="$(num2words "$M")$(mins_word "$M") past" ;;
+  esac
+  when="$frac $(num2words "$h12")"
+else
+  nexth=$(( (h12 % 12) + 1 ))
+  rem=$(( 60 - M ))
+  case $rem in
+    15) frac="a quarter to" ;;
+    *)  frac="$(num2words "$rem")$(mins_word "$rem") to" ;;
+  esac
+  when="$frac $(num2words "$nexth")"
+fi
+
+if   (( H24 >= 5  && H24 < 12 )); then part="in the morning"
+elif (( H24 >= 12 && H24 < 17 )); then part="in the afternoon"
+elif (( H24 >= 17 && H24 < 21 )); then part="in the evening"
+else part="at night"; fi
+
+# "noon" / "midnight" read better than "twelve o'clock ..."
+if (( M == 0 && H24 == 12 )); then TEXT="It's noon."
+elif (( M == 0 && H24 == 0 )); then TEXT="It's midnight."
+else TEXT="It's $when $part."
+fi
+
+printf '%s' "$TEXT" | "$PIPER_TTS" --tag time --voice "$VOICE"

@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Dashboard bar widget: sits in the bar's center section next to the clock.
 // Owns a background refresh timer that shells out to bin/omarchy-dashboard-refresh
@@ -19,34 +20,21 @@ BarWidget {
   readonly property string home: Quickshell.env("HOME")
   readonly property string pluginDir: home + "/.config/omarchy/plugins/alteringux.dashboard"
   readonly property string refreshScript: pluginDir + "/bin/omarchy-dashboard-refresh"
-  // Deliberately NOT inside the plugin's own source directory: that tree is
-  // watched by the shell's plugin-file watcher, and this file is rewritten
-  // repeatedly by the refresh/note scripts. Writing it there would trigger
-  // a "local plugin changed" reload every refresh, tearing down an open
-  // panel. Keep it under ~/.local/state/omarchy/ instead (same convention
-  // alteringux.pomodoro uses).
-  readonly property string stateDir: home + "/.local/state/omarchy/"
-  readonly property string statePath: stateDir + "dashboard.json"
 
-  property var state: Model.defaultState()
+  // dashboard.json lives under ~/.local/state/omarchy/ (NOT in the plugin's own
+  // source tree — the shell's plugin-file watcher would reload the widget on
+  // every write) and is rewritten by bin/omarchy-dashboard-{refresh,note,track},
+  // so the Store watches it for outside changes rather than owning it.
+  property alias state: stateStore.value
   property bool refreshing: false
 
   readonly property bool hasUpdates: state.system.items.length > 0
 
-  FileView {
-    id: stateFile
-    path: root.statePath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.state = Model.parseState(text())
-    onLoadFailed: root.state = Model.defaultState()
-    onFileChanged: reload()
-  }
-
-  Process {
-    id: ensureDirsProc
-    command: ["mkdir", "-p", root.stateDir]
-    running: false
+  Kit.Store {
+    id: stateStore
+    fileName: "dashboard.json"
+    watch: true
+    parse: function (raw) { return Model.parseState(raw) }
   }
 
   Process {
@@ -54,12 +42,14 @@ BarWidget {
     command: ["bash", root.refreshScript]
     running: false
     onRunningChanged: root.refreshing = running
-    onExited: stateFile.reload()
+    onExited: stateStore.reload()
   }
 
   function runRefresh() {
-    if (refreshProc.running) return
-    refreshProc.running = true
+    guard.run("runRefresh", function() {
+      if (refreshProc.running) return
+      refreshProc.running = true
+    })
   }
 
   Timer {
@@ -70,13 +60,9 @@ BarWidget {
     onTriggered: root.runRefresh()
   }
 
-  Component.onCompleted: {
-    ensureDirsProc.running = true
-    Qt.callLater(function() {
-      stateFile.reload()
-      root.runRefresh()
-    })
-  }
+  readonly property var guard: Kit.BugGuard.create("alteringux.dashboard", function(argv) { Quickshell.execDetached(argv) })
+
+  Component.onCompleted: root.runRefresh()
 
   // ---- Popup panel. Shape contract for shell.summon/hide/toggle routing:
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget root.
@@ -122,7 +108,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "🗞️"
+    text: ""
     tooltipText: "Dashboard"
 
     onPressed: function(b) {

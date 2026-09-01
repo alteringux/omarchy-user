@@ -1,0 +1,194 @@
+#!/bin/bash
+
+# omarchy:summary=Catch a bug in a user shell plugin and hand it to a CLI agent to diagnose/fix
+# omarchy:args=--plugin <id> --source <guard|script|qml-log> [--summary <s>] [--message <s>] [--stack <s>]
+# omarchy:hidden=true
+#
+# The three plugin bug sources (guarded JS exceptions, bin/ script failures,
+# omarchy-shell journal errors) all funnel through here. This script only
+# decides whether a report is worth making, records it, and launches the
+# default coding agent against Matt Pocock's diagnosing-bugs skill. It never
+# stages or commits anything -- every edit the agent makes stays a plain
+# working-tree change you review with `git -C ~/.config/omarchy diff`.
+
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/plugin-bugs"
+SEEN_DIR="$STATE_DIR/seen"
+LOCK_FILE="$STATE_DIR/agent.lock"
+KILL_SWITCH="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/plugin-bug-report-off"
+OMARCHY_CONFIG_DIR="$HOME/.config/omarchy"
+COOLDOWN=${PLUGIN_BUG_COOLDOWN:-1800}   # per-signature quiet window, seconds
+DIAG_SKILL="diagnosing-bugs"
+
+plugin=""
+source_kind=""
+summary=""
+message=""
+stack=""
+
+while (($#)); do
+  case "$1" in
+    --plugin)  plugin=${2:?--plugin needs a value}; shift 2 ;;
+    --source)  source_kind=${2:?--source needs a value}; shift 2 ;;
+    --summary) summary=${2:-}; shift 2 ;;
+    --message) message=${2:-}; shift 2 ;;
+    --stack)   stack=${2:-}; shift 2 ;;
+    *) echo "omarchy-plugin-bug-report: unexpected arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+[[ -n $plugin ]] || { echo "omarchy-plugin-bug-report: --plugin is required" >&2; exit 2; }
+[[ -n $source_kind ]] || { echo "omarchy-plugin-bug-report: --source is required" >&2; exit 2; }
+
+# Kill switch. Checked per call, not at startup, so a toggle takes effect
+# immediately for guard/script callers as well as the journal watcher.
+[[ -e $KILL_SWITCH ]] && exit 0
+
+# Anything not already on stdin still gives us a body from --message/--stack.
+body=""
+if [[ ! -t 0 ]]; then
+  body=$(cat)
+fi
+[[ -z $body && -n $message ]] && body="$message"
+[[ -n $stack ]] && body+=$'\n\n---- stack ----\n'"$stack"
+
+# Signature: plugin + source + the first meaningful line, whitespace- and
+# digit-normalised so "TypeError at line 41" and "... line 58" collapse to one
+# report and a crash loop does not spawn an agent per tick.
+sig_input="$plugin|$source_kind|${summary:-${body%%$'\n'*}}"
+sig_norm=$(printf '%s' "$sig_input" | tr 'A-Z' 'a-z' | sed -E 's/0x[0-9a-f]+/0xN/g; s/[0-9]+/N/g; s/[[:space:]]+/ /g')
+sig=$(printf '%s' "$sig_norm" | sha1sum | cut -c1-12)
+
+mkdir -p "$SEEN_DIR"
+marker="$SEEN_DIR/$sig"
+now=$EPOCHSECONDS
+if [[ -f $marker ]]; then
+  last=$(<"$marker")
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  if ((now - last < COOLDOWN)); then
+    exit 0
+  fi
+fi
+printf '%s\n' "$now" >"$marker"
+
+# ---- Record the bundle -------------------------------------------------------
+ts=$(date -u +%Y%m%dT%H%M%SZ)
+bundle="$STATE_DIR/${ts}-${plugin}-${sig}.md"
+git_rev=$(git -C "$OMARCHY_CONFIG_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+journal_tail=$(journalctl -t omarchy-shell -n 40 --no-pager -o cat 2>/dev/null)
+[[ -z $journal_tail ]] && journal_tail=$(journalctl _COMM=quickshell -n 40 --no-pager -o cat 2>/dev/null)
+
+{
+  echo "# Plugin bug report: $plugin"
+  echo
+  echo "- when: $ts"
+  echo "- source: $source_kind"
+  echo "- signature: $sig"
+  echo "- omarchy config rev: $git_rev"
+  echo "- plugin dir: ~/.config/omarchy/plugins/$plugin"
+  [[ -n $summary ]] && { echo "- summary: $summary"; }
+  echo
+  echo "## Captured error"
+  echo
+  echo '```'
+  printf '%s\n' "${body:-(no body captured)}"
+  echo '```'
+  echo
+  echo "## Recent omarchy-shell journal (tail 40, redact secrets before sharing)"
+  echo
+  echo '```'
+  printf '%s\n' "${journal_tail:-(journal unavailable)}"
+  echo '```'
+} >"$bundle"
+
+# ---- Notify ---------------------------------------------------------------
+notify() {
+  command -v omarchy-notification-send >/dev/null 2>&1 || return 0
+  omarchy-notification-send -u normal -g "󱠡" "$@" >/dev/null 2>&1 || true
+}
+
+# ---- Launch the agent ---------------------------------------------------------
+# One agent at a time. The flock is acquired and held by the detached runner
+# below (a lock taken here would release the moment this script returns). A
+# second bug while an agent runs is still recorded above; it just does not get
+# a concurrent agent.
+agent_bin=$(command -v claude || true)
+if [[ -z $agent_bin ]]; then
+  notify "Bug caught in $plugin" "No 'claude' CLI on PATH; bundle saved."
+  exit 0
+fi
+
+agent_log="${bundle%.md}.agent.log"
+agent_name="plugin-bug-fixer"
+[[ -f "$HOME/.claude/agents/$agent_name.md" ]] || agent_name=""
+
+prompt=$(cat <<PROMPT
+/$DIAG_SKILL
+
+A bug was caught automatically in one of my Omarchy shell plugins. Diagnose it
+and, only if the fix is clear and low-risk, fix it.
+
+- plugin id: $plugin
+- plugin source: ~/.config/omarchy/plugins/$plugin
+- how it was caught: $source_kind
+- captured bundle (error text + recent omarchy-shell journal): $bundle
+
+Build a tight red-capable feedback loop first (usually \`node --test\` against
+the plugin's Model.js / *.js under test/), reproduce and minimise, rank
+hypotheses, instrument, then fix with a regression test where a correct seam
+exists.
+
+Constraints:
+- Work only inside ~/.config/omarchy/plugins/$plugin and its test/ and bin/.
+- Do NOT run 'git add', 'git commit', 'git stash', or 'git reset' -- leave
+  every change in the working tree.
+- Do not edit BugGuard.js or the omarchy-plugin-bug-* / plugin-bin-guard.sh
+  harness.
+- If the cause is unclear or the fix is risky, stop and append a
+  "## Findings (agent)" section to $bundle instead of guessing.
+- When done, append a "## Outcome (agent)" section to $bundle.
+PROMPT
+)
+
+notify "Bug caught in $plugin" "Diagnosing with claude ($source_kind)…"
+
+{
+  echo "=== omarchy-plugin-bug-report $(date -Is) ==="
+  echo "plugin=$plugin source=$source_kind sig=$sig"
+  echo "bundle=$bundle"
+  echo "=== agent output ==="
+} >"$agent_log"
+
+runner='
+  config_dir=$1; agent_bin=$2; agent_log=$3; prompt=$4; plugin=$5; lock=$6; agent_name=$7
+  exec 9>"$lock"
+  if ! flock -n 9; then
+    echo "=== another bug agent is already running; skipped ===" >>"$agent_log"
+    command -v omarchy-notification-send >/dev/null 2>&1 && \
+      omarchy-notification-send -u normal -g "󱠡" "Bug caught in $plugin" \
+        "Recorded; an earlier bug agent is still running." >/dev/null 2>&1 || true
+    exit 0
+  fi
+  cd "$config_dir" || exit 1
+  cmd=("$agent_bin" -p "$prompt" --dangerously-skip-permissions)
+  [ -n "$agent_name" ] && cmd+=(--agent "$agent_name")
+  "${cmd[@]}" >>"$agent_log" 2>&1
+  status=$?
+  echo "=== agent exited: $status ===" >>"$agent_log"
+  command -v omarchy-notification-send >/dev/null 2>&1 || exit 0
+  diffstat=$(git -C "$config_dir" diff --stat 2>/dev/null | tail -1)
+  if [ "$status" -eq 0 ]; then
+    omarchy-notification-send -u normal -g "󱠡" \
+      "Bug agent done: $plugin" \
+      "${diffstat:-no file changes} — review with: git -C ~/.config/omarchy diff" >/dev/null 2>&1 || true
+  else
+    omarchy-notification-send -u critical -g "󱠡" \
+      "Bug agent failed: $plugin (exit $status)" "See $agent_log" >/dev/null 2>&1 || true
+  fi
+'
+setsid bash -c "$runner" _ \
+  "$OMARCHY_CONFIG_DIR" "$agent_bin" "$agent_log" "$prompt" "$plugin" "$LOCK_FILE" "$agent_name" >/dev/null 2>&1 &
+
+disown
+exit 0

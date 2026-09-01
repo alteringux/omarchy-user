@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# omarchy:summary=Talk to your Open Executive (thin client over the FastAPI backend)
+# omarchy:args=[chat <msg> | repl | ask | today | session [--reset]] [--new]
+#
+# A thin client for the Open Executive backend. It does no agent work itself —
+# it POSTs to /chat and renders the SSE stream, and GETs /today. Conversation
+# continuity is kept in a local session-id file so follow-ups stay in context.
+#
+# Config: ~/.config/omarchy-executive/config  (OE_API, OE_CALLER_EMAIL, and the
+# x-api-key secret — see that file's comments).
+
+set -uo pipefail
+
+CONFIG="${OMARCHY_EXECUTIVE_CONFIG:-$HOME/.config/omarchy-executive/config}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-executive"
+SESSION_FILE="$STATE_DIR/session"
+
+die() { printf '%s\n' "omarchy-executive: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+have curl || die "curl not found"
+have jq   || die "jq not found"
+
+case "${1:-}" in
+  -h|--help|help)
+    sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+    exit 0
+    ;;
+esac
+
+# --- config ---------------------------------------------------------------
+OE_API="https://openexec-api-dev.fly.dev"
+OE_CALLER_EMAIL=""
+OE_ENV_FILE=""
+BACKEND_SHARED_SECRET="${BACKEND_SHARED_SECRET:-}"
+# shellcheck source=/dev/null
+[[ -r "$CONFIG" ]] && source "$CONFIG"
+
+# Fall back to reading the secret from a repo .env at call time (never copied).
+if [[ -z "$BACKEND_SHARED_SECRET" && -n "$OE_ENV_FILE" && -r "$OE_ENV_FILE" ]]; then
+  BACKEND_SHARED_SECRET="$(
+    grep -E '^[[:space:]]*BACKEND_SHARED_SECRET=' "$OE_ENV_FILE" | tail -n1 |
+      sed -E 's/^[^=]*=//; s/^"(.*)"$/\1/; s/^'\''(.*)'\''$/\1/'
+  )"
+fi
+[[ -n "$BACKEND_SHARED_SECRET" ]] || die "no BACKEND_SHARED_SECRET (set it in $CONFIG or point OE_ENV_FILE at a readable .env)"
+
+mkdir -p "$STATE_DIR"
+
+# --- helpers -------------------------------------------------------------
+auth_headers=(-H "x-api-key: $BACKEND_SHARED_SECRET")
+[[ -n "$OE_CALLER_EMAIL" ]] && auth_headers+=(-H "x-caller-email: $OE_CALLER_EMAIL")
+
+session_id() { [[ -f "$SESSION_FILE" ]] && cat "$SESSION_FILE" || true; }
+save_session() { [[ -n "${1:-}" ]] && printf '%s' "$1" > "$SESSION_FILE"; }
+reset_session() { rm -f "$SESSION_FILE"; }
+
+# Stream one chat turn. Prints the assistant text to stdout as it arrives.
+# Updates the stored session id. Returns non-zero on a backend error event.
+stream_chat() {
+  local msg="$1" sid rc=0 first=1 body typ hdr got=0
+  sid="$(session_id)"
+  body="$(jq -nc --arg m "$msg" --arg s "$sid" \
+    '{message:$m} + (if $s == "" then {} else {session_id:$s} end)')"
+  hdr="$(mktemp)"
+
+  while IFS= read -r line; do
+    [[ "$line" == data:\ * ]] || continue
+    payload="${line#data: }"
+    typ="$(jq -r 'try .type // empty' <<<"$payload" 2>/dev/null)" || continue
+    case "$typ" in
+      chunk)
+        got=1
+        (( first )) && { printf '\r\033[K' >&2; first=0; }
+        printf '%s' "$(jq -rj '.content' <<<"$payload")"
+        ;;
+      thinking)
+        (( first )) && printf '\r\033[K\033[2m…thinking\033[0m' >&2
+        ;;
+      error)
+        printf '\r\033[K' >&2
+        printf '\n[backend error] %s\n' "$(jq -r 'try .message // "unknown"' <<<"$payload")" >&2
+        rc=1
+        ;;
+      done)
+        got=1
+        local ns; ns="$(jq -r 'try .session_id // empty' <<<"$payload")"
+        save_session "$ns"
+        ;;
+    esac
+  done < <(
+    curl -sN --max-time 180 -D "$hdr" "${auth_headers[@]}" \
+      -H 'content-type: application/json' \
+      -d "$body" "$OE_API/chat"
+  )
+  if (( ! got && ! rc )); then
+    local status
+    status="$(awk 'NR==1{print $2" "$3" "$4}' "$hdr" 2>/dev/null)"
+    rm -f "$hdr"
+    printf '\r\033[K' >&2
+    printf '[no response from %s — HTTP %s]\n' "$OE_API" "${status:-?}" >&2
+    [[ "$status" == 401* ]] && printf 'Check the x-api-key secret in %s\n' "$CONFIG" >&2
+    return 1
+  fi
+  rm -f "$hdr"
+  printf '\n'
+  return "$rc"
+}
+
+# --- subcommands -------------------------------------------------------
+cmd_chat() {
+  local msg="$*"
+  [[ -n "$msg" ]] || die "usage: omarchy-executive chat <message>"
+  stream_chat "$msg"
+}
+
+cmd_repl() {
+  local input
+  printf '\033[1mOpen Executive\033[0m  —  %s\n' "$OE_API"
+  [[ -n "$(session_id)" ]] && printf '\033[2mcontinuing session %s  (·new to reset, ·q to quit)\033[0m\n' "$(session_id)" \
+                           || printf '\033[2mnew conversation  (·new to reset, ·q to quit)\033[0m\n'
+  while true; do
+    if have gum; then
+      input="$(gum input --placeholder 'Message the Executive…' --width 0 --prompt '❯ ')" || break
+    else
+      printf '\033[36m❯ \033[0m'; IFS= read -r input || break
+    fi
+    case "$input" in
+      ""|"·q"|"·quit"|"/q"|"/quit") break ;;
+      "·new"|"/new") reset_session; printf '\033[2m(session reset)\033[0m\n'; continue ;;
+    esac
+    printf '\033[2m…\033[0m\r'
+    stream_chat "$input"
+    printf '\n'
+  done
+}
+
+cmd_ask() {
+  local q ans
+  if [[ $# -gt 0 ]]; then
+    q="$*"
+  elif have gum; then
+    q="$(gum input --placeholder 'Ask the Executive…' --width 0)" || exit 0
+  else
+    printf 'Ask the Executive: '; IFS= read -r q || exit 0
+  fi
+  [[ -n "$q" ]] || exit 0
+  ans="$(stream_chat "$q")" || true
+  ans="$(printf '%s' "$ans" | sed '/^[[:space:]]*$/d')"
+  printf '%s\n' "$ans"
+  have notify-send && notify-send -a "Open Executive" "Executive" "${ans:0:400}"
+}
+
+cmd_today() {
+  local out
+  out="$(curl -s -w $'\n%{http_code}' "${auth_headers[@]}" "$OE_API/today")"
+  local code="${out##*$'\n'}" json="${out%$'\n'*}"
+  if [[ "$code" != 200 ]]; then
+    printf '[/today returned HTTP %s]\n' "$code" >&2
+    [[ "$code" == 401 ]] && printf 'Check the x-api-key secret in %s\n' "$CONFIG" >&2
+    return 1
+  fi
+  jq '{as_of, headline: (.headline // .summary // empty), items: (.items // .briefing // .cards // .)}' <<<"$json"
+}
+
+cmd_session() {
+  case "${1:-}" in
+    --reset|reset|clear) reset_session; echo "session cleared" ;;
+    "") local s; s="$(session_id)"; echo "${s:-(none)}" ;;
+    *) die "usage: omarchy-executive session [--reset]" ;;
+  esac
+}
+
+# --- dispatch --------------------------------------------------------
+main() {
+  local sub="${1:-repl}"; shift || true
+  # global --new anywhere
+  local a args=()
+  for a in "$@"; do
+    [[ "$a" == "--new" ]] && { reset_session; continue; }
+    args+=("$a")
+  done
+  set -- "${args[@]}"
+
+  case "$sub" in
+    chat)          cmd_chat "$@" ;;
+    repl|"" )      cmd_repl ;;
+    ask)           cmd_ask "$@" ;;
+    today)         cmd_today ;;
+    session)       cmd_session "$@" ;;
+    *) die "unknown command: $sub (try: chat, repl, ask, today, session)" ;;
+  esac
+}
+
+main "$@"

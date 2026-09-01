@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Prefix-search the cached word list for dictionary suggestions.
+# Usage: omarchy-dictionary-suggest <prefix> [limit]
+set -euo pipefail
+
+CACHE_DIR="$HOME/.local/share/omarchy-dictionary"
+WORDS_FILE="$CACHE_DIR/words.txt"
+IDX_FILE="/usr/share/stardict/dic/dictd_www.dict.org_gcide.idx"
+
+prefix="${1:-}"
+limit="${2:-8}"
+
+if [ ! -f "$WORDS_FILE" ] && [ -f "$IDX_FILE" ]; then
+  mkdir -p "$CACHE_DIR"
+  omarchy-dictionary-rebuild-cache
+fi
+
+if [ ! -f "$WORDS_FILE" ]; then
+  echo "[]"
+  exit 0
+fi
+
+if [ -z "$prefix" ]; then
+  echo "[]"
+  exit 0
+fi
+
+needle=$(printf '%s' "$prefix" | tr '[:upper:]' '[:lower:]' | sed 's/[.[\*^$/]/\\&/g')
+
+{ LC_ALL=C grep -i "^${needle}" "$WORDS_FILE" || true; } \
+  | head -n "$limit" \
+  | jq -R -s 'split("\n") | map(select(length > 0))'

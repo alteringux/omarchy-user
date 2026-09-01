@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+# Hide / unhide / auto-reap the active window, keeping its process (and all its
+# in-memory state) alive.
+#
+# There is NO "reopen a closed app with its state" in Hyprland/Omarchy: once a
+# process exits, its unsaved state is gone. The only way to get that behaviour is
+# to never close the window -- park it in the "scratchpad" special workspace
+# instead, then pull it back when you want it.
+#
+#   SUPER + W          hide the active window        (this script, no args)
+#   SUPER + SHIFT + S  bring the last hidden one back (this script, --unhide)
+#   SUPER + SHIFT + W  really close the window       (Hyprland killactive)
+#   CTRL + ALT + DEL   hide EVERY window at once      (this script, --hide-all)
+#
+# --hide-all parks every non-special window in the scratchpad (each with its
+# own 5-min reaper and audio mute, exactly like a single SUPER + W), then drops
+# you on a clean workspace 1. Restore them one at a time with SUPER + SHIFT + S.
+#
+# A hidden window is auto-closed OMARCHY_HIDE_TIMEOUT seconds (default 300 = 5
+# min) after being hidden, UNLESS it has been unhidden -- or manually dragged
+# out of the scratchpad -- by then.
+#
+# Audio: when a window is hidden, any of its (or its child processes') audio
+# streams that are currently playing unmuted are muted, so a parked YouTube /
+# music tab goes silent. Bringing the window back (--unhide, a manual drag out,
+# or it being reaped) unmutes exactly the streams this script muted. Best-effort:
+# needs `pactl` with JSON support + `jq`; silently does nothing otherwise.
+#
+# Env overrides (used by the test suite):
+#   OMARCHY_HIDE_TIMEOUT     seconds before auto-close     (default 300)
+#   OMARCHY_HIDE_STATE       state file of hidden windows   (default under $XDG_RUNTIME_DIR)
+#   OMARCHY_HIDE_MUTE_STATE  state file of muted streams    (default under $XDG_RUNTIME_DIR)
+#   OMARCHY_HIDE_NO_AUDIO    set to 1 to disable mute/unmute entirely
+#   HYPRCTL                  hyprctl command               (default "hyprctl")
+#   PACTL                    pactl command                 (default "pactl")
+
+set -euo pipefail
+
+TIMEOUT="${OMARCHY_HIDE_TIMEOUT:-300}"
+HYPRCTL="${HYPRCTL:-hyprctl}"
+PACTL="${PACTL:-pactl}"
+STATE_FILE="${OMARCHY_HIDE_STATE:-${XDG_RUNTIME_DIR:-/tmp}/omarchy-hidden-windows}"
+MUTE_STATE_FILE="${OMARCHY_HIDE_MUTE_STATE:-${XDG_RUNTIME_DIR:-/tmp}/omarchy-hidden-window-mutes}"
+
+SCRATCH="special:scratchpad"
+
+# --- state file: lines of "<epoch>\t<address>", oldest first -----------------
+
+_state_addrs() {
+  [ -f "$STATE_FILE" ] || return 0
+  awk -F'\t' 'NF>=2 {print $2}' "$STATE_FILE"
+}
+
+_state_remove() {
+  local addr=$1 tmp
+  [ -f "$STATE_FILE" ] || return 0
+  tmp=$(mktemp)
+  awk -F'\t' -v a="$addr" 'NF>=2 && $2!=a' "$STATE_FILE" > "$tmp" || true
+  mv "$tmp" "$STATE_FILE"
+}
+
+_state_add() {
+  local addr=$1
+  mkdir -p "$(dirname "$STATE_FILE")"
+  _state_remove "$addr" # drop any stale line for this address first
+  printf '%s\t%s\n' "$(date +%s)" "$addr" >> "$STATE_FILE"
+}
+
+# --- per-window audio mute (best-effort; needs pactl JSON + jq) -------------
+#
+# mute-state file: lines of "<address>\t<sink-input-index>", one per stream this
+# script muted. We only ever unmute streams we recorded here, so a stream the
+# user muted by hand is left exactly as they left it.
+
+_audio_enabled() {
+  [ "${OMARCHY_HIDE_NO_AUDIO:-0}" = 1 ] && return 1
+  command -v "$PACTL" >/dev/null 2>&1 || return 1
+  command -v jq >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# All descendant PIDs of $1, including $1 itself, one per line. Browsers emit
+# audio from a child process, so the whole subtree has to be considered.
+_pid_tree() {
+  local pid=$1 kid
+  [ -n "$pid" ] || return 0
+  printf '%s\n' "$pid"
+  for kid in $(pgrep -P "$pid" 2>/dev/null || true); do
+    _pid_tree "$kid"
+  done
+}
+
+# stdin: newline-separated PIDs. stdout: indexes of sink-inputs owned by one of
+# those PIDs that are currently NOT muted.
+_unmuted_sink_inputs_for_pids() {
+  local pids
+  pids=$(cat)
+  [ -n "$pids" ] || return 0
+  "$PACTL" -f json list sink-inputs 2>/dev/null | jq -r --arg pids "$pids" '
+    ($pids | split("\n") | map(select(length > 0))) as $p
+    | .[]
+    | select(.mute | not)
+    | (.properties."application.process.id") as $pid
+    | select($pid != null and ($p | index($pid)) != null)
+    | .index
+  ' 2>/dev/null || true
+}
+
+_mute_state_add() {
+  mkdir -p "$(dirname "$MUTE_STATE_FILE")"
+  printf '%s\t%s\n' "$1" "$2" >> "$MUTE_STATE_FILE"
+}
+
+# Print (and delete) every sink-input index recorded for address $1.
+_mute_state_take() {
+  local addr=$1 tmp
+  [ -f "$MUTE_STATE_FILE" ] || return 0
+  awk -F'\t' -v a="$addr" 'NF>=2 && $1==a {print $2}' "$MUTE_STATE_FILE"
+  tmp=$(mktemp)
+  awk -F'\t' -v a="$addr" 'NF>=2 && $1!=a' "$MUTE_STATE_FILE" > "$tmp" || true
+  mv "$tmp" "$MUTE_STATE_FILE"
+}
+
+# Mute every unmuted stream of window $1 (Hyprland pid $2); record what we muted.
+_mute_window_audio() {
+  local addr=$1 pid=$2 id
+  _audio_enabled || return 0
+  [ -n "$pid" ] && [ "$pid" != "null" ] || return 0
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    "$PACTL" set-sink-input-mute "$id" 1 2>/dev/null || continue
+    _mute_state_add "$addr" "$id"
+  done < <(_pid_tree "$pid" | _unmuted_sink_inputs_for_pids)
+}
+
+# Unmute exactly the streams _mute_window_audio recorded for window $1.
+_unmute_window_audio() {
+  local addr=$1 id
+  _audio_enabled || { _mute_state_take "$addr" >/dev/null 2>&1 || true; return 0; }
+  while IFS= read -r id; do
+    [ -n "$id" ] || continue
+    "$PACTL" set-sink-input-mute "$id" 0 2>/dev/null || true
+  done < <(_mute_state_take "$addr")
+}
+
+# --- helpers (mockable via $HYPRCTL) ---------------------------------------
+
+# This Omarchy's Hyprland (0.56+) evaluates `hyprctl dispatch` as Lua: the old
+# `hyprctl dispatch movetoworkspacesilent special:...,address:...` string form
+# errors out. Dispatchers now go through the hl.dsp.* DSL, targeting a specific
+# window with `{ window = "address:0x..." }`.
+_dispatch() {
+  "$HYPRCTL" dispatch "$1"
+}
+
+_window_workspace() {
+  local addr=$1
+  "$HYPRCTL" -j clients | jq -r --arg a "$addr" \
+    '.[] | select(.address==$a) | .workspace.name' 2>/dev/null
+}
+
+# Echo "close" if the window still exists AND is still parked in the
+# scratchpad; "skip" otherwise (unhidden, dragged out, or already gone).
+reap_decision() {
+  local addr=$1
+  if [ "$(_window_workspace "$addr")" = "$SCRATCH" ]; then
+    echo close
+  else
+    echo skip
+  fi
+}
+
+# Echo the newest still-hidden address, or nothing. Prunes stale entries.
+pick_last_hidden() {
+  local addr
+  while IFS= read -r addr; do
+    [ -n "$addr" ] || continue
+    if [ "$(_window_workspace "$addr")" = "$SCRATCH" ]; then
+      echo "$addr"
+      return 0
+    fi
+    _state_remove "$addr"
+  done < <(_state_addrs | tac)
+  return 0
+}
+
+# --- actions -------------------------------------------------------------
+
+do_reap() {
+  local addr=${1:-}
+  [ -n "$addr" ] || { echo "reap: missing address" >&2; exit 2; }
+  sleep "$TIMEOUT"
+  if [ "$(reap_decision "$addr")" = close ]; then
+    _dispatch "hl.dsp.window.close({ window = \"address:$addr\" })" || true
+    _mute_state_take "$addr" >/dev/null 2>&1 || true # process is gone; just forget
+  else
+    _unmute_window_audio "$addr" || true # came back some other way -> restore sound
+  fi
+  _state_remove "$addr"
+}
+
+do_hide() {
+  local info addr pid
+  info=$("$HYPRCTL" -j activewindow)
+  addr=$(printf '%s' "$info" | jq -r '.address // empty')
+  pid=$(printf '%s' "$info" | jq -r '.pid // empty')
+  [ -n "$addr" ] || exit 0
+  _dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$SCRATCH\", follow = false })"
+  _state_add "$addr"
+  _mute_window_audio "$addr" "$pid"
+  # No desktop notification -- hiding a window is silent by design.
+  # Detach the reaper so it outlives this keybinding invocation.
+  setsid -f "$0" --reap "$addr" >/dev/null 2>&1 || true
+}
+
+do_hide_all() {
+  local row addr pid
+  # Every window that isn't already parked in a special workspace.
+  "$HYPRCTL" -j clients \
+    | jq -c '.[] | select((.workspace.name // "") | startswith("special:") | not) | {address, pid}' \
+    | while IFS= read -r row; do
+        addr=$(printf '%s' "$row" | jq -r '.address // empty')
+        pid=$(printf '%s' "$row" | jq -r '.pid // empty')
+        [ -n "$addr" ] || continue
+        _dispatch "hl.dsp.window.move({ window = \"address:$addr\", workspace = \"$SCRATCH\", follow = false })"
+        _state_add "$addr"
+        _mute_window_audio "$addr" "$pid"
+        setsid -f "$0" --reap "$addr" >/dev/null 2>&1 || true
+      done
+  # Land on a clean workspace 1, like omarchy-hyprland-window-close-all does.
+  "$HYPRCTL" dispatch 'hl.dsp.focus({ workspace = "1" })' >/dev/null 2>&1 \
+    || "$HYPRCTL" dispatch workspace 1 >/dev/null 2>&1 || true
+}
+
+do_unhide() {
+  local current picked
+  current=$("$HYPRCTL" -j activeworkspace | jq -r '.name')
+  picked=$(pick_last_hidden)
+  if [ -z "$picked" ]; then
+    # Nothing parked in the scratchpad -- exit quietly, no notification.
+    exit 0
+  fi
+  # follow = true so focus jumps to the window on its new workspace.
+  _dispatch "hl.dsp.window.move({ window = \"address:$picked\", workspace = \"$current\", follow = true })"
+  _state_remove "$picked"
+  _unmute_window_audio "$picked"
+}
+
+# Let the test suite source this file for its helpers without running anything.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-hide}" in
+    --reap)     do_reap "${2:-}" ;;
+    --unhide)   do_unhide ;;
+    --hide-all) do_hide_all ;;
+    hide | "")  do_hide ;;
+    *) echo "usage: $(basename "$0") [--unhide | --hide-all | --reap <address>]" >&2; exit 2 ;;
+  esac
+fi

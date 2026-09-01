@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Toggle the omarchy.clock widget in the Omarchy bar's center section.
+# shell.json hot-reloads on save, so no restart is needed.
+set -euo pipefail
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+CLOCK='{
+  "id": "omarchy.clock",
+  "format": "dddd HH:mm",
+  "formatAlt": "d MMMM '\''W'\''ww yyyy",
+  "verticalFormat": "HH\n—\nmm"
+}'
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+if jq -e '.bar.layout.center | map(.id) | index("omarchy.clock")' "$CONFIG" >/dev/null; then
+  # Present -> remove it
+  jq '.bar.layout.center |= map(select(.id != "omarchy.clock"))' "$CONFIG" >"$tmp"
+else
+  # Absent -> insert right after omarchy.indicators (or at the front)
+  jq --argjson clock "$CLOCK" '
+    .bar.layout.center as $c
+    | (($c | map(.id) | index("omarchy.indicators")) // -1) as $i
+    | .bar.layout.center = ($c[0:$i+1] + [$clock] + $c[$i+1:])
+  ' "$CONFIG" >"$tmp"
+fi
+
+mv "$tmp" "$CONFIG"
+trap - EXIT

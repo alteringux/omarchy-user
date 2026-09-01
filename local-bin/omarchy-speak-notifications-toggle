@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Toggle spoken notifications on/off. Flips a state file that the
+# omarchy-speak-notifications daemon re-reads on every notification, so no
+# restart is needed. Also starts the daemon if it isn't running yet.
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-notifications"
+STATE_FILE="$STATE_DIR/state"
+PIDFILE="$STATE_DIR/daemon.pid"
+mkdir -p "$STATE_DIR"
+
+# Default is ON, so a missing/blank state file counts as "on".
+current="on"
+[[ -f "$STATE_FILE" ]] && [[ "$(tr -d '[:space:]' < "$STATE_FILE" | tr '[:upper:]' '[:lower:]')" == "off" ]] && current="off"
+
+if [[ "$current" == "on" ]]; then
+  echo "off" > "$STATE_FILE"
+  notify-send -a "Spoken notifications" -t 2000 "Spoken notifications" "Muted"
+else
+  echo "on" > "$STATE_FILE"
+  # Daemon will speak this one as the audible confirmation.
+  notify-send -a "Spoken notifications" -t 2000 "Spoken notifications" "On"
+fi
+
+# Make sure the daemon is running.
+if ! { [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; }; then
+  setsid -f omarchy-speak-notifications >/dev/null 2>&1
+fi

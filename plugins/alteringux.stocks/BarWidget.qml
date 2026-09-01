@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Stocks bar widget: owns the watchlist (which tickers to track — config,
 // written directly by this widget, same convention as alteringux.pomodoro)
@@ -20,27 +21,27 @@ BarWidget {
   readonly property string home: Quickshell.env("HOME")
   readonly property string pluginDir: home + "/.config/omarchy/plugins/alteringux.stocks"
   readonly property string refreshScript: pluginDir + "/bin/omarchy-stocks-refresh"
-  // Deliberately NOT inside the plugin's own source directory — that tree is
-  // watched by the shell's plugin-file watcher, and this state file is
-  // rewritten every refresh. Writing it there would trigger a "local plugin
-  // changed" reload every refresh, tearing down an open panel. Same
-  // convention as alteringux.dashboard / alteringux.pomodoro.
-  readonly property string stateDir: home + "/.local/state/omarchy/"
-  readonly property string statePath: stateDir + "stocks.json"
-  readonly property string watchlistPath: stateDir + "stocks-watchlist.json"
-  // Self-improvement state: click counts per ticker, and AI commentary
-  // cached by bin/omarchy-stocks-commentary. Same "outside the plugin's own
-  // source dir" reasoning as statePath above.
-  readonly property string engagementPath: stateDir + "stocks-engagement.json"
-  readonly property string commentaryPath: stateDir + "stocks-commentary.json"
+  readonly property string searchScript: pluginDir + "/bin/omarchy-stocks-search"
   readonly property string engageScript: pluginDir + "/bin/omarchy-stocks-engage"
 
-  property var state: Model.defaultState()
-  property var watchlistConfig: Model.defaultWatchlist()
-  property bool watchlistLoaded: false
+  // Four JSON files under ~/.local/state/omarchy/ (outside the plugin's own
+  // source tree — the shell's plugin-file watcher would reload the widget on
+  // every write). stocks.json / -engagement / -commentary are rewritten by
+  // bin/omarchy-stocks-{refresh,engage,commentary}, so their Stores watch for
+  // outside changes; the watchlist is plugin-owned.
+  property alias state: stateStore.value
+  property alias watchlistConfig: watchlistStore.value
+  readonly property bool watchlistLoaded: watchlistStore.loaded
   property bool refreshing: false
-  property var engagement: ({})
-  property var commentary: ({})
+  property alias engagement: engagementStore.value
+  property alias commentary: commentaryStore.value
+
+  // ---- ticker autocomplete (read by Panel.qml's Add field) -------------
+  // Debounced results from bin/omarchy-stocks-search; each row is
+  // {symbol,name,exchange,type} (see Model.parseSearchResults). Non-US
+  // listings keep their suffix, so picking "BHP.AX" adds the ASX line.
+  property var searchResults: []
+  property string searchQuery: ""
 
   // ---- derived, read by Panel.qml -----------------------------------
   // Most-clicked tickers surface first — the panel's one piece of learned
@@ -57,40 +58,87 @@ BarWidget {
   readonly property var trendingSymbols: Model.parseTrendingSymbols(state.trending, 12)
 
   readonly property var biggestMover: Model.biggestMoverAbs(watchlistQuotes)
-  readonly property string displayText: biggestMover
-    ? ("📈 " + biggestMover.symbol + " " + Model.formatChangePct(biggestMover.changePct))
-    : "📈 Stocks"
 
-  // ------------------------------------------------------ state file (quotes)
-  FileView {
-    id: stateFile
-    path: root.statePath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.state = Model.parseState(text())
-    onLoadFailed: root.state = Model.defaultState()
-    onFileChanged: reload()
+  // ---- bar-icon cycling ----------------------------------------------------
+  // The bar icon rotates through every watchlist quote that has a live
+  // change%, one every `cycleSeconds` (read from this widget's shell.json
+  // layout entry, default 5), newest-engagement-first (watchlistQuotes is
+  // already engagement-sorted). Put "cycle": false in the layout entry to pin
+  // it to the single biggest mover instead. Scrolling the widget steps the
+  // rotation by hand and nudges the timer.
+  readonly property var cycleQuotes: watchlistQuotes.filter(function (q) {
+    return q && q.changePct !== null && q.changePct !== undefined && !isNaN(q.changePct)
+  })
+  readonly property bool cycleEnabled: setting("cycle", true) && cycleQuotes.length > 1
+  readonly property int cycleMs: Math.max(1, setting("cycleSeconds", 5)) * 1000
+  property int cycleIndex: 0
+  readonly property var currentQuote: cycleQuotes.length
+    ? cycleQuotes[((cycleIndex % cycleQuotes.length) + cycleQuotes.length) % cycleQuotes.length]
+    : biggestMover
+
+  onCycleQuotesChanged: {
+    if (cycleQuotes.length && cycleIndex >= cycleQuotes.length)
+      cycleIndex = cycleIndex % cycleQuotes.length
   }
 
-  // ------------------------------------------------- self-improvement state
-  FileView {
-    id: engagementFile
-    path: root.engagementPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.engagement = Model.parseEngagement(text())
-    onLoadFailed: root.engagement = {}
-    onFileChanged: reload()
+  function stepCycle(delta) {
+    var n = cycleQuotes.length
+    if (n < 1)
+      return
+    cycleIndex = (((cycleIndex + delta) % n) + n) % n
   }
 
-  FileView {
-    id: commentaryFile
-    path: root.commentaryPath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.commentary = Model.parseCommentary(text())
-    onLoadFailed: root.commentary = {}
-    onFileChanged: reload()
+  readonly property color upColor: "#3fb950"
+  readonly property color downColor: bar ? bar.urgent : Color.urgent
+  readonly property color neutralColor: bar ? bar.barForeground : Color.foreground
+  readonly property color tickerColor: {
+    var p = currentQuote ? currentQuote.changePct : null
+    if (p === null || p === undefined || isNaN(p))
+      return neutralColor
+    return p > 0 ? upColor : (p < 0 ? downColor : neutralColor)
+  }
+
+  readonly property string displayText: currentQuote && currentQuote.symbol
+    ? ("  " + currentQuote.symbol + " " + Model.formatChangePct(currentQuote.changePct))
+    : "  Stocks"
+
+  readonly property string tickerTooltip: currentQuote && currentQuote.symbol
+    ? (currentQuote.symbol
+       + (currentQuote.price !== null && currentQuote.price !== undefined ? "  " + Model.formatPrice(currentQuote.price, currentQuote.currency) : "")
+       + "  " + Model.formatChangePct(currentQuote.changePct)
+       + (currentQuote.name ? "\n" + currentQuote.name : ""))
+    : "Stocks — no watchlist quotes yet"
+
+  Timer {
+    id: cycleTimer
+    interval: root.cycleMs
+    repeat: true
+    running: root.cycleEnabled
+    onTriggered: root.stepCycle(1)
+  }
+
+  // quotes + market movers — written by bin/omarchy-stocks-refresh
+  Kit.Store {
+    id: stateStore
+    fileName: "stocks.json"
+    watch: true
+    parse: function (raw) { return Model.parseState(raw) }
+  }
+
+  // self-improvement state — per-ticker click counts (bin/omarchy-stocks-engage)
+  // and cached AI commentary (bin/omarchy-stocks-commentary)
+  Kit.Store {
+    id: engagementStore
+    fileName: "stocks-engagement.json"
+    watch: true
+    parse: function (raw) { return Model.parseEngagement(raw) }
+  }
+
+  Kit.Store {
+    id: commentaryStore
+    fileName: "stocks-commentary.json"
+    watch: true
+    parse: function (raw) { return Model.parseCommentary(raw) }
   }
 
   // Fire-and-forget: records a card click for Model.sortByEngagement and
@@ -111,60 +159,95 @@ BarWidget {
     }
   }
 
-  // ------------------------------------------------------ watchlist config
-  FileView {
-    id: watchlistFile
-    path: root.watchlistPath
-    watchChanges: false
-    atomicWrites: true
-    printErrors: false
-    onLoaded: root.loadWatchlist(text())
-    onLoadFailed: root.loadWatchlist("")
-  }
-
-  function loadWatchlist(raw) {
-    var parsed = Model.defaultWatchlist()
-    try {
-      if (raw && raw.length > 0) {
-        var stored = JSON.parse(raw)
-        if (Array.isArray(stored.tickers)) parsed.tickers = stored.tickers
-      }
-    } catch (e) {
-      console.warn("stocks: watchlist parse failed:", e)
-    }
-    root.watchlistConfig = parsed
-    root.watchlistLoaded = true
-    root.runRefresh()
+  // watchlist — plugin-owned config (which tickers to track)
+  Kit.Store {
+    id: watchlistStore
+    fileName: "stocks-watchlist.json"
+    parse: function (raw) { return Model.parseWatchlist(raw) }
+    // Kick the first price fetch once the watchlist has loaded.
+    onLoadedChanged: if (loaded) root.runRefresh()
   }
 
   function saveWatchlist() {
-    if (!watchlistLoaded) return
-    watchlistFile.setText(JSON.stringify(root.watchlistConfig, null, 2) + "\n")
+    watchlistStore.save()
   }
 
   function addTicker(symbol) {
-    root.watchlistConfig = Model.addTicker(root.watchlistConfig, symbol)
-    root.saveWatchlist()
-    root.runRefresh()
+    guard.run("addTicker", function() {
+      root.watchlistConfig = Model.addTicker(root.watchlistConfig, symbol)
+      root.saveWatchlist()
+      root.runRefresh()
+    })
   }
 
   function removeTicker(symbol) {
-    root.watchlistConfig = Model.removeTicker(root.watchlistConfig, symbol)
-    root.saveWatchlist()
+    guard.run("removeTicker", function() {
+      root.watchlistConfig = Model.removeTicker(root.watchlistConfig, symbol)
+      root.saveWatchlist()
+    })
   }
 
   function clearWatchlist() {
-    root.watchlistConfig = Model.defaultWatchlist()
-    root.saveWatchlist()
+    guard.run("clearWatchlist", function() {
+      root.watchlistConfig = Model.defaultWatchlist()
+      root.saveWatchlist()
+    })
+  }
+
+  // -------------------------------------------------- ticker autocomplete
+  // Panel.qml calls searchTickers() on every keystroke in the Add field;
+  // this debounces (searchDebounce) and shells out to bin/omarchy-stocks-search,
+  // whose trimmed JSON stdout is parsed straight into searchResults. Kept
+  // separate from the price-refresh Process so an in-flight search never
+  // blocks (or is blocked by) a refresh.
+  function searchTickers(query) {
+    guard.run("searchTickers", function() {
+      var q = (query || "").trim()
+      root.searchQuery = q
+      if (q.length < 1) {
+        root.searchResults = []
+        searchDebounce.stop()
+        return
+      }
+      searchDebounce.restart()
+    })
+  }
+
+  function clearSearchResults() {
+    root.searchQuery = ""
+    root.searchResults = []
+    searchDebounce.stop()
+  }
+
+  Timer {
+    id: searchDebounce
+    interval: 220
+    repeat: false
+    onTriggered: {
+      if (!root.searchQuery) return
+      searchProc.command = ["bash", root.searchScript, root.searchQuery]
+      searchProc.running = true
+    }
+  }
+
+  Process {
+    id: searchProc
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        guard.run("searchProc.onStreamFinished", function() {
+          try {
+            root.searchResults = Model.parseSearchResults(JSON.parse(text || "[]"), 8)
+          } catch (e) {
+            root.searchResults = []
+          }
+        })
+      }
+    }
   }
 
   // -------------------------------------------------------------- refresh
-  Process {
-    id: ensureDirsProc
-    command: ["mkdir", "-p", root.stateDir]
-    running: false
-  }
-
   // Set when runRefresh() is called while a refresh is already in flight
   // (e.g. adding a second ticker moments after adding the first) — without
   // this, that request would just be dropped until the next timer tick,
@@ -176,7 +259,7 @@ BarWidget {
     running: false
     onRunningChanged: root.refreshing = running
     onExited: {
-      stateFile.reload()
+      stateStore.reload()
       if (root.refreshPending) {
         root.refreshPending = false
         root.runRefresh()
@@ -194,23 +277,21 @@ BarWidget {
     refreshProc.running = true
   }
 
+  // Poll cadence. Yahoo's keyless endpoints have no push/stream, so this is
+  // plain polling — default every 120s, floored at 30s. Override per-widget
+  // with "refreshSeconds" in this widget's shell.json layout entry (e.g. 300
+  // for a lighter 5-minute poll).
+  readonly property int refreshIntervalMs: Math.max(30, setting("refreshSeconds", 120)) * 1000
+
   Timer {
     id: refreshTimer
-    interval: 2 * 60 * 1000
+    interval: root.refreshIntervalMs
     repeat: true
     running: true
     onTriggered: root.runRefresh()
   }
 
-  Component.onCompleted: {
-    ensureDirsProc.running = true
-    Qt.callLater(function() {
-      stateFile.reload()
-      watchlistFile.reload()
-      engagementFile.reload()
-      commentaryFile.reload()
-    })
-  }
+  readonly property var guard: Kit.BugGuard.create("alteringux.stocks", function(argv) { Quickshell.execDetached(argv) })
 
   // ---- Popup panel. Shape contract for shell.summon/hide/toggle routing:
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget root.
@@ -236,7 +317,11 @@ BarWidget {
     if ("hostWidget" in target) target.hostWidget = root
   }
 
-  implicitWidth: button.implicitWidth
+  readonly property real cyclePadding: Style.spaceReal(8.75)
+
+  // Width follows the animated ticker label (not the raw text metrics) so the
+  // bar slot eases open/closed as symbols swap rather than snapping.
+  implicitWidth: Math.round(ticker.implicitWidth + cyclePadding * 2)
   implicitHeight: button.implicitHeight
 
   onBarChanged: injectPanel()
@@ -262,7 +347,14 @@ BarWidget {
     function addTicker(symbol: string): void { root.addTicker(symbol) }
     function removeTicker(symbol: string): void { root.removeTicker(symbol) }
     function status(): string {
-      return JSON.stringify({ tickers: root.watchlistConfig.tickers, updatedAt: root.state.updatedAt, refreshing: root.refreshing })
+      return guard.call("ipc.status", function() {
+        return JSON.stringify({
+          tickers: root.watchlistConfig.tickers,
+          updatedAt: root.state.updatedAt,
+          refreshing: root.refreshing,
+          showing: root.currentQuote && root.currentQuote.symbol ? root.currentQuote.symbol : null
+        })
+      }, "{}")
     }
   }
 
@@ -270,12 +362,32 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
+    // Fed to the button only to keep it "visually present" (sizing/opacity);
+    // its own label is hidden and the animated TickerTape draws instead.
     text: root.displayText
+    labelVisible: false
+    hasVisualContent: true
     horizontalMargin: 8.75
     verticalPadding: 8.75
+    tooltipText: root.tickerTooltip
 
     onPressed: function(b) {
       root.togglePanel()
+    }
+
+    onWheelMoved: function(delta) {
+      root.stepCycle(delta < 0 ? 1 : -1)
+      if (root.cycleEnabled)
+        cycleTimer.restart()
+    }
+
+    TickerTape {
+      id: ticker
+      anchors.centerIn: parent
+      text: root.displayText
+      color: root.tickerColor
+      fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
+      fontSize: Style.font.body
     }
   }
 }

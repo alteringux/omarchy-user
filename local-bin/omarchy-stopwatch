@@ -1,0 +1,291 @@
+#!/bin/bash
+# Spoken stopwatch using Piper TTS: counts up indefinitely and announces
+# cumulative elapsed time at a configurable interval. Runs as a background
+# systemd --user unit so it survives closing the terminal; `cancel` stops
+# it. Mirrors omarchy-countdown's speak()/cache pattern, but deliberately
+# a separate script/state file: a stopwatch has no end time, so it doesn't
+# fit that script's {end_epoch, total_seconds} shape.
+set -euo pipefail
+
+VOICE_MODEL="$HOME/.local/share/piper-voices/en_GB-cori-high.onnx"
+PIPER_BIN="$HOME/.local/bin/piper"
+UNIT="omarchy-stopwatch"
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-stopwatch"
+STATE_FILE="$STATE_DIR/state"
+# Presence of this file mutes speak(); `mute` creates it, `unmute` removes it.
+# Checked at each announcement so the bar's voice switch takes effect on the
+# next interval without restarting the systemd unit. Session-scoped: cleared on
+# a fresh start and on cancel, preserved across `resume`.
+VOICE_MUTE_FILE="$STATE_DIR/voice-muted"
+CACHE_DIR="$HOME/Music/omarchy-countdown-cache"  # same voice/phrasing style, shared cache
+HISTORY_FILE="$HOME/.local/state/omarchy/stopwatch-history.json"
+# Persistent mirror of $STATE_FILE. $STATE_FILE lives under $XDG_RUNTIME_DIR,
+# which is wiped on logout/reboot; this copy is not, so `resume` can respawn
+# the timing loop with the original start_epoch after a reboot.
+PERSIST_FILE="$HOME/.local/state/omarchy/stopwatch-state.json"
+
+speak() {
+  local text=$1
+  # Re-checked every call: flipping the bar's voice switch mid-session just
+  # creates/removes this file, and the effect lands on the next announcement.
+  if [[ -f "$VOICE_MUTE_FILE" ]]; then
+    return 0
+  fi
+  local hash cache_file
+  hash=$(printf '%s' "$text" | sha256sum | cut -d' ' -f1)
+  cache_file="$CACHE_DIR/$hash.wav"
+
+  if [[ ! -s "$cache_file" ]]; then
+    mkdir -p "$CACHE_DIR"
+    "$PIPER_BIN" --model "$VOICE_MODEL" --output_file "$cache_file" --quiet <<<"$text" >/dev/null 2>&1 || true
+  fi
+
+  pw-play "$cache_file" 2>/dev/null || true
+}
+
+# Converts a minute count into spoken phrasing, e.g. 121 -> "2 hours 1 minute".
+humanize_minutes() {
+  local total=$1 h m parts=()
+  h=$((total / 60))
+  m=$((total % 60))
+  if ((h > 0)); then
+    local hword="hours"
+    ((h == 1)) && hword="hour"
+    parts+=("${h} ${hword}")
+  fi
+  if ((m > 0)) || ((h == 0)); then
+    local mword="minutes"
+    ((m == 1)) && mword="minute"
+    parts+=("${m} ${mword}")
+  fi
+  local IFS=' '
+  echo "${parts[*]}"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  omarchy-stopwatch <interval-minutes> [label]   Start a spoken stopwatch in the background
+  omarchy-stopwatch status                       Show elapsed time
+  omarchy-stopwatch cancel                       Stop the running stopwatch
+  omarchy-stopwatch resume                       Re-launch a stopwatch left running before logout/reboot
+  omarchy-stopwatch mute                         Silence announcements without stopping the stopwatch
+  omarchy-stopwatch unmute                       Resume announcements
+EOF
+}
+
+# Toggle spoken announcements for a running stopwatch on/off. Takes effect on
+# the next interval (speak() re-checks $VOICE_MUTE_FILE every call), so the bar
+# widget's voice switch needs no unit restart.
+cmd_mute() {
+  mkdir -p "$STATE_DIR"
+  printf 'muted\n' >"$VOICE_MUTE_FILE"
+  echo "Stopwatch announcements muted."
+}
+
+cmd_unmute() {
+  rm -f "$VOICE_MUTE_FILE"
+  echo "Stopwatch announcements unmuted."
+}
+
+# Appends a completed session to $HISTORY_FILE so the bar widget can show
+# "N% shorter/longer than your average" for that label. Best-effort: a
+# logging failure must never block cancelling the stopwatch itself.
+log_session() {
+  local label=$1 interval_minutes=$2 elapsed_seconds=$3
+  local hist_dir
+  hist_dir=$(dirname "$HISTORY_FILE")
+  mkdir -p "$hist_dir" 2>/dev/null || return 0
+  [[ -f "$HISTORY_FILE" ]] || echo '{"version":1,"sessions":[]}' >"$HISTORY_FILE" 2>/dev/null
+  (
+    flock -x 200 || exit 0
+    local tmp
+    tmp=$(mktemp "${HISTORY_FILE}.XXXXXX") || exit 0
+    jq -c --arg label "$label" --argjson interval "${interval_minutes:-0}" \
+      --argjson elapsed "$elapsed_seconds" --arg ended "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      '.sessions += [{label: $label, interval_minutes: $interval, elapsed_seconds: $elapsed, ended_at: $ended}]
+       | .sessions |= (if length > 200 then .[-200:] else . end)' \
+      "$HISTORY_FILE" >"$tmp" 2>/dev/null && mv "$tmp" "$HISTORY_FILE"
+  ) 200>"${HISTORY_FILE}.lock" 2>/dev/null || true
+}
+
+cmd_cancel() {
+  local start_epoch="" label="" interval_minutes=0
+  if [[ -f "$STATE_FILE" ]]; then
+    start_epoch=$(jq -r '.start_epoch // empty' "$STATE_FILE" 2>/dev/null || true)
+    label=$(jq -r '.label // ""' "$STATE_FILE" 2>/dev/null || true)
+    interval_minutes=$(jq -r '.interval_minutes // 0' "$STATE_FILE" 2>/dev/null || echo 0)
+  fi
+  if systemctl --user stop "${UNIT}.service" 2>/dev/null; then
+    if [[ "$start_epoch" =~ ^[0-9]+$ ]]; then
+      local elapsed=$(( $(date +%s) - start_epoch ))
+      ((elapsed > 0)) && log_session "$label" "$interval_minutes" "$elapsed"
+    fi
+    rm -f "$STATE_FILE" "$PERSIST_FILE" "$VOICE_MUTE_FILE"
+    echo "Stopwatch cancelled."
+  else
+    echo "No stopwatch running."
+  fi
+}
+
+cmd_status() {
+  if [[ -f "$STATE_FILE" ]]; then
+    local start_epoch label now elapsed
+    start_epoch=$(jq -r '.start_epoch' "$STATE_FILE")
+    label=$(jq -r '.label' "$STATE_FILE")
+    now=$(date +%s)
+    elapsed=$((now - start_epoch))
+    if systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null; then
+      echo "${label:-Stopwatch}: $((elapsed / 60))m $((elapsed % 60))s elapsed"
+    else
+      echo "No stopwatch running."
+      rm -f "$STATE_FILE" "$PERSIST_FILE" "$VOICE_MUTE_FILE"
+    fi
+  else
+    echo "No stopwatch running."
+  fi
+}
+
+# Internal: actual foreground loop, invoked inside the systemd unit. Runs
+# forever (no end time) until the unit is stopped via `cancel`.
+run_stopwatch() {
+  local interval_minutes=$1
+  local label=${2:-}
+  local resume_start=${3:-}
+  local interval_seconds=$((interval_minutes * 60))
+  local start resumed=0
+  if [[ "$resume_start" =~ ^[0-9]+$ ]]; then
+    start=$resume_start
+    resumed=1
+  else
+    start=$(date +%s)
+  fi
+
+  # Write both the runtime state (read by the bar widget) and a persistent
+  # copy that outlives a reboot, so `resume` can respawn this loop with the
+  # original start_epoch.
+  mkdir -p "$STATE_DIR" "$(dirname "$PERSIST_FILE")"
+  # A freshly started stopwatch always begins audible (it speaks its own
+  # intro); `resume` keeps whatever mute state was in effect before reboot.
+  ((resumed)) || rm -f "$VOICE_MUTE_FILE"
+  local state_json
+  state_json=$(jq -n --argjson start_epoch "$start" --argjson interval_minutes "$interval_minutes" --arg label "$label" \
+    '{start_epoch: $start_epoch, interval_minutes: $interval_minutes, label: $label}')
+  printf '%s\n' "$state_json" >"$STATE_FILE"
+  printf '%s\n' "$state_json" >"$PERSIST_FILE"
+
+  local interval_word="minutes"
+  ((interval_minutes == 1)) && interval_word="minute"
+
+  local elapsed_minutes=0
+  if ((resumed)); then
+    # Fast-forward past every announcement whose moment already passed while
+    # we were logged out, so login doesn't machine-gun catch-up TTS.
+    local now
+    now=$(date +%s)
+    while (( start + (elapsed_minutes + interval_minutes) * 60 <= now )); do
+      elapsed_minutes=$((elapsed_minutes + interval_minutes))
+    done
+    local elapsed_so_far
+    elapsed_so_far=$(humanize_minutes "$(( (now - start) / 60 ))")
+    local intro="Resuming the stopwatch, ${elapsed_so_far} elapsed."
+    [[ -n "$label" ]] && intro="Resuming the stopwatch for ${label}, ${elapsed_so_far} elapsed."
+    speak "$intro"
+    notify-send "Stopwatch resumed" "${label:-Stopwatch}" 2>/dev/null || true
+  else
+    local intro="Starting a stopwatch, announcing every ${interval_minutes} ${interval_word}."
+    [[ -n "$label" ]] && intro="Starting a stopwatch for ${label}, announcing every ${interval_minutes} ${interval_word}."
+    speak "$intro"
+    notify-send "Stopwatch started" "${label:-Stopwatch}" 2>/dev/null || true
+  fi
+
+  while true; do
+    elapsed_minutes=$((elapsed_minutes + interval_minutes))
+    local target now sleep_for
+    target=$((start + elapsed_minutes * 60))
+    now=$(date +%s)
+    sleep_for=$((target - now))
+    ((sleep_for > 0)) && sleep "$sleep_for"
+
+    speak "$(humanize_minutes "$elapsed_minutes")."
+  done
+}
+
+# Re-launch a stopwatch that was running before the last logout/reboot,
+# using the start_epoch persisted in $PERSIST_FILE. No-op when there's
+# nothing to resume or one is already running. Invoked at login by
+# omarchy-stopwatch-resume.service.
+cmd_resume() {
+  [[ -f "$PERSIST_FILE" ]] || { echo "No stopwatch to resume."; return 0; }
+  if systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null; then
+    echo "Stopwatch already running."
+    return 0
+  fi
+  local start_epoch interval_minutes label
+  start_epoch=$(jq -r '.start_epoch // empty' "$PERSIST_FILE" 2>/dev/null || true)
+  interval_minutes=$(jq -r '.interval_minutes // empty' "$PERSIST_FILE" 2>/dev/null || true)
+  label=$(jq -r '.label // ""' "$PERSIST_FILE" 2>/dev/null || true)
+  if ! [[ "$start_epoch" =~ ^[0-9]+$ ]] || ! [[ "$interval_minutes" =~ ^[0-9]+$ ]] || ((interval_minutes < 1)); then
+    echo "Corrupt stopwatch state; discarding." >&2
+    rm -f "$PERSIST_FILE"
+    return 0
+  fi
+  # A stopwatch still "running" a week after it was last seen is almost
+  # certainly one that crashed or was forgotten, not one worth resuming with
+  # a "10080 minutes elapsed" announcement. Discard rather than resume.
+  local age=$(( $(date +%s) - start_epoch ))
+  if ((age > 7 * 24 * 3600)); then
+    echo "Persisted stopwatch is over a week old ($((age / 86400))d); discarding." >&2
+    rm -f "$PERSIST_FILE"
+    return 0
+  fi
+  systemd-run --user --unit="$UNIT" --collect \
+    --description="Omarchy spoken stopwatch (resumed)" \
+    -- "$0" --run "$interval_minutes" "$label" "$start_epoch"
+  echo "Stopwatch resumed ($(( ( $(date +%s) - start_epoch ) / 60 )) min elapsed)."
+}
+
+main() {
+  case "${1:-}" in
+    --run)
+      shift
+      run_stopwatch "$@"
+      ;;
+    cancel)
+      cmd_cancel
+      ;;
+    resume)
+      cmd_resume
+      ;;
+    mute)
+      cmd_mute
+      ;;
+    unmute)
+      cmd_unmute
+      ;;
+    status)
+      cmd_status
+      ;;
+    -h | --help | "")
+      usage
+      ;;
+    *)
+      local interval_minutes=$1
+      local label=${2:-}
+      if ! [[ "$interval_minutes" =~ ^[0-9]+$ ]] || ((interval_minutes < 1)); then
+        echo "Error: interval minutes must be a positive integer" >&2
+        exit 1
+      fi
+      if systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null; then
+        echo "A stopwatch is already running. Run 'omarchy-stopwatch cancel' first." >&2
+        exit 1
+      fi
+      systemd-run --user --unit="$UNIT" --collect \
+        --description="Omarchy spoken stopwatch" \
+        -- "$0" --run "$interval_minutes" "$label"
+      echo "Stopwatch started, announcing every ${interval_minutes} minute(s)${label:+ ($label)}."
+      ;;
+  esac
+}
+
+main "$@"

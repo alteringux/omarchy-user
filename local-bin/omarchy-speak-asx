@@ -1,0 +1,296 @@
+#!/usr/bin/env bash
+# Speak an AI briefing of how the Australian stock market is doing today,
+# via Piper TTS. Press the hotkey again while it's talking to stop.
+#
+#   * Hard numbers come from Yahoo Finance's keyless chart + screener
+#     endpoints -- the SAME API the alteringux.stocks bar widget uses
+#     (see ~/.config/omarchy/plugins/alteringux.stocks/bin/omarchy-stocks-refresh):
+#       - ^AXJO  S&P/ASX 200        (chart endpoint, no auth)
+#       - ^AORD  All Ordinaries     (chart endpoint, no auth)
+#       - AUDUSD=X                   (chart endpoint, no auth)
+#       - region=au equity screener, sorted by % change  (needs a Yahoo
+#         "crumb"; cached in the state dir, best-effort -- if it can't be
+#         had, the movers list is left for the AI to source via web search)
+#   * The "why is it moving" colour, and the market-tone overview, come from
+#     the Anthropic API with web search -- the same key + pattern as
+#     omarchy-speak-briefing, read from ~/.config/omarchy/ai-briefing/env.
+#   * Output streams section-by-section straight into piper --output_raw so it
+#     starts talking in ~1s and the stop-toggle stays responsive, exactly
+#     like omarchy-speak-reddit.
+#
+# Part of the omarchy-narrate / omarchy-speak-* family: en_GB-cori voice,
+# PID stop-toggle, desktop notification, logged in ~/Documents/omarchy-changelog.md.
+set -uo pipefail
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+UA="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+ENV_FILE="$HOME/.config/omarchy/ai-briefing/env"
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-asx"
+CRUMB_FILE="$STATE_DIR/yahoo-crumb"      # "<crumb>\t<cookiejar path>", reused ~6h
+COOKIE_JAR="$STATE_DIR/yahoo-cookies"
+BRIEF_CACHE="$STATE_DIR/last-brief.txt"  # replay target for a rapid re-press
+LOG_FILE="$STATE_DIR/last-run.log"
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-speak-asx"
+PIDFILE="$RUN_DIR/pid"
+CACHE_TTL=600                            # replay the last brief for this long
+
+mkdir -p "$STATE_DIR" "$RUN_DIR"
+
+# --- stop-toggle: a second press signals the running instance and exits -----
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  kill -TERM "$(cat "$PIDFILE")" 2>/dev/null
+  exit 0
+fi
+echo $$ > "$PIDFILE"
+
+CHILD_PID=""
+cleanup() {
+  [[ -n "$CHILD_PID" ]] && kill -TERM "$CHILD_PID" 2>/dev/null
+  "$PIPER_TTS" --tag asx --stop 2>/dev/null || true
+  rm -f "$PIDFILE"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+# Run a command in the background and wait on it, so a stop-toggle TERM
+# interrupts the `wait` immediately instead of blocking on a slow curl
+# inside a synchronous $(...) . Echoes the command's stdout.
+bg_capture() {
+  local out; out=$(mktemp "$RUN_DIR/.bg.XXXXXX")
+  ( "$@" >"$out" 2>>"$LOG_FILE" ) &
+  CHILD_PID=$!
+  wait "$CHILD_PID" 2>/dev/null
+  CHILD_PID=""
+  cat "$out"; rm -f "$out"
+}
+
+say() {
+  if [[ -n "${ASX_DRY_RUN:-}" ]]; then printf '🔊 %s\n' "$1"; return; fi
+  printf '%s' "$1" | "$PIPER_TTS" --tag asx --voice "$VOICE" &
+  CHILD_PID=$!
+  wait "$CHILD_PID" 2>/dev/null
+  CHILD_PID=""
+}
+
+# Chart endpoint, keyless -- the exact call shape omarchy-stocks-refresh
+# makes: one short shot, no retry, so a rate-limited Yahoo never delays the
+# start of the briefing. A 429 just falls through to the indices.json cache.
+fetch() { curl -fsS --max-time 6 -A "$UA" "$1" 2>/dev/null; }
+
+# --- indices -------------------------------------------------------------
+# Emits "<price>\t<prevClose>" or empty. Good results are cached to
+# indices.json and replayed when Yahoo 429s us, so the overview always has
+# real numbers even on a bad-network run.
+IDX_CACHE="$STATE_DIR/indices.json"
+[[ -f "$IDX_CACHE" ]] || echo '{}' > "$IDX_CACHE"
+
+index_quote() {
+  local sym=$1 out
+  out=$(fetch "https://query1.finance.yahoo.com/v8/finance/chart/$sym?interval=5m&range=1d" \
+    | jq -r '.chart.result[0].meta
+             | select(.regularMarketPrice != null)
+             | "\(.regularMarketPrice)\t\(.previousClose // .chartPreviousClose)"' 2>/dev/null)
+  if [[ -n "$out" ]]; then
+    local tmp; tmp=$(mktemp "$IDX_CACHE.XXXXXX")
+    jq -c --arg k "$sym" --arg v "$out" --arg ts "$(date -u +%s)" \
+      '.[$k]={v:$v, ts:($ts|tonumber)}' "$IDX_CACHE" > "$tmp" 2>/dev/null \
+      && mv "$tmp" "$IDX_CACHE" || rm -f "$tmp"
+    printf '%s' "$out"; return 0
+  fi
+  # fall back to a cached value < 24h old
+  jq -r --arg k "$sym" --arg now "$(date -u +%s)" \
+    '(.[$k] // empty) | select(($now|tonumber) - .ts < 86400) | .v' "$IDX_CACHE" 2>/dev/null
+}
+
+pct() { awk -v p="$1" -v pv="$2" 'BEGIN{ if(pv==""||pv==0){print "";exit} printf "%+.2f",((p-pv)/pv)*100 }'; }
+dir_word() { awk -v c="$1" 'BEGIN{ c+=0; print (c>0.05)?"up":(c<-0.05)?"down":"flat" }'; }
+
+AXJO=$(bg_capture index_quote "%5EAXJO")
+AORD=$(bg_capture index_quote "%5EAORD")
+AUD=$(bg_capture index_quote "AUDUSD=X")
+axjo_px=${AXJO%%$'\t'*}; axjo_pct=$(pct "${axjo_px}" "${AXJO#*$'\t'}")
+aord_px=${AORD%%$'\t'*}; aord_pct=$(pct "${aord_px}" "${AORD#*$'\t'}")
+aud_px=${AUD%%$'\t'*};   aud_pct=$(pct "${aud_px}" "${AUD#*$'\t'}")
+
+# --- Yahoo crumb: cache a working (crumb, cookiejar) pair for ~6h ----------
+get_crumb() {
+  if [[ -s "$CRUMB_FILE" && -s "$COOKIE_JAR" ]] \
+     && (( $(date +%s) - $(stat -c %Y "$CRUMB_FILE") < 21600 )); then
+    cat "$CRUMB_FILE"; return 0
+  fi
+  curl -fsS --max-time 8 -A "$UA" -c "$COOKIE_JAR" "https://finance.yahoo.com/" -o /dev/null 2>/dev/null || return 1
+  local c
+  c=$(curl -fsS --max-time 8 -A "$UA" -b "$COOKIE_JAR" "https://query1.finance.yahoo.com/v1/test/getcrumb" 2>/dev/null)
+  [[ -n "$c" && "$c" != *"Too Many Requests"* && "$c" != *"<"* && ${#c} -lt 40 ]] || return 1
+  printf '%s' "$c" > "$CRUMB_FILE"
+  printf '%s' "$c"
+}
+
+# Emits TSV "symbol<TAB>name<TAB>+pct" lines, or nothing. $1 = DESC|ASC
+screener() {
+  local crumb; crumb=$(get_crumb) || return 1
+  local body
+  body=$(jq -cn --arg st "$1" '{
+    size:10, offset:0, sortField:"percentchange", sortType:$st, quoteType:"EQUITY",
+    query:{operator:"AND",operands:[
+      {operator:"eq",operands:["region","au"]},
+      {operator:"gt",operands:["intradaymarketcap",50000000]},
+      {operator:"gt",operands:["dayvolume",50000]}
+    ]}, userId:"", userIdType:"guid"
+  }')
+  curl -fsS --max-time 10 -b "$COOKIE_JAR" -A "$UA" -H "content-type: application/json" \
+    "https://query1.finance.yahoo.com/v1/finance/screener?crumb=${crumb}&lang=en-AU&region=AU" \
+    -d "$body" 2>/dev/null \
+  | jq -r '.finance.result[0].quotes[]?
+           | [ (.symbol|sub("\\.AX$";"")),
+               (.shortName // .longName // .symbol),
+               ((.regularMarketChangePercent // 0) | (.*100|round/100) | if .>0 then "+\(.)" else "\(.)" end)
+             ] | @tsv' 2>/dev/null
+}
+
+# --- notify + spoken preamble (starts audio while the AI call runs) --------
+notify-send -a "ASX briefing" -t 2500 \
+  "Australian market briefing" "SUPER+CTRL+ALT+L again to stop" 2>/dev/null
+
+SYD_TIME=$(TZ="Australia/Sydney" date '+%A, %-d %B, %-I:%M %p')
+
+overview_line() {
+  local s="Here's the Australian market as of $SYD_TIME Sydney time."
+  [[ -n "$axjo_pct" ]] && s="$s The S and P ASX 200 is at $(printf '%.0f' "$axjo_px"), $(dir_word "$axjo_pct") ${axjo_pct#[-+]} percent on the day."
+  [[ -n "$aord_pct" ]] && s="$s The All Ordinaries is $(dir_word "$aord_pct") ${aord_pct#[-+]} percent."
+  [[ -n "$aud_pct"  ]] && s="$s The Australian dollar buys $(awk -v p="$aud_px" 'BEGIN{printf "%.1f", p*100}') US cents, $(dir_word "$aud_pct") ${aud_pct#[-+]} percent."
+  printf '%s' "$s"
+}
+OVERVIEW=$(overview_line)
+
+# --- replay: a re-press inside CACHE_TTL just replays, no new API calls ----
+if [[ -s "$BRIEF_CACHE" ]] && (( $(date +%s) - $(stat -c %Y "$BRIEF_CACHE") < CACHE_TTL )); then
+  say "$OVERVIEW"
+  while IFS= read -r line; do [[ -n "$line" ]] && say "$line"; done < "$BRIEF_CACHE"
+  say "That's the A S X briefing."
+  exit 0
+fi
+
+# Start talking now -- the movers + AI call below can take up to a minute.
+say "$OVERVIEW"
+say "Fetching the movers and the news behind them. One moment."
+
+# --- movers: Yahoo ASX screener (best-effort; AI sources them if this fails)
+GAINERS_TSV=$(bg_capture screener DESC); LOSERS_TSV=$(bg_capture screener ASC)
+
+# --- AI layer: overview colour + per-mover reasons, via web search --------
+[[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
+
+ai_json() {
+  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
+  local facts
+  facts=$(jq -cn \
+    --arg t "$SYD_TIME" \
+    --arg axjo "${axjo_pct:-n/a} (level ${axjo_px:-n/a})" \
+    --arg aord "${aord_pct:-n/a}" \
+    --arg aud "${aud_pct:-n/a}" \
+    --arg g "$GAINERS_TSV" --arg l "$LOSERS_TSV" \
+    '{sydneyTime:$t, asx200:$axjo, allOrds:$aord, audusd:$aud,
+      screenerGainers:$g, screenerLosers:$l}')
+
+  local prompt
+  prompt=$(cat <<EOF
+You are writing a spoken radio-style briefing on the Australian share market for $SYD_TIME Sydney time. Use web search to get today's real ASX moves and the reasons behind them.
+
+Hard numbers already gathered from Yahoo Finance (trust these for the index levels):
+$facts
+
+The screenerGainers / screenerLosers fields are TAB-separated "symbol<TAB>name<TAB>percent" rows from Yahoo's ASX screener. If they are empty or look stale, find the actual top 10 ASX gainers and top 10 ASX losers yourself via web search, for the most recent completed or current trading session.
+
+Rules for the lists: individual ASX-listed operating companies ONLY. No sector or index tickers (nothing like XJO, XDJ, XGD, XPJ). No sub-1-cent nano-caps. If the market is currently closed (weekend or after hours) say so in the overview and brief on the last completed session.
+
+Return ONLY a JSON object, no markdown fence, no prose around it:
+{
+  "overview": "2-3 plain sentences on how the ASX is doing today and why - sector moves, index direction, key drivers. Read aloud, so no symbols or markdown.",
+  "gainers": [ {"name":"Company Name","ticker":"ABC","changePct":"+12.3","reason":"one short plain sentence on why it's up today"} , ... up to 10 ],
+  "losers":  [ {"name":"Company Name","ticker":"ABC","changePct":"-9.8","reason":"one short plain sentence on why it's down today"} , ... up to 10 ]
+}
+Exactly up to 10 per list, ordered biggest move first. changePct is a string like "+12.3" or "-9.8". Keep every reason to one sentence, factual, no hedging disclaimers, no financial advice. If you genuinely cannot find a reason, use "no clear catalyst; moving with the sector or on light news".
+EOF
+)
+
+  local resp
+  resp=$(curl -sS https://api.anthropic.com/v1/messages --max-time 60 \
+    -H "x-api-key: $ANTHROPIC_API_KEY" \
+    -H "anthropic-version: 2023-06-01" \
+    -H "content-type: application/json" \
+    -d "$(jq -n --arg p "$prompt" '{
+      model:"claude-haiku-4-5-20251001",
+      max_tokens:2000,
+      tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}],
+      messages:[{role:"user",content:$p}]
+    }')") || return 1
+
+  printf '%s' "$resp" | python3 -c "
+import json,sys,re
+try:
+    d=json.load(sys.stdin)
+    if 'error' in d:
+        sys.stderr.write(json.dumps(d['error'])+chr(10)); sys.exit(1)
+    txt=''.join(b.get('text','') for b in d.get('content',[]) if b.get('type')=='text')
+    m=re.search(r'\{.*\}', txt, re.S)
+    if not m: sys.exit(1)
+    obj=json.loads(m.group(0))
+    print(json.dumps(obj))
+except SystemExit: raise
+except Exception as e:
+    sys.stderr.write(str(e)+chr(10)); sys.exit(1)
+"
+}
+
+AI=$(bg_capture ai_json) || AI=""
+
+ORD=(zero one two three four five six seven eight nine ten)
+
+# --- speak: overview, then the two lists ----------------------------------
+if [[ -n "$AI" ]]; then
+  AI_OVERVIEW=$(printf '%s' "$AI" | jq -r '.overview // empty')
+  [[ -n "$AI_OVERVIEW" ]] && say "$AI_OVERVIEW"
+
+  : > "$BRIEF_CACHE"
+  for grp in gainers losers; do
+    if [[ "$grp" == gainers ]]; then
+      say "Now today's biggest gainers on the A S X."
+    else
+      say "And today's biggest decliners."
+    fi
+    n=$(printf '%s' "$AI" | jq -r ".${grp} | length")
+    (( n > 10 )) && n=10
+    for ((i=0;i<n;i++)); do
+      line=$(printf '%s' "$AI" | jq -r --argjson i "$i" --arg grp "$grp" '
+        .[$grp][$i] as $m
+        | "Number \(($i+1)). \($m.name), \($m.ticker), \($m.changePct) percent. \($m.reason)"')
+      # spell the ordinal for nicer TTS
+      line=${line/Number $((i+1))./Number ${ORD[$((i+1))]}.}
+      printf '%s\n' "$line" >> "$BRIEF_CACHE"
+      say "$line"
+    done
+  done
+else
+  # AI unavailable: fall back to the raw Yahoo screener rows, numbers only.
+  say "The A I commentary service is unavailable, so here are the raw movers, numbers only."
+  : > "$BRIEF_CACHE"
+  emit_raw() {
+    local heading=$1 tsv=$2 i=0
+    [[ -z "$tsv" ]] && { say "No screener data for $heading right now."; return; }
+    say "$heading."
+    while IFS=$'\t' read -r sym name chg; do
+      [[ -n "$sym" ]] || continue
+      i=$((i+1))
+      local line="Number ${ORD[$i]}. ${name}, ${sym}, ${chg} percent."
+      printf '%s\n' "$line" >> "$BRIEF_CACHE"
+      say "$line"
+    done <<< "$tsv"
+  }
+  emit_raw "Today's biggest gainers" "$GAINERS_TSV"
+  emit_raw "Today's biggest decliners" "$LOSERS_TSV"
+fi
+
+say "That's the A S X briefing."

@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Mock notify-send: log the full argument list to $MOCK_NOTIFY_LOG (one call
+# per line) so tests can assert on it.
+[ -n "${MOCK_NOTIFY_LOG:-}" ] && printf '%s\n' "$*" >> "$MOCK_NOTIFY_LOG"
+exit 0

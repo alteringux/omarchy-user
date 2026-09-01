@@ -1,0 +1,45 @@
+#!/bin/bash
+# Ticker autocomplete for the stocks panel's Add field. Queries Yahoo
+# Finance's unofficial (keyless, undocumented) symbol-search endpoint and
+# prints a trimmed JSON array on stdout:
+#   [{ "symbol": "BHP.AX", "name": "BHP Group Limited", "exch": "Australian", "type": "EQUITY" }, ...]
+# Non-US listings keep their Yahoo suffix (.AX for the ASX, .L for the LSE,
+# .TO for Toronto, ...), so picking a row adds that exact listing — this is
+# how Australian stocks get in. BarWidget.qml runs this debounced and parses
+# the output via Model.parseSearchResults; a break in Yahoo's shape is a
+# one-file fix there, same convention as omarchy-stocks-refresh.
+#
+# Usage: omarchy-stocks-search QUERY
+
+set -uo pipefail
+
+# Catch a non-zero exit and hand it to the plugin bug-report pipeline.
+# Best-effort: absent guard file = no-op.
+OMARCHY_PLUGIN_ID="alteringux.stocks"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
+QUERY="${*:-}"
+QUERY="${QUERY#"${QUERY%%[![:space:]]*}"}"   # ltrim
+QUERY="${QUERY%"${QUERY##*[![:space:]]}"}"   # rtrim
+[[ -z "$QUERY" ]] && { echo "[]"; exit 0; }
+
+UA="Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks-search"
+enc=$(jq -rn --arg s "$QUERY" '$s|@uri')
+
+raw=$(curl -fsS --max-time 8 -A "$UA" \
+  "https://query1.finance.yahoo.com/v1/finance/search?q=${enc}&quotesCount=10&newsCount=0&listsCount=0" 2>/dev/null)
+[[ -z "$raw" ]] && { echo "[]"; exit 0; }
+
+# Keep only tradable rows and project each to the four fields the panel
+# shows. The QML side (Model.parseSearchResults) is permissive on shape, so
+# if this jq ever fails we still emit a valid empty array rather than noise.
+echo "$raw" | jq -c '
+  [ .quotes[]?
+    | select(.symbol != null and .symbol != "")
+    | select(((.quoteType // "") | ascii_upcase)
+             | IN("EQUITY","ETF","INDEX","MUTUALFUND","CRYPTOCURRENCY","CURRENCY","FUTURE"))
+    | { symbol: .symbol,
+        name: (.longname // .shortname // .symbol),
+        exch: (.exchDisp // .exchange // ""),
+        type: (.quoteType // "") } ]
+' 2>/dev/null || echo "[]"

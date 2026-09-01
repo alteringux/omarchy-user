@@ -1,8 +1,10 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Stats + settings popup for the pomodoro widget. Manual start/pause/skip/
 // reset buttons here call the same functions the keybinding IPC calls, so
@@ -14,6 +16,8 @@ Panel {
 
   property var anchorItem: null
   property var hostWidget: null
+
+  readonly property var guard: Kit.BugGuard.create("alteringux.pomodoro", function(argv) { Quickshell.execDetached(argv) })
 
   readonly property var config: hostWidget ? hostWidget.config : Model.defaultConfig()
   readonly property var stats: hostWidget ? hostWidget.stats : Model.defaultStats()

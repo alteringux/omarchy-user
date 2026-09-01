@@ -1,0 +1,393 @@
+#!/usr/bin/env bash
+# piper-tts — one fast, streaming, self-queueing front end to Piper TTS.
+#
+# Every omarchy TTS caller (omarchy-narrate, omarchy-speak-*, the newsbar
+# ero-reader, ...) pipes its text through this instead of calling piper/paplay
+# directly. What it buys them:
+#
+#   * Streaming start.  The text is split into small chunks; chunk 0 is a tiny
+#     first sentence synthesised straight from `piper --output_raw` into a FIFO
+#     that `paplay` drains live — so audio starts in ~model-load time, never
+#     "synthesise the whole essay, then talk".
+#   * Parallel synthesis.  The remaining chunks are produced by N worker piper
+#     processes running ahead of playback into raw-PCM files; the player then
+#     plays them strictly in order with ~no gap.  N-times synth throughput
+#     keeps the buffer ahead of the voice even on the big cori model.
+#   * A cross-process queue.  Before it plays, a job takes an flock; a second
+#     job (from any caller) waits on it and speaks afterwards instead of two
+#     voices talking over each other.  Its synthesis still runs during the
+#     wait, so its audio is ready the moment its turn comes.
+#   * One stop switch.  `piper-tts --stop --tag NAME` kills that job's whole
+#     process group; `--toggle` is "stop if running, else speak" for keybinds.
+#
+# Usage:
+#   piper-tts [options] [TEXT ...]        text from args, or stdin if none
+#   piper-tts --stop   [--tag NAME]       stop the job for NAME (exit 0 if it did)
+#   piper-tts --toggle [options] [TEXT]   if a job for NAME runs: stop it, exit 0
+#                                         otherwise: speak TEXT
+#
+# Options:
+#   --tag NAME            queue / stop namespace (default "default")
+#   --voice PATH|NAME     .onnx path, or a name under ~/.local/share/piper-voices
+#                         (default $PIPER_TTS_VOICE, else en_GB-cori-high)
+#   --workers N           parallel synth workers (default $PIPER_TTS_WORKERS or 3)
+#   --length-scale N      piper --length_scale     (higher = slower)
+#   --noise-scale N       piper --noise_scale
+#   --noise-w N           piper --noise_w
+#   --sentence-silence N  piper --sentence_silence seconds (default 0.2)
+#   --max-chunk N         soft max characters per chunk after chunk 0 (default 240)
+#   --no-queue            don't wait behind other piper-tts jobs (allow overlap)
+#   --list-chunks         print the chunk plan and exit (no audio)
+#   -h, --help            this text
+#
+# Env: PIPER_TTS_VOICE, PIPER_TTS_WORKERS, PIPER_TTS_MAX_CHUNK,
+#      PIPER_TTS_VOICE_DIR (default ~/.local/share/piper-voices),
+#      PIPER_TTS_NOSTREAM0=1 to disable the streamed first chunk.
+
+set -uo pipefail
+
+# ----------------------------------------------------------------- args
+TAG=default
+VOICE_ARG=${PIPER_TTS_VOICE:-en_GB-cori-high}
+WORKERS=${PIPER_TTS_WORKERS:-3}
+LENGTH_SCALE=""
+NOISE_SCALE=""
+NOISE_W=""
+SENTENCE_SILENCE="0.2"
+MAX_CHUNK=${PIPER_TTS_MAX_CHUNK:-240}
+NO_QUEUE=0
+LIST_CHUNKS=0
+MODE=speak          # speak | stop | toggle
+declare -a TEXT_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --tag)              TAG=${2:?}; shift 2 ;;
+    --voice|--model)    VOICE_ARG=${2:?}; shift 2 ;;
+    --workers)          WORKERS=${2:?}; shift 2 ;;
+    --length-scale)     LENGTH_SCALE=${2:?}; shift 2 ;;
+    --noise-scale)      NOISE_SCALE=${2:?}; shift 2 ;;
+    --noise-w)          NOISE_W=${2:?}; shift 2 ;;
+    --sentence-silence) SENTENCE_SILENCE=${2:?}; shift 2 ;;
+    --max-chunk)        MAX_CHUNK=${2:?}; shift 2 ;;
+    --no-queue)         NO_QUEUE=1; shift ;;
+    --list-chunks)      LIST_CHUNKS=1; shift ;;
+    --stop)             MODE=stop; shift ;;
+    --toggle)           MODE=toggle; shift ;;
+    -h|--help)          sed -n '2,60p' "$0" | sed 's/^# \?//'; exit 0 ;;
+    --)                 shift; TEXT_ARGS+=("$@"); break ;;
+    -*)                 echo "piper-tts: unknown option: $1" >&2; exit 2 ;;
+    *)                  TEXT_ARGS+=("$1"); shift ;;
+  esac
+done
+
+[[ "$WORKERS" =~ ^[0-9]+$ ]] && (( WORKERS >= 1 )) || WORKERS=3
+
+# ----------------------------------------------------------------- paths
+RUN_BASE="${XDG_RUNTIME_DIR:-/tmp}/piper-tts"
+mkdir -p "$RUN_BASE" 2>/dev/null || true
+PGID_FILE="$RUN_BASE/$TAG.pgid"
+LOCK_FILE="$RUN_BASE/queue.lock"     # shared across every tag: one voice at a time
+
+job_alive() {   # $1 = pgid ; true if any process in that group is alive
+  local g=$1
+  [[ "$g" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "-$g" 2>/dev/null
+}
+
+stop_job() {    # kill the recorded job group for this tag; 0 if something died
+  local g
+  [[ -f "$PGID_FILE" ]] || return 1
+  g=$(cat "$PGID_FILE" 2>/dev/null || true)
+  rm -f "$PGID_FILE"
+  job_alive "$g" || return 1
+  kill -TERM "-$g" 2>/dev/null
+  # piper's inference loop can be slow to notice TERM; give it a beat, then
+  # hard-kill anything in the group that's still up (workers + piper + player).
+  for _ in 1 2 3 4 5 6; do
+    job_alive "$g" || return 0
+    sleep 0.1
+  done
+  kill -KILL "-$g" 2>/dev/null
+  return 0
+}
+
+# ----------------------------------------------------------------- stop / toggle
+if [[ "$MODE" == stop ]]; then
+  stop_job; exit $?
+fi
+if [[ "$MODE" == toggle ]]; then
+  if stop_job; then exit 0; fi     # was running -> stopped -> done
+  # else fall through and speak
+fi
+
+# ----------------------------------------------------------------- re-exec into own process group
+# So --stop can signal the whole tree (workers + player + piper + paplay) with
+# one kill -TERM -PGID.  setsid makes this process a group + session leader.
+if [[ "${_PIPER_TTS_LEADER:-}" != 1 ]]; then
+  export _PIPER_TTS_LEADER=1
+  if command -v setsid >/dev/null 2>&1; then
+    exec setsid -w "$0" \
+      --tag "$TAG" --voice "$VOICE_ARG" --workers "$WORKERS" \
+      --sentence-silence "$SENTENCE_SILENCE" --max-chunk "$MAX_CHUNK" \
+      ${LENGTH_SCALE:+--length-scale "$LENGTH_SCALE"} \
+      ${NOISE_SCALE:+--noise-scale "$NOISE_SCALE"} \
+      ${NOISE_W:+--noise-w "$NOISE_W"} \
+      $([[ $NO_QUEUE == 1 ]] && echo --no-queue) \
+      $([[ $LIST_CHUNKS == 1 ]] && echo --list-chunks) \
+      -- "${TEXT_ARGS[@]}"
+  fi
+fi
+
+# ----------------------------------------------------------------- resolve voice
+VOICE_DIR=${PIPER_TTS_VOICE_DIR:-$HOME/.local/share/piper-voices}
+case "$VOICE_ARG" in
+  */*|*.onnx) MODEL=$VOICE_ARG ;;
+  *)          MODEL="$VOICE_DIR/$VOICE_ARG.onnx" ;;
+esac
+[[ -f "$MODEL" ]] || MODEL="$VOICE_DIR/${MODEL##*/}"
+[[ "$MODEL" == *.onnx ]] || MODEL="$MODEL.onnx"
+if [[ ! -r "$MODEL" ]]; then
+  echo "piper-tts: voice model not found: $MODEL" >&2
+  command -v notify-send >/dev/null 2>&1 && \
+    notify-send -a "piper-tts" "Voice not found" "$MODEL" 2>/dev/null || true
+  exit 1
+fi
+
+# resolve piper even from a bare Hyprland-keybind PATH
+PIPER=$(command -v piper 2>/dev/null || true)
+for c in "$HOME/.local/bin/piper" /usr/bin/piper /usr/local/bin/piper; do
+  [[ -n "$PIPER" ]] && break
+  [[ -x "$c" ]] && PIPER=$c
+done
+[[ -n "$PIPER" ]] || { echo "piper-tts: piper not found" >&2; exit 127; }
+
+PLAYER=$(command -v paplay 2>/dev/null || true)
+RAWFLAGS=()
+if [[ -n "$PLAYER" ]]; then
+  RAWFLAGS=(--raw --format=s16le --channels=1)
+  RATE_FLAG=--rate=
+else
+  PLAYER=$(command -v aplay 2>/dev/null || true)
+  RAWFLAGS=(-q -f S16_LE -c 1 -t raw)
+  RATE_FLAG=-r
+fi
+[[ -n "$PLAYER" ]] || { echo "piper-tts: no paplay/aplay" >&2; exit 127; }
+
+RATE=$(python3 -c 'import json,sys
+try: print(int(json.load(open(sys.argv[1]+".json"))["audio"]["sample_rate"]))
+except Exception: print(22050)' "$MODEL" 2>/dev/null || echo 22050)
+[[ "$RATE" =~ ^[0-9]+$ ]] || RATE=22050
+
+# ----------------------------------------------------------------- gather text
+if (( ${#TEXT_ARGS[@]} )); then
+  TEXT="${TEXT_ARGS[*]}"
+else
+  TEXT="$(cat)"
+fi
+# trim
+TEXT="$(printf '%s' "$TEXT" | tr '\n' ' ' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//')"
+[[ -n "$TEXT" ]] || exit 0
+
+# ----------------------------------------------------------------- chunk
+WORK="$(mktemp -d "$RUN_BASE/$TAG.XXXXXX")"
+cleanup() {
+  local g
+  g=$(cat "$WORK/pgid" 2>/dev/null || true)
+  jobs -p 2>/dev/null | while read -r p; do kill "$p" 2>/dev/null || true; done
+  rm -rf "$WORK" 2>/dev/null || true
+  [[ -f "$PGID_FILE" ]] && [[ "$(cat "$PGID_FILE" 2>/dev/null)" == "$g" ]] && rm -f "$PGID_FILE"
+  # If we're the job the alteringux.ttsplayer widget is tracking, tear its
+  # state down so the bar icon disappears the moment we stop. Only touch it
+  # when current.json still names our group (a newer job may already own it).
+  if [[ -r "$RUN_BASE/current.json" && -n "${g:-}" ]]; then
+    _cur_g=$(sed -n 's/.*"pgid":[[:space:]]*\([0-9]\+\).*/\1/p' "$RUN_BASE/current.json" 2>/dev/null)
+    if [[ "$_cur_g" == "$g" ]]; then
+      rm -f "$RUN_BASE/current.json" "$RUN_BASE/current.played" \
+            "$RUN_BASE/paused" "$RUN_BASE/muted" 2>/dev/null || true
+    fi
+  fi
+  # We are the setsid session/group leader; reap any straggler worker or piper
+  # (e.g. one still synthesising far ahead of the play cursor, or a FIFO piper
+  # whose reader already exited) so nothing is left running after we return.
+  # The KILL sweep runs in its own session so it can't be killed by its own
+  # signal to our group.
+  if [[ -n "${g:-}" && "$g" =~ ^[0-9]+$ ]]; then
+    setsid -f sh -c "kill -TERM -$g 2>/dev/null; sleep 0.4; kill -KILL -$g 2>/dev/null" 2>/dev/null || \
+      { kill -TERM "-$g" 2>/dev/null || true; }
+  fi
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+MAX_CHUNK="$MAX_CHUNK" FIRST_CHUNK=90 python3 - "$TEXT" "$WORK" <<'PY'
+import os, re, sys
+text, work = sys.argv[1], sys.argv[2]
+maxc  = max(60, int(os.environ.get("MAX_CHUNK", "240")))
+first = max(30, int(os.environ.get("FIRST_CHUNK", "90")))
+
+# sentence-ish split: keep the terminator with the sentence
+parts = re.split(r'(?<=[.!?…])\s+(?=[^a-z0-9])', text)
+sentences = [p.strip() for p in parts if p.strip()]
+if not sentences:
+    sentences = [text]
+
+def hardwrap(s, limit):
+    out = []
+    while len(s) > limit:
+        cut = -1
+        for sep in (', ', '; ', ': ', ' — ', ' - '):
+            i = s.rfind(sep, 0, limit)
+            if i > cut: cut = i + len(sep)
+        if cut < limit * 0.5:
+            i = s.rfind(' ', 0, limit)
+            cut = i + 1 if i > 0 else limit
+        out.append(s[:cut].strip())
+        s = s[cut:].strip()
+    if s:
+        out.append(s)
+    return out
+
+chunks = []
+buf = ""
+for s in sentences:
+    for piece in hardwrap(s, maxc):
+        limit = first if not chunks else maxc   # keep chunk 0 short → fast start
+        if not buf:
+            buf = piece
+        elif len(buf) + 1 + len(piece) <= limit:
+            buf += " " + piece
+        else:
+            chunks.append(buf)
+            buf = piece
+        # once chunk 0 has enough to say, cut it loose immediately
+        if not chunks and len(buf) >= first:
+            chunks.append(buf); buf = ""
+if buf:
+    # fold a tiny trailing fragment back into the previous chunk
+    if chunks and len(buf) < 40:
+        chunks[-1] += " " + buf
+    else:
+        chunks.append(buf)
+
+for i, c in enumerate(chunks):
+    with open(os.path.join(work, f"{i:04d}.txt"), "w", encoding="utf-8") as fh:
+        fh.write(c)
+PY
+N=$(ls "$WORK"/[0-9][0-9][0-9][0-9].txt 2>/dev/null | wc -l)
+(( N > 0 )) || exit 0
+
+if (( LIST_CHUNKS == 1 )); then
+  i=0
+  while (( i < N )); do
+    printf '%2d | %s\n' "$i" "$(cat "$WORK/$(printf '%04d' "$i").txt")"
+    i=$((i+1))
+  done
+  exit 0
+fi
+
+# ----------------------------------------------------------------- record our process group
+MYPGID=$(($(ps -o pgid= -p $$ | tr -d ' ')))
+echo "$MYPGID" > "$WORK/pgid"
+echo "$MYPGID" > "$PGID_FILE"
+
+# Publish a "now speaking" state file for the alteringux.ttsplayer bar widget.
+# Written once we actually hold the playback queue (see call site after flock),
+# carrying the text so the widget's Loop button can replay it. Best-effort:
+# any failure here must never disrupt speech.
+_tts_publish_current() {
+  TTS_TAG="$TAG" TTS_VOICE="$VOICE_ARG" TTS_LS="${LENGTH_SCALE:-}" \
+  TTS_PGID="$MYPGID" TTS_CHUNKS="$N" TTS_RUN="$RUN_BASE" \
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import json, os, sys, time
+run = os.environ["TTS_RUN"]
+state = {
+    "tag": os.environ.get("TTS_TAG", "default"),
+    "voice": os.environ.get("TTS_VOICE", ""),
+    "length_scale": os.environ.get("TTS_LS", ""),
+    "pgid": int(os.environ.get("TTS_PGID", "0") or 0),
+    "started_at": int(time.time()),
+    "chunks": int(os.environ.get("TTS_CHUNKS", "0") or 0),
+    "chars": len(sys.argv[1]),
+    "text": sys.argv[1],
+}
+tmp = os.path.join(run, "current.json.tmp")
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(state, fh)
+os.replace(tmp, os.path.join(run, "current.json"))
+with open(os.path.join(run, "current.played"), "w") as fh:
+    fh.write("0")
+PY
+}
+
+piper_args=( -m "$MODEL" --sentence_silence "$SENTENCE_SILENCE" -q --output_raw )
+[[ -n "$LENGTH_SCALE" ]] && piper_args+=( --length_scale "$LENGTH_SCALE" )
+[[ -n "$NOISE_SCALE"  ]] && piper_args+=( --noise_scale  "$NOISE_SCALE" )
+[[ -n "$NOISE_W"      ]] && piper_args+=( --noise_w      "$NOISE_W" )
+
+synth_to_file() {   # $1 = chunk index ; raw PCM -> WORK/NNNN.raw (+ .done)
+  local idx pad
+  idx=$1; pad=$(printf '%04d' "$idx")
+  [[ -e "$WORK/$pad.done" || -e "$WORK/$pad.raw.part" ]] && return 0
+  "$PIPER" "${piper_args[@]}" < "$WORK/$pad.txt" > "$WORK/$pad.raw.part" 2>/dev/null
+  mv "$WORK/$pad.raw.part" "$WORK/$pad.raw" 2>/dev/null
+  : > "$WORK/$pad.done"
+}
+
+# chunk 0 is streamed live (see below); workers handle chunks 1..N-1.
+if [[ "${PIPER_TTS_NOSTREAM0:-0}" == 1 ]]; then
+  STREAM0=0; START=0
+else
+  STREAM0=1; START=1
+fi
+
+wcount=$WORKERS
+(( wcount > N - START )) && wcount=$(( N - START ))
+(( wcount < 1 )) && wcount=1
+
+for ((w=0; w<wcount; w++)); do
+  (
+    for ((i=START+w; i<N; i+=wcount)); do
+      synth_to_file "$i"
+    done
+  ) &
+done
+
+# ----------------------------------------------------------------- queue (one voice at a time)
+exec {LFD}>"$LOCK_FILE" 2>/dev/null || LFD=
+if [[ $NO_QUEUE -eq 0 && -n "${LFD:-}" ]]; then
+  flock "$LFD"                 # blocks here until other piper-tts jobs finish;
+fi                             # our workers keep synthesising while we wait.
+
+# We now own the queue: this job is the one voice about to be heard.
+_tts_publish_current "$TEXT"
+
+play_raw() {   # $1 = path to a raw PCM file (may be a FIFO)
+  "$PLAYER" "${RAWFLAGS[@]}" "${RATE_FLAG}${RATE}" "$1" 2>/dev/null
+}
+
+# ----------------------------------------------------------------- chunk 0: streamed live
+if [[ $STREAM0 -eq 1 ]]; then
+  FIFO="$WORK/0000.fifo"
+  mkfifo "$FIFO" 2>/dev/null
+  ( "$PIPER" "${piper_args[@]}" < "$WORK/0000.txt" > "$FIFO" 2>/dev/null ) &
+  printf '0' > "$RUN_BASE/current.played" 2>/dev/null || true
+  play_raw "$FIFO"
+  rm -f "$FIFO" "$WORK/0000.txt"
+fi
+
+# ----------------------------------------------------------------- chunks 1..N-1 in order
+for ((i=START; i<N; i++)); do
+  pad=$(printf '%04d' "$i")
+  # wait for this chunk (workers race ahead, so it's usually already here)
+  while [[ ! -e "$WORK/$pad.done" ]]; do
+    sleep 0.02
+    [[ -f "$WORK/pgid" ]] || exit 0     # cleaned up / stopped
+  done
+  printf '%s' "$i" > "$RUN_BASE/current.played" 2>/dev/null || true
+  [[ -s "$WORK/$pad.raw" ]] && play_raw "$WORK/$pad.raw"
+  rm -f "$WORK/$pad.raw" "$WORK/$pad.txt" "$WORK/$pad.done"
+done
+
+wait 2>/dev/null || true
+exit 0

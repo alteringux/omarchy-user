@@ -5,6 +5,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Dashboard overlay: a small grid of cards (news, system, notes) anchored
 // under the bar icon. Read-only view over BarWidget's state file — all
@@ -23,16 +24,22 @@ Panel {
   readonly property color cardBackground: Util.alpha(root.barForeground, 0.05)
   readonly property color cardBorder: Util.alpha(root.barForeground, 0.14)
 
+  readonly property var guard: Kit.BugGuard.create("alteringux.dashboard", function(argv) { Quickshell.execDetached(argv) })
+
   function clearNotes() {
-    if (!hostWidget) return
-    notesClearProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-dashboard-note", "--clear"]
-    notesClearProc.running = true
+    guard.run("clearNotes", function() {
+      if (!hostWidget) return
+      notesClearProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-dashboard-note", "--clear"]
+      notesClearProc.running = true
+    })
   }
 
   function trackNewsClick(title) {
-    if (!hostWidget || !title) return
-    trackProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-dashboard-track", title]
-    trackProc.running = true
+    guard.run("trackNewsClick", function() {
+      if (!hostWidget || !title) return
+      trackProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-dashboard-track", title]
+      trackProc.running = true
+    })
   }
 
   Process {
@@ -174,10 +181,10 @@ Panel {
                   MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: {
+                    onClicked: guard.run("news.onClicked", function() {
                       root.trackNewsClick(modelData.title)
                       if (modelData.url) Quickshell.execDetached(["xdg-open", modelData.url])
-                    }
+                    })
                   }
                 }
                 Text {

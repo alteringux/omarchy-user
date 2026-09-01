@@ -17,6 +17,21 @@ function defaultWatchlist() {
   return { version: 1, tickers: [] }
 }
 
+// Tolerant parse for stocks-watchlist.json (plugin-owned config): a
+// half-written or malformed file degrades to an empty ticker list rather than
+// throwing.
+function parseWatchlist(raw) {
+  var parsed = defaultWatchlist()
+  if (!raw || raw.length === 0) return parsed
+  try {
+    var stored = JSON.parse(raw)
+    if (stored && Array.isArray(stored.tickers)) parsed.tickers = stored.tickers
+  } catch (e) {
+    console.warn("stocks: watchlist parse failed:", e)
+  }
+  return parsed
+}
+
 function defaultState() {
   return { version: 1, updatedAt: null, watchlist: {}, gainers: [], losers: [], trending: [] }
 }
@@ -69,6 +84,10 @@ function parseChartQuote(raw, fallbackSymbol) {
     changePct: changePct,
     week52High: meta.fiftyTwoWeekHigh !== undefined ? meta.fiftyTwoWeekHigh : null,
     week52Low: meta.fiftyTwoWeekLow !== undefined ? meta.fiftyTwoWeekLow : null,
+    // Yahoo reports the listing's own currency here — "AUD" for .AX symbols,
+    // "GBp" for LSE, etc. Threaded through so the panel can render A$ / £
+    // instead of assuming USD. Absent on a failed fetch.
+    currency: meta.currency || null,
     series: series,
     ok: true
   }
@@ -79,15 +98,44 @@ function parseChartQuote(raw, fallbackSymbol) {
 // chart endpoint's `meta` (regularMarketChangePercent is precomputed here,
 // vs. derived from price/prevClose above) but map onto the same common shape.
 function parseScreenerQuote(raw) {
-  if (!raw || !raw.symbol) return { symbol: null, name: null, price: null, changePct: null, week52High: null, week52Low: null }
+  if (!raw || !raw.symbol) return { symbol: null, name: null, price: null, changePct: null, week52High: null, week52Low: null, currency: null }
   return {
     symbol: raw.symbol,
     name: raw.shortName || raw.longName || raw.symbol,
     price: raw.regularMarketPrice !== undefined ? raw.regularMarketPrice : null,
     changePct: raw.regularMarketChangePercent !== undefined ? raw.regularMarketChangePercent : null,
     week52High: raw.fiftyTwoWeekHigh !== undefined ? raw.fiftyTwoWeekHigh : null,
-    week52Low: raw.fiftyTwoWeekLow !== undefined ? raw.fiftyTwoWeekLow : null
+    week52Low: raw.fiftyTwoWeekLow !== undefined ? raw.fiftyTwoWeekLow : null,
+    currency: raw.currency || null
   }
+}
+
+// Raw shape: the trimmed JSON array bin/omarchy-stocks-search prints, itself
+// derived from query1.finance.yahoo.com/v1/finance/search?q=<query>. Powers
+// the Add-ticker autocomplete in Panel.qml. Tolerant of shape: accepts
+// either that trimmed array or Yahoo's raw `{quotes:[...]}` envelope, drops
+// rows with no symbol, de-dups by symbol (Yahoo repeats some listings), and
+// caps the list. Non-US rows keep their suffix (BHP.AX, VOD.L).
+function parseSearchResults(raw, limit) {
+  var rows = Array.isArray(raw) ? raw
+    : (raw && Array.isArray(raw.quotes) ? raw.quotes : null)
+  if (!rows) return []
+  var seen = {}
+  var out = []
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i]
+    if (!r || !r.symbol) continue
+    var symbol = String(r.symbol).toUpperCase()
+    if (seen[symbol]) continue
+    seen[symbol] = true
+    out.push({
+      symbol: symbol,
+      name: r.name || r.longname || r.shortname || r.symbol,
+      exchange: r.exch || r.exchDisp || r.exchange || "",
+      type: String(r.type || r.quoteType || "").toUpperCase()
+    })
+  }
+  return limit ? out.slice(0, limit) : out
 }
 
 // Raw shape: query1.finance.yahoo.com/v1/finance/trending/US. Bare symbols
@@ -101,6 +149,28 @@ function parseTrendingSymbols(raw, limit) {
 }
 
 // ------------------------------------------------------------- formatting
+// Map a Yahoo currency code onto a short display prefix. Unknown codes fall
+// back to "<CODE> " (e.g. "SEK 142.00") rather than a wrong symbol. Added so
+// .AX (AUD) watchlist cards don't render a misleading "$".
+var CURRENCY_PREFIX = {
+  USD: "$", AUD: "A$", NZD: "NZ$", CAD: "C$", SGD: "S$", HKD: "HK$",
+  GBP: "£", EUR: "€", JPY: "¥", CNY: "¥", INR: "₹", CHF: "CHF ", ZAR: "R "
+}
+
+function currencyPrefix(code) {
+  if (!code) return "$"
+  if (CURRENCY_PREFIX.hasOwnProperty(code)) return CURRENCY_PREFIX[code]
+  return code + " "
+}
+
+// Price with a currency-aware prefix. "—" for a missing/NaN price so callers
+// don't have to special-case it. GBp (pence) quotes pass through as-is —
+// rare in a personal watchlist and not worth a /100 special case.
+function formatPrice(price, currency) {
+  if (price === null || price === undefined || isNaN(price)) return "—"
+  return currencyPrefix(currency) + Number(price).toFixed(2)
+}
+
 function formatChangePct(pct) {
   if (pct === null || pct === undefined || isNaN(pct)) return "—"
   var sign = pct >= 0 ? "+" : ""
@@ -251,11 +321,15 @@ if (typeof module !== "undefined") {
     FILTER_NEAR_HIGH: FILTER_NEAR_HIGH,
     FILTER_NEAR_LOW: FILTER_NEAR_LOW,
     defaultWatchlist: defaultWatchlist,
+    parseWatchlist: parseWatchlist,
     defaultState: defaultState,
     parseState: parseState,
     parseChartQuote: parseChartQuote,
     parseScreenerQuote: parseScreenerQuote,
     parseTrendingSymbols: parseTrendingSymbols,
+    parseSearchResults: parseSearchResults,
+    currencyPrefix: currencyPrefix,
+    formatPrice: formatPrice,
     formatChangePct: formatChangePct,
     changeDirection: changeDirection,
     week52Position: week52Position,

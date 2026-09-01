@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Selects a screen region, OCRs it, and reads the extracted text aloud via
+# Piper TTS. Run again while speaking to stop (shares omarchy-narrate's
+# stop-toggle and pidfile, since only one thing should be talking at once).
+#
+# Region-select + OCR steps mirror omarchy-capture-text; TTS playback steps
+# mirror omarchy-narrate. Deliberately not reusing the countdown/stopwatch
+# scripts' cached-wav speak(): OCR'd screenshot text is one-off, not a
+# small set of repeated phrases, so caching would just grow that cache dir
+# with wavs that are never reused.
+set -uo pipefail
+
+DEBUGLOG="/tmp/omarchy-narrate-screenshot-debug.log"
+echo "[DEBUG-nscr1] $(date '+%T') invoked, PATH=$PATH" >>"$DEBUGLOG"
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+
+# Shares the "narrate" tag with omarchy-narrate: only one of them talks at a
+# time, and a second press of either key stops whatever is going.
+if "$PIPER_TTS" --tag narrate --stop; then
+  echo "[DEBUG-nscr1] $(date '+%T') stop-toggle: stopped running narrate" >>"$DEBUGLOG"
+  exit 0
+fi
+
+cleanup_freeze() {
+  [[ -n ${FREEZE_PID:-} ]] && kill "$FREEZE_PID" 2>/dev/null
+}
+trap cleanup_freeze EXIT
+
+hyprpicker -r -z >/dev/null 2>>"$DEBUGLOG" &
+FREEZE_PID=$!
+sleep .1
+SELECTION=$(slurp 2>>"$DEBUGLOG")
+echo "[DEBUG-nscr1] $(date '+%T') slurp returned: '$SELECTION'" >>"$DEBUGLOG"
+
+if [[ -z $SELECTION ]]; then
+  echo "[DEBUG-nscr1] $(date '+%T') empty selection, exiting" >>"$DEBUGLOG"
+  exit 0
+fi
+
+TEXT=$(grim -g "$SELECTION" - 2>>"$DEBUGLOG" | tesseract stdin stdout --oem 1 --psm 6 -l "${OMARCHY_OCR_LANGS:-eng}" --dpi 300 -c preserve_interword_spaces=1 2>>"$DEBUGLOG")
+echo "[DEBUG-nscr1] $(date '+%T') OCR text (${#TEXT} chars): $(printf '%q' "$TEXT")" >>"$DEBUGLOG"
+
+if [[ -z $TEXT ]]; then
+  echo "[DEBUG-nscr1] $(date '+%T') no text found, notifying and exiting" >>"$DEBUGLOG"
+  notify-send "Narrator" "No text found in selection." 2>>"$DEBUGLOG"
+  exit 1
+fi
+
+printf '%s' "$TEXT" | "$PIPER_TTS" --tag narrate --voice "$VOICE" 2>>"$DEBUGLOG"
+echo "[DEBUG-nscr1] $(date '+%T') piper-tts exit=$?" >>"$DEBUGLOG"

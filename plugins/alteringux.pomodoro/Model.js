@@ -27,6 +27,56 @@ function defaultConfig() {
   }
 }
 
+// Tolerant parse for pomodoro-config.json: adopts only keys already present in
+// defaultConfig() (so `sounds`, like any other key, is taken wholesale from the
+// stored file when present); a malformed file degrades to all-defaults rather
+// than throwing and taking the bar widget down.
+function parseConfig(raw) {
+  var parsed = defaultConfig()
+  if (!raw || raw.length === 0) return parsed
+  try {
+    var stored = JSON.parse(raw)
+    if (stored && typeof stored === "object") {
+      for (var key in parsed) if (stored[key] !== undefined) parsed[key] = stored[key]
+    }
+  } catch (e) {
+    console.warn("pomodoro: config parse failed:", e)
+  }
+  return parsed
+}
+
+// Tolerant parse for pomodoro-stats.json: a half-written or malformed file
+// degrades to a zero streak and empty daily buckets.
+function parseStats(raw) {
+  var parsed = defaultStats()
+  if (!raw || raw.length === 0) return parsed
+  try {
+    var stored = JSON.parse(raw)
+    if (stored && typeof stored === "object") {
+      parsed.streak = stored.streak || 0
+      parsed.lastActiveDate = stored.lastActiveDate || ""
+      parsed.daily = (stored.daily && typeof stored.daily === "object") ? stored.daily : {}
+    }
+  } catch (e) {
+    console.warn("pomodoro: stats parse failed:", e)
+  }
+  return parsed
+}
+
+// Tolerant parse for pomodoro-history.json: a malformed file degrades to an
+// empty session log.
+function parseHistory(raw) {
+  var parsed = defaultHistory()
+  if (!raw || raw.length === 0) return parsed
+  try {
+    var stored = JSON.parse(raw)
+    if (stored && Array.isArray(stored.sessions)) parsed.sessions = stored.sessions
+  } catch (e) {
+    console.warn("pomodoro: history parse failed:", e)
+  }
+  return parsed
+}
+
 // How often to re-notify the user while a finished phase is sitting
 // "ready", waiting for them to start the next one.
 function reminderIntervalMs(config) {
@@ -74,6 +124,135 @@ function phaseDurationMs(phase, config) {
   return Math.max(0, minutes) * 60000
 }
 
+// ---------------------------------------------------------- session persistence
+//
+// The live timer (phase / running / remaining) is kept in a small JSON file
+// so a shell restart or a full reboot doesn't lose a pomodoro in progress.
+// Only transitions and a slow heartbeat write it; the exact remaining time is
+// reconstructed on load from `savedAtMs` vs. wall clock, so the gap the
+// process was dead for is subtracted rather than ignored.
+
+var SESSION_PHASES = [PHASE_IDLE, PHASE_WORK, PHASE_SHORT_BREAK, PHASE_LONG_BREAK]
+
+function defaultSession() {
+  return {
+    version: 1,
+    phase: PHASE_IDLE,
+    running: false,
+    ready: false,
+    remainingMs: 0,
+    elapsedReadyMs: 0,
+    completedPomodorosThisSession: 0,
+    savedAtMs: 0
+  }
+}
+
+function _num(v) {
+  var n = Number(v)
+  return isFinite(n) ? n : 0
+}
+
+// Tolerant parse for pomodoro-session.json: a malformed / half-written file
+// degrades to an idle session rather than throwing and taking the bar down.
+// An IDLE phase can never be running/ready, so those are forced consistent.
+function parseSession(raw) {
+  var parsed = defaultSession()
+  if (!raw || raw.length === 0) return parsed
+  try {
+    var s = JSON.parse(raw)
+    if (s && typeof s === "object") {
+      if (SESSION_PHASES.indexOf(s.phase) !== -1) parsed.phase = s.phase
+      parsed.running = !!s.running
+      parsed.ready = !!s.ready
+      parsed.remainingMs = Math.max(0, _num(s.remainingMs))
+      parsed.elapsedReadyMs = Math.max(0, _num(s.elapsedReadyMs))
+      parsed.completedPomodorosThisSession = Math.max(0, Math.floor(_num(s.completedPomodorosThisSession)))
+      parsed.savedAtMs = Math.max(0, _num(s.savedAtMs))
+    }
+  } catch (e) {
+    console.warn("pomodoro: session parse failed:", e)
+  }
+  if (parsed.phase === PHASE_IDLE) {
+    parsed.running = false
+    parsed.ready = false
+    parsed.remainingMs = 0
+    parsed.elapsedReadyMs = 0
+  }
+  return parsed
+}
+
+// Reconcile a persisted session against the current wall clock. `downtime`
+// is however long the process was gone (or just the time since the last
+// heartbeat write). Returns a fresh session object plus `workCompletedOffline`
+// so the caller can credit stats/history for a WORK block that ran out while
+// the shell was down.
+//
+//  - running, still time left        -> keep running, subtract downtime
+//  - running, ran out while away     -> land in the next phase, "ready" (as a
+//                                       live completion would), carry the
+//                                       leftover into elapsedReadyMs
+//  - ready                           -> add downtime to elapsedReadyMs
+//  - paused mid-phase                -> frozen; a paused timer doesn't tick down
+function restoreSession(session, nowMs, config) {
+  var s = parseSession(typeof session === "string" ? session : JSON.stringify(session || {}))
+  var out = {
+    version: 1,
+    phase: s.phase,
+    running: s.running,
+    ready: s.ready,
+    remainingMs: s.remainingMs,
+    elapsedReadyMs: s.elapsedReadyMs,
+    completedPomodorosThisSession: s.completedPomodorosThisSession,
+    savedAtMs: nowMs,
+    workCompletedOffline: false
+  }
+  if (out.phase === PHASE_IDLE) return out
+
+  var downtime = Math.max(0, nowMs - s.savedAtMs)
+
+  if (out.running) {
+    var newRemaining = out.remainingMs - downtime
+    if (newRemaining > 0) {
+      out.remainingMs = newRemaining
+      return out
+    }
+    var leftover = -newRemaining
+    var wasWork = out.phase === PHASE_WORK
+    var upcoming = nextPhase(out.phase, out.completedPomodorosThisSession, config.longBreakCycle)
+    if (wasWork) {
+      out.completedPomodorosThisSession += 1
+      out.workCompletedOffline = true
+    }
+    out.phase = upcoming
+    out.remainingMs = phaseDurationMs(upcoming, config)
+    out.running = false
+    out.ready = true
+    // Cap the carried-over "ready" counter to one phase length so a
+    // days-long downtime doesn't surface an absurd number in the bar.
+    var upcomingMs = phaseDurationMs(upcoming, config)
+    out.elapsedReadyMs = upcomingMs > 0 ? Math.min(leftover, upcomingMs) : leftover
+    return out
+  }
+
+  if (out.ready) {
+    out.elapsedReadyMs += downtime
+    return out
+  }
+
+  return out
+}
+
+// Elapsed fraction (0 at the start of a phase, 1 when its countdown hits
+// zero) for the bar's progress fill. Works for WORK and both break phases;
+// returns 0 for IDLE or any zero-length phase. Clamped to [0, 1] so a
+// stale/overshot remainingMs can't push the fill past its track.
+function phaseProgress(phase, remainingMs, config) {
+  var total = phaseDurationMs(phase, config)
+  if (!(total > 0)) return 0
+  var clampedRemaining = Math.max(0, Math.min(total, remainingMs))
+  return (total - clampedRemaining) / total
+}
+
 function formatRemaining(ms) {
   var totalSeconds = Math.max(0, Math.ceil(ms / 1000))
   var minutes = Math.floor(totalSeconds / 60)
@@ -92,14 +271,14 @@ function phaseLabel(phase) {
 // waiting on the user, so the bar visibly changes state rather than
 // looking identical to a running/paused timer.
 function readyIcon() {
-  return "⏰"
+  return ""
 }
 
 function phaseIcon(phase) {
-  if (phase === PHASE_WORK) return "🍅"
-  if (phase === PHASE_SHORT_BREAK) return "☕"
-  if (phase === PHASE_LONG_BREAK) return "🌙"
-  return "🍅"
+  if (phase === PHASE_WORK) return ""
+  if (phase === PHASE_SHORT_BREAK) return ""
+  if (phase === PHASE_LONG_BREAK) return ""
+  return ""
 }
 
 // transitionKey: "workStart" | "breakStart" | "longBreakStart"
@@ -235,10 +414,17 @@ if (typeof module !== "undefined") {
     defaultConfig: defaultConfig,
     defaultStats: defaultStats,
     defaultHistory: defaultHistory,
+    parseConfig: parseConfig,
+    parseStats: parseStats,
+    parseHistory: parseHistory,
+    defaultSession: defaultSession,
+    parseSession: parseSession,
+    restoreSession: restoreSession,
     recordWorkSession: recordWorkSession,
     suggestedWorkMinutes: suggestedWorkMinutes,
     nextPhase: nextPhase,
     phaseDurationMs: phaseDurationMs,
+    phaseProgress: phaseProgress,
     formatRemaining: formatRemaining,
     phaseLabel: phaseLabel,
     phaseIcon: phaseIcon,

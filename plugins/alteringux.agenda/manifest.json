@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.agenda",
+  "name": "Agenda",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Headless service that watches local .ics calendars and notifies before the next event",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

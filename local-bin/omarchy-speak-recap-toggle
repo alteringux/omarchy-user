@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Flip whether omarchy-speak-recap speaks at boot (autostart --boot path).
+# Manual runs / the SUPER+ALT+W keybinding always speak regardless.
+set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-recap"
+STATE_FILE="$STATE_DIR/state"
+mkdir -p "$STATE_DIR"
+
+cur="on"
+[[ -r "$STATE_FILE" ]] && cur="$(cat "$STATE_FILE" 2>/dev/null)"
+
+if [[ "$cur" == "off" ]]; then
+  echo on > "$STATE_FILE"
+  notify-send -a "Weekly recap" "Boot readout: ON" "Piper will read your next steps at login." -i audio-volume-high 2>/dev/null || true
+else
+  echo off > "$STATE_FILE"
+  notify-send -a "Weekly recap" "Boot readout: OFF" "Silent at login. SUPER+ALT+W still speaks on demand." -i audio-volume-muted 2>/dev/null || true
+fi

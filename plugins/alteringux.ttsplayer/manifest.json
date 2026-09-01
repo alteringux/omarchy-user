@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.ttsplayer",
+  "name": "TTS Player",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Transport controls for the currently-speaking Piper TTS job (piper-tts)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "TTS Player",
+    "description": "Shows a speaker icon only while Piper TTS is talking; click for pause / stop / speed / loop / mute and a progress bar",
+    "category": "Media",
+    "allowMultiple": false
+  }
+}

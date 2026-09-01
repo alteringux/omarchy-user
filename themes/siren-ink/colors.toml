@@ -1,0 +1,39 @@
+mode = "dark"
+
+# Siren Ink -- seductive tattoos: candlelit skin, oxblood ink, aged blue-green
+# linework, a lipstick rose, and a hit of gilded flash.
+
+accent = "#c8203f"
+selection = "#5a2230"
+muted = "#6b4b50"
+
+background = "#1a1113"
+dark_background = "#120c0e"
+darker_background = "#0b0708"
+lighter_background = "#241619"
+
+foreground = "#f2dfe0"
+dark_foreground = "#7a5c60"
+light_foreground = "#e8cccd"
+bright_foreground = "#fff0f0"
+
+hyprland_active_border = "rgba(c8203fee) rgba(e072a5ee)"
+hyprland_inactive_border = "rgba(5a2230aa)"
+active_border_color = "#e072a5"
+active_tab_background = "#5a2230"
+
+red = "#d12b46"
+orange = "#d9764e"
+yellow = "#d9a441"
+green = "#4f9d8a"
+cyan = "#4aa6a6"
+blue = "#7d5a9e"
+magenta = "#b5477e"
+brown = "#6b4b50"
+
+bright_red = "#f2506a"
+bright_yellow = "#f0c46a"
+bright_green = "#78c3b0"
+bright_cyan = "#7fcccc"
+bright_blue = "#9b7cc0"
+bright_magenta = "#e072a5"

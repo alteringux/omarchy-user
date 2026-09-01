@@ -1,0 +1,207 @@
+import QtQuick
+import QtQuick.Layouts
+import Quickshell
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+import "../alteringux.kit" as Kit
+
+// Transport panel for the currently-speaking Piper TTS job. Everything here
+// acts on hostWidget (the BarWidget), which owns the state and the calls out
+// to tts-player-ctl / piper-tts.
+Panel {
+  id: root
+  moduleName: "alteringux.ttsplayer"
+  ipcTarget: ""
+
+  property var anchorItem: null
+  property var hostWidget: null
+
+  readonly property bool speaking: hostWidget && hostWidget.active
+  readonly property var speeds: [1, 1.25, 1.5, 2]
+
+  readonly property var guard: Kit.BugGuard.create("alteringux.ttsplayer", function (argv) { Quickshell.execDetached(argv) })
+
+  readonly property real progress: {
+    if (!hostWidget) return 0
+    return Model.progressFraction({
+      chunks: hostWidget.state ? hostWidget.state.chunks : 1,
+      played: hostWidget.playedIndex,
+      elapsed: hostWidget.elapsedSeconds,
+      chars: hostWidget.state ? hostWidget.state.chars : 0
+    })
+  }
+
+  readonly property string chunkText: {
+    if (!hostWidget || !hostWidget.state) return ""
+    return Model.chunkLabel({ chunks: hostWidget.state.chunks, played: hostWidget.playedIndex })
+  }
+
+  KeyboardPanel {
+    id: panel
+    anchorItem: root.anchorItem
+    owner: root
+    bar: root.bar
+    open: root.opened && root.anchorItem !== null
+    contentWidth: panel.fittedContentWidth(Style.space(280))
+    contentHeight: panel.fittedContentHeight(content.implicitHeight)
+
+    PanelKeyCatcher {
+      anchors.fill: parent
+
+      onCloseRequested: root.close()
+      onActivateRequested: if (root.speaking && hostWidget) hostWidget.togglePause()
+      onDeleteRequested: if (root.speaking && hostWidget) hostWidget.stopPlayback()
+
+      Column {
+        id: content
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        spacing: Style.space(14)
+
+        PanelSectionHeader {
+          text: "TEXT TO SPEECH"
+          foreground: root.barForeground
+        }
+
+        Text {
+          width: content.width
+          text: {
+            if (!root.speaking) return "Nothing speaking"
+            var base = hostWidget.paused ? "Paused" : "Speaking"
+            base += "  ·  " + Model.formatElapsed(hostWidget.elapsedSeconds)
+            if (root.chunkText.length > 0) base += "  ·  " + root.chunkText
+            return base
+          }
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          elide: Text.ElideRight
+        }
+
+        // Progress. Deliberately not a slider: piper-tts streams chunk by
+        // chunk with no seekable timeline, so this is a read-only best-effort
+        // fill, not a scrub bar.
+        Rectangle {
+          width: content.width
+          height: Style.space(6)
+          radius: height / 2
+          color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.18)
+          visible: root.speaking
+
+          Rectangle {
+            height: parent.height
+            radius: parent.radius
+            width: Math.max(parent.height, parent.width * root.progress)
+            color: root.barForeground
+            opacity: hostWidget && hostWidget.paused ? 0.45 : 0.9
+            Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
+          }
+        }
+
+        Text {
+          visible: root.speaking
+          width: content.width
+          text: "Seeking isn't available for streaming TTS."
+          color: Qt.darker(root.barForeground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
+        PanelSeparator {}
+
+        // Pause / Stop.
+        Row {
+          spacing: Style.space(8)
+
+          Button {
+            text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
+            foreground: root.barForeground
+            bordered: true
+            enabled: root.speaking
+            onClicked: if (hostWidget) hostWidget.togglePause()
+          }
+          Button {
+            text: "Stop"
+            foreground: root.barForeground
+            bordered: true
+            enabled: root.speaking
+            onClicked: if (hostWidget) hostWidget.stopPlayback()
+          }
+        }
+
+        // Speed. Streaming audio can't be re-timed mid-flight, so this sets
+        // the rate for the next reading (and for Loop); "Restart now" applies
+        // it to the current one by re-speaking from the top.
+        Text {
+          width: content.width
+          text: "Speed"
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+
+        Row {
+          spacing: Style.space(6)
+
+          Repeater {
+            model: root.speeds
+            Button {
+              required property var modelData
+              text: (modelData === 1 ? "1" : String(modelData)) + "×"
+              foreground: root.barForeground
+              bordered: hostWidget && Math.abs(hostWidget.speed - modelData) < 0.001
+              onClicked: if (hostWidget) hostWidget.setSpeed(modelData)
+            }
+          }
+        }
+
+        Button {
+          text: "Restart now at " + (hostWidget ? (hostWidget.speed === 1 ? "1" : String(hostWidget.speed)) : "1") + "×"
+          foreground: root.barForeground
+          bordered: true
+          visible: root.speaking
+          onClicked: if (hostWidget) hostWidget.restartAtSpeed()
+        }
+
+        PanelSeparator {}
+
+        Toggle {
+          width: content.width
+          activeFocusOnTab: false
+          label: "Loop reading"
+          description: (hostWidget && hostWidget.loopEnabled)
+            ? "Restarts automatically when it finishes"
+            : "Plays once"
+          checked: hostWidget && hostWidget.loopEnabled
+          foreground: root.barForeground
+          onClicked: if (hostWidget) hostWidget.toggleLoop()
+        }
+
+        Toggle {
+          width: content.width
+          activeFocusOnTab: false
+          label: "Mute"
+          description: (hostWidget && hostWidget.muted)
+            ? "Silenced — piper keeps running"
+            : "Audible"
+          checked: hostWidget && hostWidget.muted
+          foreground: root.barForeground
+          enabled: root.speaking
+          onClicked: if (hostWidget) hostWidget.toggleMute()
+        }
+
+        Text {
+          text: "Space: pause  ·  X: stop  ·  Esc: close"
+          color: Qt.darker(root.barForeground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+        }
+      }
+    }
+  }
+}

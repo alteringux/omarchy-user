@@ -32,7 +32,8 @@ function parseState(raw) {
       state.system.updatedAt = parsed.system.updatedAt || null
       if (Array.isArray(parsed.system.items)) state.system.items = parsed.system.items
     }
-    if (parsed.engagement && parsed.engagement.news && typeof parsed.engagement.news === "object") {
+    if (parsed.engagement && parsed.engagement.news &&
+        typeof parsed.engagement.news === "object" && !Array.isArray(parsed.engagement.news)) {
       state.engagement.news = parsed.engagement.news
     }
     if (parsed.digest) {

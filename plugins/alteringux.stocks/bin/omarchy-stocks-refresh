@@ -70,6 +70,13 @@ raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/trending/US")
 # ------------------------------------------------------- write atomically
 tmp=$(mktemp "${STATE_FILE}.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
+
+# Catch a non-zero exit and hand it to the plugin bug-report pipeline.
+# Sourced after our own trap so it chains, not clobbers. Best-effort:
+# absent guard file = no-op.
+OMARCHY_PLUGIN_ID="alteringux.stocks"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
 jq -cn \
   --argjson watchlist "$watchlist_json" \
   --argjson gainers "$gainers_json" \

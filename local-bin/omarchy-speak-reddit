@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# Speak the day's 10 most interesting Reddit stories aloud via Piper TTS.
+# Press the hotkey again while it's talking to stop.
+#
+# Fast:
+#   * Each story streams straight from `piper --output_raw` into paplay, so it
+#     starts talking in ~0.5s instead of synthesising ten WAVs up front.
+#   * The RSS feed is cached for 10 minutes, so a repeat press replays
+#     instantly and never trips Reddit's rate limiter.
+# Self-improving (data only -- this script never rewrites itself):
+#   A per-subreddit weight file. Stories you hear in full nudge that
+#   subreddit's weight up; a story you skip past (by stopping early) nudges it
+#   down. The ranking converges on what you actually listen to. A rolling 24h
+#   history file stops the same story being read to you twice.
+#
+# Uses Reddit's public `top/.rss` feed (their own top-of-day ordering) rather
+# than the .json API, which now hard-403s non-OAuth clients. Feed position is
+# the base score; the learned weight re-ranks on top of it.
+#
+# Part of the omarchy-narrate / omarchy-speak-time family: en_GB-cori voice,
+# PID stop-toggle, logged in ~/Documents/omarchy-changelog.md.
+set -uo pipefail
+
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+UA="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+CACHE_TTL=600   # seconds a fetched feed stays fresh
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-reddit"
+WEIGHTS="$STATE_DIR/weights.json"
+HISTORY="$STATE_DIR/history.json"
+RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-speak-reddit"
+PIDFILE="$RUN_DIR/pid"
+PROGRESS="$RUN_DIR/progress"    # 1-based index of the story now playing
+STORIES="$RUN_DIR/stories.tsv"  # id <TAB> subreddit, one queued story per line
+FEED="$RUN_DIR/feed.rss"
+
+mkdir -p "$STATE_DIR" "$RUN_DIR"
+[[ -f "$WEIGHTS" ]] || echo '{}' > "$WEIGHTS"
+[[ -f "$HISTORY" ]] || echo '[]' > "$HISTORY"
+
+# --- stop-toggle: a second press signals the running instance and exits -----
+if [[ -f "$PIDFILE" ]] && kill -0 "$(cat "$PIDFILE" 2>/dev/null)" 2>/dev/null; then
+  kill -TERM "$(cat "$PIDFILE")" 2>/dev/null
+  exit 0
+fi
+
+echo $$ > "$PIDFILE"
+CHILD_PID=""
+COMPLETED=0
+
+cleanup() {
+  # Stop the current line: piper-tts re-execs into its own session, so signal
+  # it by tag rather than by $CHILD_PID (which is only the backgrounded pipe).
+  [[ -n "$CHILD_PID" ]] && kill -TERM "$CHILD_PID" 2>/dev/null
+  "$PIPER_TTS" --tag reddit --stop 2>/dev/null || true
+  learn
+  rm -f "$PIDFILE" "$PROGRESS" "$STORIES"
+}
+trap cleanup EXIT
+trap 'exit 0' TERM INT
+
+# --- learn: fold "how far we got" back into the weights + history ----------
+#   stories 1..(playing-1) -> heard in full -> weight *= 1.05  (cap 3.0)
+#   story  (playing)       -> skipped early -> weight *= 0.90  (floor 0.3)
+#   ids 1..(playing) go into the 24h history so they don't repeat.
+# On natural completion every queued story counts as heard.
+learn() {
+  [[ -f "$STORIES" && -f "$PROGRESS" ]] || return 0
+  local played; played=$(cat "$PROGRESS" 2>/dev/null || echo 0)
+  [[ "$played" -gt 0 ]] || return 0
+  WEIGHTS="$WEIGHTS" HISTORY="$HISTORY" STORIES="$STORIES" \
+  PLAYED="$played" COMPLETED="$COMPLETED" STATE_DIR="$STATE_DIR" \
+  python3 - <<'PY'
+import json, os, tempfile, time
+
+wf, hf, sf = os.environ["WEIGHTS"], os.environ["HISTORY"], os.environ["STORIES"]
+played = int(os.environ["PLAYED"]); completed = os.environ["COMPLETED"] == "1"
+state_dir = os.environ["STATE_DIR"]
+
+rows = [l.rstrip("\n").split("\t") for l in open(sf) if l.strip()]
+total = len(rows)
+heard_upto = total if completed else played - 1
+skipped_idx = 0 if completed else played
+hist_upto = total if completed else played
+
+def load(p, d):
+    try:
+        return json.load(open(p))
+    except Exception:
+        return d
+
+w = load(wf, {})
+for i, (_id, sub) in enumerate(rows, 1):
+    if i <= heard_upto:
+        w[sub] = min(w.get(sub, 1.0) * 1.05, 3.0)
+    elif i == skipped_idx:
+        w[sub] = max(w.get(sub, 1.0) * 0.90, 0.3)
+
+now = int(time.time())
+hist = [e for e in load(hf, []) if isinstance(e, dict) and e.get("ts", 0) > now - 86400]
+seen = {e["id"] for e in hist}
+for _id, _sub in rows[:hist_upto]:
+    if _id not in seen:
+        hist.append({"id": _id, "ts": now}); seen.add(_id)
+
+def atomic(path, obj):
+    fd, tmp = tempfile.mkstemp(dir=state_dir)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, path)
+
+atomic(wf, w)
+atomic(hf, hist)
+PY
+}
+
+# --- say: speak one line via piper-tts; backgrounded so the stop signal can
+#     interrupt the wait, cleanup() stops the piper-tts "reddit" tag.
+say() {
+  printf '%s' "$1" | "$PIPER_TTS" --tag reddit --voice "$VOICE" &
+  CHILD_PID=$!
+  wait "$CHILD_PID" 2>/dev/null
+  CHILD_PID=""
+}
+
+# --- fetch: cached RSS, falling back to a stale copy on network trouble -----
+fetch() {
+  if [[ -f "$FEED" ]] && (( $(date +%s) - $(stat -c %Y "$FEED") < CACHE_TTL )); then
+    cat "$FEED"; return 0
+  fi
+  local url tmp; tmp=$(mktemp "$RUN_DIR/.feed.XXXXXX")
+  for url in \
+    "https://www.reddit.com/r/popular/top/.rss?t=day" \
+    "https://www.reddit.com/r/all/top/.rss?t=day"; do
+    if curl -sf --max-time 20 --retry 2 --retry-delay 2 \
+         -A "$UA" -H "Accept: application/rss+xml" "$url" -o "$tmp" \
+       && [[ -s "$tmp" ]]; then
+      mv "$tmp" "$FEED"; cat "$FEED"; return 0
+    fi
+  done
+  rm -f "$tmp"
+  [[ -f "$FEED" ]] && { cat "$FEED"; return 0; }   # last resort: stale feed
+  return 1
+}
+
+RSS=$(fetch) || { notify-send -a "Reddit stories" "Couldn't reach Reddit (rate limited?)." 2>/dev/null; exit 1; }
+
+# --- rank: feed order is the base score, learned weight re-ranks it --------
+SELECTED=$(WEIGHTS="$WEIGHTS" HISTORY="$HISTORY" python3 - "$RSS" <<'PY'
+import sys, os, re, json, html
+import xml.etree.ElementTree as ET
+
+rss = sys.argv[1]
+def load(p, d):
+    try: return json.load(open(p))
+    except Exception: return d
+weights = load(os.environ["WEIGHTS"], {})
+seen = {e["id"] for e in load(os.environ["HISTORY"], []) if isinstance(e, dict)}
+
+ns = {"a": "http://www.w3.org/2005/Atom"}
+try:
+    root = ET.fromstring(rss)
+except ET.ParseError:
+    sys.exit(0)
+
+ranked = []
+for pos, e in enumerate(root.findall("a:entry", ns)):
+    link_el = e.find("a:link", ns)
+    title_el = e.find("a:title", ns)
+    if link_el is None or title_el is None:
+        continue
+    link = link_el.get("href", "")
+    m = re.search(r"/r/([^/]+)/comments/([a-z0-9]+)/", link)
+    if not m:
+        continue
+    sub, sid = "r/" + m.group(1), m.group(2)
+    if sid in seen:
+        continue
+    title = html.unescape(html.unescape((title_el.text or "").strip()))
+    title = re.sub(r"\s+", " ", title)
+    if not title:
+        continue
+    base = 100 - pos                      # feed position -> descending score
+    w = float(weights.get(sub, 1.0))
+    ranked.append((base * w, sid, sub, title))
+
+ranked.sort(key=lambda r: -r[0])
+for _, sid, sub, title in ranked[:10]:
+    print(f"{sid}\t{sub}\t{title}")
+PY
+)
+
+[[ -n "$SELECTED" ]] || { notify-send -a "Reddit stories" "No fresh stories right now." 2>/dev/null; exit 0; }
+
+: > "$STORIES"
+declare -a TITLES SUBS
+while IFS=$'\t' read -r id sub title; do
+  [[ -n "$id" ]] || continue
+  printf '%s\t%s\n' "$id" "$sub" >> "$STORIES"
+  TITLES+=("$title")
+  SUBS+=("${sub#r/}")
+done <<<"$SELECTED"
+
+notify-send -a "Reddit stories" -t 2000 \
+  "Reading ${#TITLES[@]} top Reddit stories" "SUPER+ALT+I again to stop" 2>/dev/null
+
+ORD=(one two three four five six seven eight nine ten)
+say "Here are today's ten most interesting stories on Reddit."
+for i in "${!TITLES[@]}"; do
+  echo $((i + 1)) > "$PROGRESS"
+  say "Number ${ORD[$i]}. ${TITLES[$i]}. Posted in ${SUBS[$i]}."
+done
+COMPLETED=1
+say "That's all ten."

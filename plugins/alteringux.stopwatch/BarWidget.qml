@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Bar widget for the `omarchy-stopwatch` spoken-stopwatch script. The
 // script (a systemd --user unit) owns the actual timing and speech; this
@@ -17,8 +18,6 @@ BarWidget {
 
   readonly property string home: Quickshell.env("HOME")
   readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
-  readonly property string statePath: runtimeDir + "/omarchy-stopwatch/state"
-  readonly property string historyPath: home + "/.local/state/omarchy/stopwatch-history.json"
   readonly property string scriptPath: home + "/.local/bin/omarchy-stopwatch"
   readonly property string unitName: "omarchy-stopwatch.service"
 
@@ -27,7 +26,10 @@ BarWidget {
   property string label: ""
   property int intervalMinutes: 5
   property int elapsedSeconds: 0
-  property var historyData: ({ version: 1, sessions: [] })
+  // Mirrors the CLI's voice switch (voiceStore). True = announcements are
+  // muted for the running stopwatch; the systemd unit keeps counting.
+  property bool voiceMuted: false
+  property alias historyData: historyStore.value
   // Frozen copy of historyData as it stood *before* the current session
   // started. The CLI's `cancel` appends the finished session to the history
   // file and only then removes the state file, so by the time this widget
@@ -42,46 +44,60 @@ BarWidget {
   property string lastSessionSummary: ""
 
   readonly property string displayText: {
-    if (!root.active) return "⏱ Stopwatch"
+    if (!root.active) return "  Stopwatch"
     var time = Model.formatElapsed(root.elapsedSeconds)
-    return root.label.length > 0 ? ("⏱ " + time + " " + root.label) : ("⏱ " + time)
+    return root.label.length > 0 ? ("  " + time + " " + root.label) : ("  " + time)
   }
 
-  function applyState(raw) {
-    var state = Model.parseState(raw)
-    if (!state) {
-      root.resetState()
-      return
-    }
-    // Idle -> active edge: freeze the baseline this session will be judged
-    // against, before the CLI can fold this session into historyData.
-    if (!root.active) root.historySnapshot = root.historyData
-    root.startEpoch = state.start_epoch
-    root.label = state.label || ""
-    root.intervalMinutes = state.interval_minutes || 5
-    root.active = true
-    root.recompute()
-    // Delay the first liveness check: right after startStopwatch() writes
-    // this same state, systemd may not have finished marking the unit
-    // active yet, and checking too early would self-heal a stopwatch that
-    // just started.
-    initialLivenessTimer.restart()
+  // Trailing muted-speaker glyph while a running stopwatch has its voice
+  // switched off, so the bar shows the state without opening the panel.
+  readonly property string voiceBadge: (root.active && root.voiceMuted) ? "  \uf026" : ""
+
+  readonly property var guard: Kit.BugGuard.create("alteringux.stopwatch", function(argv) { Quickshell.execDetached(argv) })
+
+  // Called by stateStore each time the CLI's state file appears / changes /
+  // vanishes. `state` is Model.parseState()'s result — null means "no stopwatch
+  // running" (missing / empty / malformed file).
+  function applyState(state) {
+    guard.run("applyState", function() {
+      if (!state) {
+        root.resetState()
+        return
+      }
+      // Idle -> active edge: freeze the baseline this session will be judged
+      // against, before the CLI can fold this session into historyData.
+      if (!root.active) root.historySnapshot = root.historyData
+      root.startEpoch = state.start_epoch
+      root.label = state.label || ""
+      root.intervalMinutes = state.interval_minutes || 5
+      root.active = true
+      root.recompute()
+      // Delay the first liveness check: right after startStopwatch() writes
+      // this same state, systemd may not have finished marking the unit
+      // active yet, and checking too early would self-heal a stopwatch that
+      // just started.
+      initialLivenessTimer.restart()
+    })
   }
 
   function resetState() {
-    if (root.active) {
-      var avg = Model.historyAverage(root.historySnapshot, root.label)
-      root.lastSessionSummary = avg !== null ? Model.formatDelta(root.elapsedSeconds, avg) : ""
-    }
-    root.active = false
-    root.startEpoch = 0
-    root.label = ""
+    guard.run("resetState", function() {
+      if (root.active) {
+        var avg = Model.historyAverage(root.historySnapshot, root.label)
+        root.lastSessionSummary = avg !== null ? Model.formatDelta(root.elapsedSeconds, avg) : ""
+      }
+      root.active = false
+      root.startEpoch = 0
+      root.label = ""
+    })
   }
 
   function recompute() {
-    if (!root.active) return
-    var now = Math.floor(Date.now() / 1000)
-    root.elapsedSeconds = Math.max(0, now - root.startEpoch)
+    guard.run("recompute", function() {
+      if (!root.active) return
+      var now = Math.floor(Date.now() / 1000)
+      root.elapsedSeconds = Math.max(0, now - root.startEpoch)
+    })
   }
 
   // The state file only tells us a stopwatch was started, not that it's
@@ -96,8 +112,10 @@ BarWidget {
   }
 
   function clearStaleState() {
-    root.resetState()
-    Quickshell.execDetached(["rm", "-f", root.statePath])
+    guard.run("clearStaleState", function() {
+      root.resetState()
+      Quickshell.execDetached(["rm", "-f", stateStore.path])
+    })
   }
 
   Process {
@@ -109,36 +127,48 @@ BarWidget {
     }
   }
 
-  FileView {
-    id: stateFile
-    path: root.statePath
-    watchChanges: true
-    printErrors: false
-    onLoaded: root.applyState(text())
-    onLoadFailed: root.applyState("")
-    onFileChanged: reload()
+  // The CLI owns $XDG_RUNTIME_DIR/omarchy-stopwatch/state: it creates it on
+  // start, rm's it on cancel, recreates it on the next start. watch + a 2 s
+  // idle poll (only while we think nothing's running — FileView's inode watch
+  // is dead against the recreated file) tracks all of that. parse() returns
+  // null for "no state", which applyState() reads as idle.
+  Kit.Store {
+    id: stateStore
+    dir: root.runtimeDir + "/omarchy-stopwatch/"
+    fileName: "state"
+    watch: true
+    pollMs: 2000
+    polling: !root.active
+    parse: function (raw) { return Model.parseState(raw) }
+    onExternallyChanged: function (value) { root.applyState(value) }
   }
 
-  // Loaded independently of the cancel that triggers resetState(), so the
+  // Read independently of the cancel that triggers resetState(), so a
   // just-finished session is compared against sessions logged *before* it
   // rather than racing the CLI's own write to this same file.
-  FileView {
-    id: historyFile
-    path: root.historyPath
-    watchChanges: true
-    printErrors: false
-    // While idle, keep the pre-session snapshot tracking the real history so
-    // the next session starts from an up-to-date baseline. Once active, the
-    // snapshot is frozen (see applyState) and this only updates historyData.
-    onLoaded: {
-      root.historyData = Model.parseHistory(text())
-      if (!root.active) root.historySnapshot = root.historyData
-    }
-    onLoadFailed: {
-      root.historyData = Model.parseHistory("")
-      if (!root.active) root.historySnapshot = root.historyData
-    }
-    onFileChanged: reload()
+  Kit.Store {
+    id: historyStore
+    fileName: "stopwatch-history.json"
+    watch: true
+    parse: function (raw) { return Model.parseHistory(raw) }
+    // While idle, keep the pre-session snapshot tracking real history so the
+    // next session starts from an up-to-date baseline. Once active, the
+    // snapshot is frozen (see applyState).
+    onExternallyChanged: function (value) { if (!root.active) root.historySnapshot = value }
+  }
+
+  // The CLI's voice switch: `omarchy-stopwatch mute` drops a marker file here,
+  // `unmute` / `cancel` / a fresh start remove it. watch + idle poll for the
+  // same watch-on-create reason as stateStore: the file is created and deleted
+  // repeatedly across a session, so FileView's inode watch goes stale.
+  Kit.Store {
+    id: voiceStore
+    dir: root.runtimeDir + "/omarchy-stopwatch/"
+    fileName: "voice-muted"
+    watch: true
+    pollMs: 2000
+    parse: function (raw) { return Model.parseVoiceMuted(raw) }
+    onExternallyChanged: function (value) { root.voiceMuted = value }
   }
 
   Timer {
@@ -155,20 +185,6 @@ BarWidget {
     onTriggered: root.checkLiveness()
   }
 
-  // FileView.watchChanges only tracks the inode of a file that exists when
-  // the widget is built. The state file is created by `omarchy-stopwatch`
-  // *after* the bar is already running (and is rm'd on cancel, then
-  // recreated on the next start), so the inode watch is usually dead and
-  // onLoaded never fires for a stopwatch started later. Poll for the file
-  // while we think nothing is running; stops itself once applyState() flips
-  // root.active. Cheap: a stat every 2s, only while idle.
-  Timer {
-    interval: 2000
-    repeat: true
-    running: !root.active
-    onTriggered: stateFile.reload()
-  }
-
   Timer {
     id: initialLivenessTimer
     interval: 2000
@@ -177,11 +193,30 @@ BarWidget {
   }
 
   function startStopwatch(intervalMinutes, labelText) {
-    Quickshell.execDetached([root.scriptPath, String(intervalMinutes), labelText])
+    guard.run("startStopwatch", function() {
+      Quickshell.execDetached([root.scriptPath, String(intervalMinutes), labelText])
+    })
   }
 
   function cancelStopwatch() {
-    Quickshell.execDetached([root.scriptPath, "cancel"])
+    guard.run("cancelStopwatch", function() {
+      Quickshell.execDetached([root.scriptPath, "cancel"])
+    })
+  }
+
+  // Voice on/off for a *running* stopwatch. The CLI owns the marker file and
+  // speak() re-checks it every interval, so the switch lands on the next
+  // announcement with no systemd restart. Set voiceMuted optimistically so
+  // the panel switch throws immediately; voiceStore reasserts the real value.
+  function setVoiceMuted(muted) {
+    guard.run("setVoiceMuted", function() {
+      root.voiceMuted = muted
+      Quickshell.execDetached([root.scriptPath, muted ? "mute" : "unmute"])
+    })
+  }
+
+  function toggleVoice() {
+    root.setVoiceMuted(!root.voiceMuted)
   }
 
   IpcHandler {
@@ -191,8 +226,13 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function cancel(): void { root.cancelStopwatch() }
+    function mute(): void { root.setVoiceMuted(true) }
+    function unmute(): void { root.setVoiceMuted(false) }
+    function voiceToggle(): void { root.toggleVoice() }
     function status(): string {
-      return JSON.stringify({ active: root.active, elapsedSeconds: root.elapsedSeconds, label: root.label })
+      return guard.call("ipc.status", function() {
+        return JSON.stringify({ active: root.active, elapsedSeconds: root.elapsedSeconds, label: root.label, voiceMuted: root.voiceMuted })
+      }, "{}")
     }
   }
 
@@ -240,7 +280,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: root.displayText
+    text: root.displayText + root.voiceBadge
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

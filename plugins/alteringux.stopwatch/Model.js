@@ -66,12 +66,23 @@ function formatDelta(currentSeconds, avgSeconds) {
   return pct + "% " + (diff < 0 ? "shorter" : "longer") + " than your average"
 }
 
+// The CLI's voice switch is a bare marker file ($XDG_RUNTIME_DIR/
+// omarchy-stopwatch/voice-muted) holding the text "muted": `omarchy-stopwatch
+// mute` writes it, `unmute` removes it, and speak() skips playback whenever it
+// exists. The bar widget watches that path through Kit.Store, which can't tell
+// "file absent" from "file empty" (both arrive here as ""), so only the exact
+// marker text counts as muted; everything else means voice on.
+function parseVoiceMuted(raw) {
+  return !!raw && raw.trim() === "muted"
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     formatElapsed: formatElapsed,
     parseState: parseState,
     parseHistory: parseHistory,
     historyAverage: historyAverage,
-    formatDelta: formatDelta
+    formatDelta: formatDelta,
+    parseVoiceMuted: parseVoiceMuted
   }
 }

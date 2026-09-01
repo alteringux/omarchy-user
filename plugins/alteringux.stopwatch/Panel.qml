@@ -1,8 +1,10 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
 
 // Start/cancel controls for the stopwatch overlay.
 Panel {
@@ -16,12 +18,16 @@ Panel {
   property int intervalValue: 5
   property string labelValue: ""
 
+  readonly property var guard: Kit.BugGuard.create("alteringux.stopwatch", function(argv) { Quickshell.execDetached(argv) })
+
   // Shared by the label field's Enter key, the panel-level Enter/Space
   // shortcut, and the Start button, so there's exactly one "start" path.
   function startIfPossible() {
-    if (!hostWidget || hostWidget.active) return
-    hostWidget.startStopwatch(root.intervalValue, root.labelValue)
-    root.close()
+    guard.run("startIfPossible", function() {
+      if (!hostWidget || hostWidget.active) return
+      hostWidget.startStopwatch(root.intervalValue, root.labelValue)
+      root.close()
+    })
   }
 
   KeyboardPanel {
@@ -65,6 +71,25 @@ Panel {
           font.bold: true
           width: content.width
           wrapMode: Text.WordWrap
+        }
+
+        // Voice on/off for the running stopwatch. Flips the CLI's marker file
+        // via hostWidget.toggleVoice(); speak() re-reads it each interval, so
+        // the change applies on the next announcement with no unit restart.
+        // Mouse-only (activeFocusOnTab off) to stay out of the panel's
+        // Enter=start / X=cancel / Esc=close keyboard model.
+        Toggle {
+          id: voiceToggle
+          visible: hostWidget && hostWidget.active
+          width: content.width
+          activeFocusOnTab: false
+          label: "Voice announcements"
+          description: (hostWidget && hostWidget.voiceMuted)
+            ? "Muted — silent until you switch this back on"
+            : "Speaking the elapsed time every interval"
+          checked: !(hostWidget && hostWidget.voiceMuted)
+          foreground: root.barForeground
+          onClicked: if (hostWidget) hostWidget.toggleVoice()
         }
 
         Text {

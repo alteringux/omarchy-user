@@ -1,0 +1,20 @@
+#!/bin/bash
+# CLI + timer entry point for News Bar source discovery.
+#   omarchy-newsbar-sources suggest            (run by the systemd user timer)
+#   omarchy-newsbar-sources list
+#   omarchy-newsbar-sources approve [all|NAME...]
+#   omarchy-newsbar-sources reject  [all|NAME...]
+#   omarchy-newsbar-sources auto    on|off|status
+#   omarchy-newsbar-sources status
+#
+# Default flow is propose-and-approve: `suggest` stages validated feeds and
+# notifies; they only reach newsbar-feeds.json on `approve`. `auto on` makes
+# `suggest` add them straight away.
+
+set -uo pipefail
+
+OMARCHY_PLUGIN_ID="alteringux.newsbar"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
+python3 "$(dirname "$(readlink -f "$0")")/newsbar_sources.py" "$@"
+exit $?

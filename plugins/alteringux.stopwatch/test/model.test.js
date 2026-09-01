@@ -92,3 +92,19 @@ test("formatDelta returns empty string when there's no average to compare agains
   assert.strictEqual(Model.formatDelta(100, null), "")
   assert.strictEqual(Model.formatDelta(100, 0), "")
 })
+
+test("parseVoiceMuted treats a missing / empty file as voice-on", () => {
+  assert.strictEqual(Model.parseVoiceMuted(""), false)
+  assert.strictEqual(Model.parseVoiceMuted(null), false)
+  assert.strictEqual(Model.parseVoiceMuted(undefined), false)
+})
+
+test("parseVoiceMuted recognises the marker text, with trailing newline", () => {
+  assert.strictEqual(Model.parseVoiceMuted("muted"), true)
+  assert.strictEqual(Model.parseVoiceMuted("muted\n"), true)
+})
+
+test("parseVoiceMuted ignores unrecognised file contents", () => {
+  assert.strictEqual(Model.parseVoiceMuted("on"), false)
+  assert.strictEqual(Model.parseVoiceMuted("{}"), false)
+})

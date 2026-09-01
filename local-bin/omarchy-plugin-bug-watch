@@ -1,0 +1,67 @@
+#!/bin/bash
+
+# omarchy:summary=Watch the omarchy-shell journal for errors in user plugins and file bug reports
+# omarchy:hidden=true
+#
+# Follows omarchy-shell's log. Any WARN/ERROR line that (a) names a user plugin
+# under ~/.config/omarchy/plugins/ and (b) carries a JS/QML error signature is
+# handed to omarchy-plugin-bug-report --source qml-log. That script owns the
+# dedupe window, the kill switch, and launching the agent; this one only
+# filters the stream.
+
+set -uo pipefail
+
+KILL_SWITCH="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/toggles/plugin-bug-report-off"
+
+# Only these plugin-id prefixes are "mine". Stock omarchy.* errors are not our
+# problem and must never trigger an autonomous agent.
+OWNED_PREFIX_RE='(alteringux)\.[a-z0-9_-]+'
+
+# Error signatures worth acting on. Deliberately narrow: warnings about missing
+# icons, dbus races, and binding loops in stock panels are noise.
+SIGNATURE_RE='TypeError|ReferenceError|SyntaxError|RangeError|is not a function|is not defined|Cannot read property|Unable to assign|Unable to assign \[undefined\]|Error: |Binding loop detected'
+
+# Per-line local debounce so a fast repeat does not fork a dispatcher each time
+# (the dispatcher dedupes too, but this keeps the fork rate sane).
+declare -A last_seen
+LOCAL_DEBOUNCE=${OMARCHY_PLUGIN_WATCH_DEBOUNCE:-20}
+
+feed() {
+  local plugin=$1 line=$2
+  local key summary now
+  key="${plugin}::${line//[0-9]/N}"
+  now=$EPOCHSECONDS
+  if [[ -n ${last_seen[$key]:-} ]] && ((now - last_seen[$key] < LOCAL_DEBOUNCE)); then
+    return 0
+  fi
+  last_seen[$key]=$now
+
+  # Trim the quickshell "  WARN scene: " prefix for the summary.
+  summary=$(sed -E 's/^\s*(WARN|ERROR)\s+[a-z.]*:?\s*//I; s/\s+/ /g' <<<"$line")
+  summary=${summary:0:200}
+
+  printf '%s\n' "$line" | omarchy-plugin-bug-report \
+    --plugin "$plugin" --source qml-log --summary "$summary" || true
+}
+
+journal_selector() {
+  # SyslogIdentifier=omarchy-shell if that is how the shell is logging here,
+  # otherwise the raw quickshell process comm.
+  if [[ -n $(journalctl -t omarchy-shell -n 1 -o cat 2>/dev/null) ]]; then
+    printf -- '-t\nomarchy-shell\n'
+  else
+    printf -- '_COMM=quickshell\n'
+  fi
+}
+
+mapfile -t SEL < <(journal_selector)
+
+journalctl "${SEL[@]}" -n 0 -f -o cat 2>/dev/null | while IFS= read -r line; do
+  [[ -e $KILL_SWITCH ]] && continue
+  [[ $line =~ (WARN|ERROR) ]] || continue
+  [[ $line =~ $SIGNATURE_RE ]] || continue
+  [[ $line =~ plugins/(${OWNED_PREFIX_RE})/ ]] || [[ $line =~ (${OWNED_PREFIX_RE}) ]] || continue
+  plugin=${BASH_REMATCH[1]}
+  [[ -d "$HOME/.config/omarchy/plugins/$plugin" ]] || continue
+  feed "$plugin" "$line"
+done
