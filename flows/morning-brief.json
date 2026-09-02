@@ -1,0 +1,79 @@
+{
+  "id": "morning-brief",
+  "title": "Classify the news feeds, summarise, merge into one brief",
+  "nodes": [
+    {
+      "id": "feeds",
+      "type": "tool",
+      "cmd": "cat ~/.local/state/omarchy/newsbar.json 2>/dev/null || echo '{\"headlines\":[]}'",
+      "ui": { "x": 40, "y": 60 }
+    },
+    {
+      "id": "counts",
+      "type": "transform",
+      "in": ["feeds"],
+      "jq": "[.headlines | group_by(.source)[] | {feed: .[0].source, n: length}]",
+      "ui": { "x": 40, "y": 240 }
+    },
+    {
+      "id": "class",
+      "type": "route",
+      "in": ["feeds"],
+      "prompt": "Which single bucket best fits this headline set: world, tech, or local?\n{{feeds.stdout}}",
+      "edges": {
+        "mixed": ["worldsum", "techsum"],
+        "world": ["worldsum"],
+        "tech": ["techsum"],
+        "local": ["worldsum"]
+      },
+      "ui": { "x": 320, "y": 60 }
+    },
+    {
+      "id": "worldsum",
+      "type": "prompt",
+      "in": ["feeds"],
+      "prompt": "In five bullets, summarise the world news in these headlines:\n{{feeds.stdout}}",
+      "ui": { "x": 600, "y": 20 }
+    },
+    {
+      "id": "techsum",
+      "type": "prompt",
+      "in": ["feeds"],
+      "agent": true,
+      "prompt": "In five bullets, summarise only the technology stories, citing the source for each:\n{{feeds.stdout}}",
+      "ui": { "x": 600, "y": 180 }
+    },
+    {
+      "id": "mem",
+      "type": "memory",
+      "op": "append",
+      "key": "brief-history",
+      "in": ["worldsum", "techsum"],
+      "ui": { "x": 880, "y": 180 }
+    },
+    {
+      "id": "digest",
+      "type": "reduce",
+      "mode": "llm",
+      "in": ["worldsum", "techsum"],
+      "prompt": "Merge these into one tight brief, no repetition:\n{{items}}",
+      "ui": { "x": 880, "y": 20 }
+    },
+    {
+      "id": "out",
+      "type": "view",
+      "shape": "markdown",
+      "in": ["digest"],
+      "meta": { "title": "Morning brief" },
+      "ui": { "x": 1160, "y": 20 }
+    },
+    {
+      "id": "chart",
+      "type": "view",
+      "shape": "series",
+      "in": ["counts"],
+      "meta": { "title": "Headlines per feed" },
+      "ui": { "x": 1160, "y": 240 }
+    }
+  ]
+}

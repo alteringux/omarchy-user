@@ -1,0 +1,7 @@
+{
+  "_comment": "This surface's shape -> adapter map. Change a value to render that shape differently here without touching the flow. Adapters: series, table, text, markdown, log, '=' (natural).",
+  "markdown": "markdown",
+  "series": "series",
+  "table": "table",
+  "log": "log"
+}

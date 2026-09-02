@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.flow",
+  "name": "Flow",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A surface for Omarchy Flows — shows a flow's latest output (sparkline / brief / table) on the bar and opens a live node canvas you can drag, edit and re-run",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Flow",
+    "description": "Latest output of a flow (~/Work/bin/flow) plus a draggable node canvas in the popup",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}
