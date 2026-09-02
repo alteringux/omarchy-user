@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # omarchy-voice — a "Siri"-style voice assistant for Omarchy.
 #
-#   speech  ->  whisper-cli (STT, tiny.en + fast decode)
+#   SUPER+ALT+X ->  record a fixed ${MAXREC}s window (pw-record; output sink
+#                   muted for the window so the mic can't hear the reply)
+#           ->  whisper-cli (STT, tiny.en + fast decode); a too-quiet or
+#               non-speech clip is dropped here
 #           ->  the transcript is handed verbatim to a headless
-#               `opencode run --auto` agent with a short "you are the voice
-#               assistant for this Omarchy box" preamble
+#               `opencode run --pure --auto` agent with a short "you are the
+#               voice assistant for this Omarchy box" preamble
 #           ->  the agent decides everything: run commands, read/write files,
 #               inspect state, or just answer — nothing is hard-coded here
-#           ->  its final reply is condensed if long, then piper-tts speaks it
+#           ->  its final reply is condensed if long, then piper-tts speaks it;
+#               desktop toasts (app "Voice assistant") mark each stage
 #
 # There is no intent enum and no regex command table. "disable bluetooth",
 # "what's my battery at", "rename these shots by date" all take the same path:
 # the agent works it out, does it, and reports back in a sentence or two.
+# A second press supersedes the first: it stops the reply and the in-flight
+# agent, then listens again.
 #
 # Usage:
 #   omarchy-voice                 record speech, act / answer aloud
@@ -26,7 +32,10 @@
 #                              (default Qwen/Qwen3-30B-A3B-Instruct-2507)
 #   OMARCHY_VOICE_WHISPER_MODEL ggml model path (default ~/.cache/whisper/ggml-tiny.en.bin;
 #                              set to …/ggml-base.en.bin for more accuracy, ~1.7s slower)
-#   OMARCHY_VOICE_SILENCE       seconds of silence that ends recording (default 1.0)
+#   OMARCHY_VOICE_MAXREC        fixed recording length in seconds (default 8)
+#   OMARCHY_VOICE_GATE_DB       skip clip if peak below this dB (default -24)
+#   OMARCHY_VOICE_GATE_MEAN     skip clip if mean below this dB (default -45)
+#   OMARCHY_VOICE_NO_DUCK       set to 1 to NOT mute the output sink while recording
 #   OMARCHY_VOICE_RATE          piper length-scale, lower = faster speech (default 0.85)
 #   OMARCHY_VOICE_AGENT_DIR     working directory for the agent (default ~/.local/state/omarchy/voice)
 #   OMARCHY_VOICE_AGENT_MODEL   opencode model for the agent
@@ -48,14 +57,24 @@ AGENT_TIMEOUT="${OMARCHY_VOICE_TIMEOUT:-240}"
 
 DRY_RUN=0
 TEXT=""
+LOG="$HOME/.local/state/omarchy/voice-last.log"
 
-say() { # speak (faster than default rate) + echo to stderr for terminal use
+NID=""              # notification id, so each stage replaces the last toast
+notify() {          # $1 = summary, $2 = body (optional)
+  command -v notify-send >/dev/null 2>&1 || return 0
+  local out
+  out=$(notify-send -a "Voice assistant" -p ${NID:+-r "$NID"} -t 6000 "$1" "${2:-}" 2>/dev/null) || return 0
+  [[ "$out" =~ ^[0-9]+$ ]] && NID="$out"
+}
+
+say() { # speak (faster than default rate) + echo + toast for headless (keybind) use
   local msg="$1"
   echo "🔊 $msg" >&2
+  notify "🔊 Voice assistant" "$msg"
   [[ -n "${msg// }" ]] && printf '%s' "$msg" | piper-tts --tag "$TAG" --length-scale "$RATE" || true
 }
 
-die() { echo "omarchy-voice: $*" >&2; exit 1; }
+die() { echo "omarchy-voice: $*" >&2; notify "⚠ Voice assistant" "$*"; exit 1; }
 
 # ----------------------------------------------------------------- args
 while [[ $# -gt 0 ]]; do
@@ -65,20 +84,43 @@ while [[ $# -gt 0 ]]; do
     --text)    TEXT="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
-      sed -n '2,34p' "$0" | sed 's/^# \?//'
+      sed -n '2,44p' "$0" | sed 's/^# \?//'
       exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
 
+# When launched from a keybind there is no terminal — keep a log of the last run
+# so failures are diagnosable. Terminal runs still print normally.
+if (( ! DRY_RUN )) && [[ ! -t 2 ]]; then
+  mkdir -p "$(dirname "$LOG")"
+  exec >>"$LOG" 2>&1
+  echo; echo "──────── $(date '+%F %T') ────────"
+fi
+
 # ----------------------------------------------------------------- 1. get the request text
 if [[ -z "$TEXT" ]]; then
   command -v whisper-cli >/dev/null || die "whisper-cli not found"
-  command -v parec >/dev/null      || die "parec not found (pulseaudio-utils)"
 
-  WAV="$(mktemp --suffix=.wav)"
-  SIL="$(mktemp --suffix=.sil)"
-  trap 'rm -f "$WAV" "$SIL"' EXIT
+  # Recorder: prefer pw-record (native PipeWire — a killed one never orphans or
+  # wedges the source). parec is the fallback but has stuck-stream problems here.
+  REC=""
+  for c in pw-record parec; do command -v "$c" >/dev/null 2>&1 && { REC="$c"; break; }; done
+  [[ -n "$REC" ]] || die "no recorder found (need pw-record or parec)"
+
+  # A fresh keypress takes over: stop any speech in progress (barge-in), kill any
+  # older instance + its in-flight agent, and reap a recorder this tool leaked
+  # earlier. Without the barge-in, a press while the assistant is talking lets
+  # the mic record the TTS reply and feed it back as a new request — an audio loop.
+  piper-tts --stop --tag "$TAG" 2>/dev/null || true
+  for p in $(pgrep -f 'omarchy-voice$' 2>/dev/null || true); do
+    [[ "$p" == "$$" ]] || kill "$p" 2>/dev/null || true
+  done
+  pkill -f "opencode run --pure .*${AGENT_DIR}" 2>/dev/null || true
+  pkill -f 'pw-record .*-omarchy-voice\.wav' 2>/dev/null || true
+
+  WAV="$(mktemp --suffix=-omarchy-voice.wav)"
+  trap 'rm -f "$WAV"' EXIT
 
   if [[ ! -f "$WHISPER_MODEL" ]]; then
     echo "Downloading whisper model to $WHISPER_MODEL ..." >&2
@@ -88,62 +130,115 @@ if [[ -z "$TEXT" ]]; then
       || die "model download failed"
   fi
 
-  echo "Listening… (speak, then ~${SILENCE}s of silence to stop)" >&2
-  parec -d @DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le 2>/dev/null \
-    | ffmpeg -y -f s16le -ar 16000 -ac 1 -i - \
-        -af "silencedetect=noise=-40dB:d=${SILENCE}" -f wav -t 120 - \
-        > "$WAV" 2> "$SIL" &
-  PID=$!
+  # Fixed-window capture. No silence-detection pipeline, no backgrounded PID to
+  # orphan: `timeout` (and pw-record's own --sample-count) bound the single
+  # recorder process, which is reaped cleanly on any exit.
+  MAXREC="${OMARCHY_VOICE_MAXREC:-8}"
+  notify "🎙 Listening…" "Speak now — recording ${MAXREC}s."
+  # hush any TTS mid-playback (a spoken notification / narration) before we open
+  # the mic; omarchy-speak-notifications skips app "Voice assistant", so the
+  # toast above is itself silent.
+  pkill -f 'piper-tts --tag notify' 2>/dev/null || true
+  pkill -f 'paplay .*piper-tts'     2>/dev/null || true
 
-  HEARD=0 MARK=0
-  while kill -0 "$PID" 2>/dev/null; do
-    if (( HEARD == 0 )); then
-      if grep -q "silence_end" "$SIL" 2>/dev/null; then
-        HEARD=1
-        MARK=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
-      fi
-    else
-      NOW=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
-      if (( NOW > MARK )); then sleep 0.2; kill "$PID" 2>/dev/null || true; break; fi
+  # Mute the output sink for the capture window: with speakers live, the mic
+  # records the assistant's own reply (or a notification) and whisper turns the
+  # echo into a bogus command — an audio feedback loop. Restore on any exit.
+  # Opt out with OMARCHY_VOICE_NO_DUCK=1.
+  SINK_WAS_MUTED=""
+  if [[ "${OMARCHY_VOICE_NO_DUCK:-0}" != 1 ]] && command -v wpctl >/dev/null 2>&1; then
+    SINK_WAS_MUTED=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -q MUTED && echo 1 || echo 0)
+    trap '[[ "$SINK_WAS_MUTED" == 0 ]] && wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null; rm -f "$WAV"' EXIT
+    wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 2>/dev/null || true
+  fi
+  sleep 0.15
+  echo "Listening ${MAXREC}s…" >&2
+
+  if [[ "$REC" == pw-record ]]; then
+    timeout "$((MAXREC + 3))" pw-record --rate=16000 --channels=1 --format=s16 \
+      --sample-count "$((16000 * MAXREC))" "$WAV" 2>/dev/null || true
+  else
+    timeout "$((MAXREC + 3))" parec -d @DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le 2>/dev/null \
+      | ffmpeg -y -f s16le -ar 16000 -ac 1 -i - -f wav -t "$MAXREC" "$WAV" 2>/dev/null || true
+  fi
+
+  # capture done — unmute immediately (don't wait for the agent + TTS)
+  [[ "$SINK_WAS_MUTED" == 0 ]] && wpctl set-mute @DEFAULT_AUDIO_SINK@ 0 2>/dev/null || true
+  trap 'rm -f "$WAV"' EXIT
+
+  bytes=$(stat -c%s "$WAV" 2>/dev/null || echo 0)
+  if (( bytes < 2000 )); then
+    echo "Mic returned no audio (${bytes} bytes via ${REC})." >&2
+    notify "🎙 No audio from the mic" "The recorder returned nothing — try again, or check the input device."
+    exit 1
+  fi
+
+  # Level gate: tiny.en hallucinates whole phrases from room tone, and the agent
+  # would then ACT on them. Require a genuine speech-level peak AND enough of the
+  # clip to be above a floor (a lone click/thump won't pass). Tune with
+  # OMARCHY_VOICE_GATE_DB (peak, default -24) / OMARCHY_VOICE_GATE_MEAN
+  # (mean, default -45); less negative = stricter.
+  if command -v ffmpeg >/dev/null 2>&1; then
+    vd=$(ffmpeg -hide_banner -i "$WAV" -af volumedetect -f null - 2>&1)
+    maxdb=$(printf '%s' "$vd" | sed -n 's/.*max_volume: \(-\?[0-9.]*\) dB.*/\1/p' | head -1)
+    meandb=$(printf '%s' "$vd" | sed -n 's/.*mean_volume: \(-\?[0-9.]*\) dB.*/\1/p' | head -1)
+    gate="${OMARCHY_VOICE_GATE_DB:--24}"
+    gmean="${OMARCHY_VOICE_GATE_MEAN:--45}"
+    if [[ -n "$maxdb" ]] && awk -v mx="$maxdb" -v mn="${meandb:--99}" -v g="$gate" -v gm="$gmean" \
+         'BEGIN{exit !(mx < g || mn < gm)}'; then
+      echo "Too quiet for speech (peak ${maxdb} / mean ${meandb} dB; need peak ≥ ${gate}, mean ≥ ${gmean})." >&2
+      notify "🎙 Didn't hear speech" "Speak clearly, close to the mic, and try again."
+      exit 0
     fi
-    sleep 0.15
-  done
-  wait "$PID" 2>/dev/null || true
-
-  (( $(stat -c%s "$WAV" 2>/dev/null || echo 0) > 1000 )) || { echo "No speech detected." >&2; exit 0; }
+  fi
 
   echo "Transcribing…" >&2
-  TEXT=$(whisper-cli -m "$WHISPER_MODEL" -f "$WAV" -nt -bs 1 -bo 1 -nf 2>/dev/null \
+  notify "✍ Transcribing…"
+  # -nth 0.8: aggressive no-speech threshold; -sns: suppress non-speech tokens.
+  TEXT=$(whisper-cli -m "$WHISPER_MODEL" -f "$WAV" -nt -bs 1 -bo 1 -nf -nth 0.8 -sns 2>/dev/null \
            | grep -v '^\[' | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+  # whisper emits bracketed markers for non-speech ([BLANK_AUDIO], [ Silence ],
+  # (music), [_BEG_]…). Strip them; if nothing real is left, treat as no speech.
+  TEXT=$(printf '%s' "$TEXT" \
+    | sed -E 's/[\[(][^])]*[])]//g; s/[[:space:]]+/ /g; s/^ //; s/ $//')
+  [[ "$TEXT" =~ [[:alnum:]] ]] || TEXT=""
 fi
 
-[[ -n "${TEXT// }" ]] || { echo "Empty request." >&2; exit 0; }
+[[ -n "${TEXT// }" ]] || { echo "Empty request." >&2; notify "🎙 Didn't catch that" "Try again."; exit 0; }
 echo "You: $TEXT" >&2
 
 # ----------------------------------------------------------------- 2. build the agent prompt
-# No intent enum, no command table. The transcript goes straight to the agent
-# with just enough context to act like a desktop voice assistant.
-PREAMBLE='You are the voice assistant for this Omarchy machine (Arch Linux + Hyprland).
-The user just spoke the request below; the transcription may be slightly off, so
-read intent charitably.
+# No intent enum, no command table. The transcript goes straight to the agent,
+# framed as a terminal so it reaches for a shell command instead of chatting,
+# hedging, or (worse) inventing an outcome it did not actually produce.
+PREAMBLE='You are acting as the command line of this Omarchy machine (Arch Linux
++ Hyprland). Think of yourself as a shell: a spoken request comes in, you
+translate it into the one command that satisfies it, you run that command with
+your bash tool, and you report the real result. Nothing is pretend — only say a
+thing happened if the command you ran actually made it happen.
 
-- If it is an ACTION (change a setting, toggle something, run a command, move or
-  edit files, install a package): just DO it now with your tools. Prefer the
-  `omarchy` CLI when one fits — run `omarchy commands` to see them. e.g.
-  Bluetooth -> `omarchy bluetooth power on|off|toggle`; audio -> `omarchy audio ...`;
-  brightness -> `omarchy brightness ...`; theme -> `omarchy theme set <name>`.
-  Fall back to plain shell (bluetoothctl, rfkill, systemctl --user, ...) when
-  there is no omarchy verb.
-- If it is a QUESTION or small talk: just answer it.
-- Never ask the user to confirm. Act, then report what you actually did.
+Rules of this terminal:
+- Turn the request into ONE command and run it. Prefer the `omarchy` CLI.
+- Discover the right verb instead of guessing: run `omarchy commands` (every
+  subcommand + summary) or `omarchy <group> --help`. Known-good ones:
+  `omarchy bluetooth power on|off|toggle`, `omarchy audio output volume ±N|mute-toggle`,
+  `omarchy audio input mute`, `omarchy brightness display <N%|+N%|N%->`,
+  `omarchy theme set <name>` / `omarchy theme list`, `omarchy toggle nightlight`,
+  `omarchy capture screenshot`, `omarchy launch <app>`, `omarchy system lock`,
+  `omarchy restart <svc>`, `omarchy install <pkg...>` / `omarchy install service <name>`,
+  `omarchy tailscale ...`. For anything not covered, fall back to plain shell
+  (wpctl, brightnessctl, bluetoothctl, rfkill, systemctl --user, nmcli, wg-quick, ...).
+- A pure question (no state change) is answered directly, no command needed.
+- Never ask the user to confirm. Never run a skill, changelog, or git command.
+- If a command exits 0, trust it and stop — do not re-run it or re-check state.
+- If a command fails, is missing, or needs something not present (no config, a
+  password you do not have), say exactly that. Do NOT claim success you did not
+  achieve, and do NOT invent output. If a capability is not installed, say what
+  would install it (e.g. `omarchy install service tailscale`) rather than pretending.
 
-Be fast. Make the fewest tool calls possible — usually one. Once a command has
-exited 0, do NOT run it again. Do not re-check state to verify, do not explain
-your steps, do not run any skill, changelog, or git command. Then you MUST send
-one final plain-language sentence — never stop at the tool call.
-
-Your FINAL message is read aloud: one or two short spoken sentences, under 40
-words, plain text only — no markdown, no lists, no code blocks, no emoji.
+Then send ONE final line, in plain speech, describing what the command actually
+did (or that it failed). It is read aloud: under 30 words, no markdown, no
+lists, no code, no emoji. Never stop at the tool call without this line.
 
 Spoken request: '
 
@@ -185,6 +280,7 @@ fi
 model_args=()
 [[ -n "$AGENT_MODEL" ]] && model_args=(-m "$AGENT_MODEL")
 echo "▶ agent (${AGENT_TIMEOUT}s max, ${AGENT_MODEL:-default model}) in $AGENT_DIR" >&2
+notify "🧠 Working…" "$TEXT"
 
 # --pure disables opencode plugins (e.g. the `snip` bash wrapper, which prints
 # a passthrough notice the model loops on).
