@@ -35,9 +35,24 @@ BarWidget {
   // estimate move without waiting on the status poll.
   property int elapsedSeconds: 0
 
-  // Widget-owned config: Loop toggle + Speed multiplier for replays.
+  // Widget-owned config: Loop toggle + Speed multiplier + pinned Voice for
+  // replays.
   readonly property bool loopEnabled: (configStore.value && configStore.value.loop) === true
   readonly property real speed: (configStore.value && configStore.value.speed > 0) ? configStore.value.speed : 1
+
+  // "" until the user picks one in the panel; then every Loop / replay uses it
+  // and picking it re-speaks whatever is playing now.
+  readonly property string voice: (configStore.value && typeof configStore.value.voice === "string") ? configStore.value.voice : ""
+
+  // What the Voice dropdown should show as selected: the pin if set, else the
+  // model the live (or last) reading was produced with.
+  readonly property string effectiveVoice: root.voice
+    || (root.state && root.state.voice ? root.state.voice : "")
+    || (root.lastReading && root.lastReading.voice ? root.lastReading.voice : "")
+
+  // Installed piper voices (ids under $PIPER_TTS_VOICE_DIR), populated by
+  // voicesProc. Empty until the first scan returns.
+  property var voices: []
 
   // Last reading we saw, kept so Loop / Restart can re-speak it after the job
   // that produced it has exited and taken current.json with it.
@@ -63,12 +78,36 @@ BarWidget {
     onExternallyChanged: function (value) { root.applyState(value) }
   }
 
-  // ── widget-owned Loop + Speed ────────────────────────────────────────
+  // ── widget-owned Loop + Speed + Voice ───────────────────────────────
   Kit.Store {
     id: configStore
     fileName: "ttsplayer.json"
     parse: function (raw) { return Model.parseConfig(raw) }
   }
+
+  // ── installed voice discovery ───────────────────────────────────────
+  // Cheap `ls` of the voice dir; re-run when the panel opens so a voice
+  // installed since shell start still shows up.
+  Process {
+    id: voicesProc
+    command: ["sh", "-c", "ls -1 \"${PIPER_TTS_VOICE_DIR:-$HOME/.local/share/piper-voices}\"/*.onnx 2>/dev/null"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyVoices(text)
+    }
+  }
+
+  function applyVoices(raw) {
+    guard.run("applyVoices", function () {
+      root.voices = Model.parseVoiceList(raw)
+    })
+  }
+
+  function refreshVoices() {
+    if (!voicesProc.running) voicesProc.running = true
+  }
+
+  Component.onCompleted: root.refreshVoices()
 
   function applyState(value) {
     guard.run("applyState", function () {
@@ -183,21 +222,39 @@ BarWidget {
     })
   }
 
+  // One place to write ttsplayer.json so no setter drops another's field.
+  function saveConfig(patch) {
+    var v = configStore.value || { loop: false, speed: 1, voice: "" }
+    var next = {
+      loop: v.loop === true,
+      speed: v.speed > 0 ? v.speed : 1,
+      voice: (typeof v.voice === "string") ? v.voice : ""
+    }
+    if (patch) for (var k in patch) next[k] = patch[k]
+    if (!(next.speed > 0)) next.speed = 1
+    if (typeof next.voice !== "string") next.voice = ""
+    configStore.value = next
+    configStore.save()
+  }
+
   function setLoop(on) {
-    guard.run("setLoop", function () {
-      var v = configStore.value || { loop: false, speed: 1 }
-      configStore.value = { loop: !!on, speed: v.speed > 0 ? v.speed : 1 }
-      configStore.save()
-    })
+    guard.run("setLoop", function () { root.saveConfig({ loop: !!on }) })
   }
 
   function toggleLoop() { root.setLoop(!root.loopEnabled) }
 
   function setSpeed(mult) {
-    guard.run("setSpeed", function () {
-      var v = configStore.value || { loop: false, speed: 1 }
-      configStore.value = { loop: v.loop === true, speed: (mult > 0 ? mult : 1) }
-      configStore.save()
+    guard.run("setSpeed", function () { root.saveConfig({ speed: (mult > 0 ? mult : 1) }) })
+  }
+
+  // Pin a voice. Persisted for every future Loop / replay, and — since piper
+  // streams and can't swap models mid-utterance — applied to the current
+  // reading straight away by re-speaking it from the top. A no-op restart when
+  // nothing is playing; the pin still sticks for next time.
+  function setVoice(name) {
+    guard.run("setVoice", function () {
+      root.saveConfig({ voice: (typeof name === "string") ? name : "" })
+      if (root.active) root.restartFromTop()
     })
   }
 
@@ -207,19 +264,24 @@ BarWidget {
     guard.run("replay", function () {
       var r = root.lastReading
       if (!r || !r.text) return
-      Quickshell.execDetached(Model.replayCommand(root.piperTtsPath, r, root.speed))
+      Quickshell.execDetached(Model.replayCommand(root.piperTtsPath, r, root.speed, root.voice))
     })
   }
 
-  // Restart the current reading now at the selected speed (stop, then replay).
-  function restartAtSpeed() {
-    guard.run("restartAtSpeed", function () {
+  // Stop the current reading and re-speak it from the top, picking up the
+  // current speed + pinned voice. Backs both the panel's "Restart now" button
+  // and an instant voice change.
+  function restartFromTop() {
+    guard.run("restartFromTop", function () {
       var r = root.lastReading
       if (!r || !r.text) return
       Quickshell.execDetached([root.ctlPath, "stop"])
       restartTimer.restart()
     })
   }
+
+  // Kept for the panel's existing call site.
+  function restartAtSpeed() { root.restartFromTop() }
 
   Timer {
     id: restartTimer
@@ -241,6 +303,10 @@ BarWidget {
     function mute(): void { root.ctl("mute") }
     function unmute(): void { root.ctl("unmute") }
     function loopToggle(): void { root.toggleLoop() }
+    function setVoice(name: string): void { root.setVoice(name) }
+    function voices(): string {
+      return guard.call("ipc.voices", function () { return JSON.stringify(root.voices) }, "[]")
+    }
     function status(): string {
       return guard.call("ipc.status", function () {
         return JSON.stringify({
@@ -249,6 +315,8 @@ BarWidget {
           muted: root.muted,
           loop: root.loopEnabled,
           speed: root.speed,
+          voice: root.voice,
+          effectiveVoice: root.effectiveVoice,
           elapsedSeconds: root.elapsedSeconds,
           chunks: root.state ? root.state.chunks : 0,
           played: root.playedIndex,
@@ -261,9 +329,9 @@ BarWidget {
   // ── panel wiring (mirrors alteringux.stopwatch) ─────────────────────
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
 
-  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function open() { root.refreshVoices(); if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
-  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+  function togglePanel() { root.refreshVoices(); if (panelLoader.item) panelLoader.item.toggle() }
 
   function injectPanel() {
     var target = panelLoader.item

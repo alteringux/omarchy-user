@@ -17,6 +17,19 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
+  // Local mirror of the host's effective voice. Dropdown writes its own
+  // `value` on select (which severs a plain binding), so we keep a writable
+  // copy here and re-sync it from the host whenever the host's value moves.
+  property string voiceSelection: hostWidget ? hostWidget.effectiveVoice : ""
+
+  Connections {
+    target: root.hostWidget
+    ignoreUnknownSignals: true
+    function onEffectiveVoiceChanged() {
+      if (root.hostWidget) root.voiceSelection = root.hostWidget.effectiveVoice
+    }
+  }
+
   readonly property bool speaking: hostWidget && hostWidget.active
   readonly property var speeds: [1, 1.25, 1.5, 2]
 
@@ -48,6 +61,10 @@ Panel {
 
     PanelKeyCatcher {
       anchors.fill: parent
+
+      // While the Voice dropdown's popup owns the keyboard, stop this catcher
+      // from eating j/k/Enter/Esc before the list can use them.
+      blocked: voiceDropdown.popupOpen
 
       onCloseRequested: root.close()
       onActivateRequested: if (root.speaking && hostWidget) hostWidget.togglePause()
@@ -166,6 +183,45 @@ Panel {
           bordered: true
           visible: root.speaking
           onClicked: if (hostWidget) hostWidget.restartAtSpeed()
+        }
+
+        PanelSeparator {}
+
+        // Voice. Same streaming constraint as Speed — piper can't swap the
+        // model mid-utterance — so choosing here re-speaks the current reading
+        // from the top, and pins the voice for Loop / replays. With nothing
+        // speaking it just records the choice.
+        Text {
+          width: content.width
+          text: "Voice"
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+        }
+
+        Dropdown {
+          id: voiceDropdown
+          width: content.width
+          showLabel: false
+          activeFocusOnTab: false
+          options: hostWidget ? hostWidget.voices : []
+          value: root.voiceSelection
+          foreground: root.barForeground
+          onChanged: function (v) {
+            root.voiceSelection = v
+            if (hostWidget) hostWidget.setVoice(v)
+          }
+        }
+
+        Text {
+          visible: root.speaking
+          width: content.width
+          text: "Changing voice restarts the current reading."
+          color: Qt.darker(root.barForeground, 1.4)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
         }
 
         PanelSeparator {}

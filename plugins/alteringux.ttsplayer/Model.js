@@ -99,27 +99,55 @@ function speedToLengthScale(speed) {
   return String(Math.round((1 / speed) * 1000) / 1000);
 }
 
-// Argv for replaying a captured reading (Loop, or Restart-at-speed). Mirrors
-// how omarchy-narrate calls piper-tts; the queue is left ON so a loop can't
-// stomp another voice.
-function replayCommand(piperTtsPath, state, speed) {
+// Argv for replaying a captured reading (Loop, or Restart-at-speed / voice).
+// Mirrors how omarchy-narrate calls piper-tts; the queue is left ON so a loop
+// can't stomp another voice. `voiceOverride`, when a non-empty string, wins
+// over the voice captured in the reading — that's how the panel's Voice
+// dropdown re-speaks the current text in a different model.
+function replayCommand(piperTtsPath, state, speed, voiceOverride) {
+  var voice = (typeof voiceOverride === "string" && voiceOverride)
+    ? voiceOverride
+    : ((state && state.voice) ? state.voice : "");
   var cmd = [piperTtsPath, "--tag", (state && state.tag) ? state.tag : "default"];
-  if (state && state.voice) cmd.push("--voice", state.voice);
+  if (voice) cmd.push("--voice", voice);
   var ls = speedToLengthScale(speed);
   if (ls) cmd.push("--length-scale", ls);
   cmd.push("--", (state && state.text) ? state.text : "");
   return cmd;
 }
 
-// ── ttsplayer.json (widget-owned config: Loop + Speed) ───────────────────
+// Voice ids from a newline-separated list of .onnx paths, as produced by
+// `ls -1 "$PIPER_TTS_VOICE_DIR"/*.onnx`. Directory and extension stripped,
+// de-duped, sorted. Returns [] for empty / garbage so the dropdown falls back
+// to whatever the current reading is already using.
+function parseVoiceList(raw) {
+  if (!raw) return [];
+  var out = [], seen = {};
+  var lines = String(raw).split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line) continue;
+    var base = line.replace(/^.*\//, "").replace(/\.onnx$/i, "");
+    if (!base || seen[base]) continue;
+    seen[base] = true;
+    out.push(base);
+  }
+  out.sort();
+  return out;
+}
+
+// ── ttsplayer.json (widget-owned config: Loop + Speed + Voice) ───────────
+// `voice` is "" when the user has not pinned one, meaning "use whatever the
+// reading was produced with / piper's default".
 function parseConfig(raw) {
-  var d = { loop: false, speed: 1 };
+  var d = { loop: false, speed: 1, voice: "" };
   if (!raw) return d;
   try {
     var p = JSON.parse(raw);
     if (p && typeof p === "object") {
       d.loop = p.loop === true;
       if (typeof p.speed === "number" && p.speed > 0) d.speed = p.speed;
+      if (typeof p.voice === "string") d.voice = p.voice;
     }
   } catch (e) { /* keep defaults */ }
   return d;
@@ -134,6 +162,7 @@ if (typeof module !== "undefined") {
     chunkLabel: chunkLabel,
     speedToLengthScale: speedToLengthScale,
     replayCommand: replayCommand,
+    parseVoiceList: parseVoiceList,
     parseConfig: parseConfig
   };
 }

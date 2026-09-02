@@ -119,12 +119,47 @@ test("replayCommand: faster speed adds --length-scale", () => {
   eq(c, ["/p/piper-tts", "--tag", "t", "--length-scale", "0.667", "--", "yo"]);
 });
 
+test("replayCommand: voice override beats the captured voice", () => {
+  const c = M.replayCommand("/p/piper-tts",
+    { tag: "narrate", voice: "en_GB-cori-high", text: "hi" }, 1, "en_US-amy-medium");
+  eq(c, ["/p/piper-tts", "--tag", "narrate", "--voice", "en_US-amy-medium", "--", "hi"]);
+});
+
+test("replayCommand: empty / non-string override falls back to captured voice", () => {
+  const base = { tag: "t", voice: "en_GB-cori-high", text: "yo" };
+  eq(M.replayCommand("/p", base, 1, ""),
+     ["/p", "--tag", "t", "--voice", "en_GB-cori-high", "--", "yo"]);
+  eq(M.replayCommand("/p", base, 1, null),
+     ["/p", "--tag", "t", "--voice", "en_GB-cori-high", "--", "yo"]);
+});
+
+// ── parseVoiceList ──────────────────────────────────────────────────────
+test("parseVoiceList: strips dir + .onnx, sorts, de-dupes", () => {
+  const raw = [
+    "/home/u/.local/share/piper-voices/en_US-lessac-medium.onnx",
+    "/home/u/.local/share/piper-voices/en_GB-cori-high.onnx",
+    "/home/u/.local/share/piper-voices/en_US-lessac-medium.onnx",
+    "",
+    "  /tmp/en_US-amy-medium.ONNX  ",
+  ].join("\n");
+  eq(M.parseVoiceList(raw), ["en_GB-cori-high", "en_US-amy-medium", "en_US-lessac-medium"]);
+});
+
+test("parseVoiceList: empty / falsy -> []", () => {
+  eq(M.parseVoiceList(""), []);
+  eq(M.parseVoiceList(null), []);
+  eq(M.parseVoiceList(undefined), []);
+});
+
 // ── parseConfig ─────────────────────────────────────────────────────────
 test("parseConfig", () => {
-  eq(M.parseConfig(""), { loop: false, speed: 1 });
-  eq(M.parseConfig("junk"), { loop: false, speed: 1 });
-  eq(M.parseConfig(JSON.stringify({ loop: true, speed: 1.5 })), { loop: true, speed: 1.5 });
-  eq(M.parseConfig(JSON.stringify({ loop: "yes", speed: -2 })), { loop: false, speed: 1 });
+  eq(M.parseConfig(""), { loop: false, speed: 1, voice: "" });
+  eq(M.parseConfig("junk"), { loop: false, speed: 1, voice: "" });
+  eq(M.parseConfig(JSON.stringify({ loop: true, speed: 1.5 })), { loop: true, speed: 1.5, voice: "" });
+  eq(M.parseConfig(JSON.stringify({ loop: "yes", speed: -2 })), { loop: false, speed: 1, voice: "" });
+  eq(M.parseConfig(JSON.stringify({ voice: "en_GB-cori-high" })),
+     { loop: false, speed: 1, voice: "en_GB-cori-high" });
+  eq(M.parseConfig(JSON.stringify({ voice: 42 })), { loop: false, speed: 1, voice: "" });
 });
 
 console.log("\n" + pass + " passed, " + fail + " failed");
