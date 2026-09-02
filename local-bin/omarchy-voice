@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+MODEL="${WHISPER_MODEL:-$HOME/.cache/whisper/ggml-base.en.bin}"
+API_URL="https://api.featherless.ai/v1/chat/completions"
+MODEL_NAME="Qwen/Qwen3.8-27B"
+TAG="voice"
+WAV="$(mktemp --suffix=.wav)"
+SIL="$(mktemp --suffix=.sil)"
+RESP="$(mktemp --suffix=.txt)"
+trap 'rm -f "$WAV" "$SIL" "$RESP"' EXIT
+
+case "${1:-}" in
+  --stop)
+    exec piper-tts --stop --tag "$TAG"
+    ;;
+  --toggle)
+    shift
+    exec piper-tts --toggle --tag "$TAG" "$@"
+    ;;
+  -h|--help)
+    cat <<'EOF'
+omarchy-voice — voice assistant: STT (whisper-cpp) -> LLM (Featherless) -> TTS (piper)
+
+Usage:
+  omarchy-voice            record speech, transcribe, answer aloud
+  omarchy-voice --stop     stop current speech
+  omarchy-voice --toggle "text"  speak text (interrupts current speech)
+EOF
+    exit 0
+    ;;
+  "")
+    ;;
+  *)
+    echo "Unknown argument: $1 (see omarchy-voice --help)" >&2
+    exit 1
+    ;;
+esac
+
+API_KEY="${FEATHERLESS_API_KEY:-$(python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.config/opencode/opencode.json')));print(d.get('provider',{}).get('featherless',{}).get('options',{}).get('apiKey',''))" 2>/dev/null)}"
+
+if [[ ! -f "$MODEL" ]]; then
+  echo "Whisper model not found at $MODEL. Downloading ggml-base.en..." >&2
+  mkdir -p "$(dirname "$MODEL")"
+  curl -Ls -o "$MODEL" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+fi
+
+if [[ -z "$API_KEY" ]]; then
+  echo "No Featherless API key. Set FEATHERLESS_API_KEY or add it to ~/.config/opencode/opencode.json" >&2
+  exit 1
+fi
+
+echo "Listening... (speak, then stay silent ~1.5s to stop)" >&2
+
+parec --rate=16000 --channels=1 --format=s16le \
+  | ffmpeg -y -f s16le -ar 16000 -ac 1 -i - \
+    -af "silencedetect=noise=-40dB:d=1.5" \
+    -f wav -t 120 - \
+    > "$WAV" 2> "$SIL" &
+PID=$!
+
+# silence_end = speech started; next silence_start after that = 1.5s of quiet
+HEARD=0
+MARK=0
+while kill -0 "$PID" 2>/dev/null; do
+  if (( HEARD == 0 )); then
+    if grep -q "silence_end" "$SIL" 2>/dev/null; then
+      HEARD=1
+      MARK=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
+    fi
+  else
+    NOW=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
+    if (( NOW > MARK )); then
+      sleep 0.3
+      kill "$PID" 2>/dev/null || true
+      break
+    fi
+  fi
+  sleep 0.2
+done
+wait "$PID" 2>/dev/null || true
+
+SIZE=$(stat -c%s "$WAV" 2>/dev/null || echo 0)
+if [[ "$SIZE" -lt 1000 ]]; then
+  echo "No speech detected. Exiting." >&2
+  exit 0
+fi
+
+echo "Transcribing..." >&2
+TEXT=$(whisper-cli -m "$MODEL" -f "$WAV" -nt 2>/dev/null | grep -v '^\[' | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+
+if [[ -z "$TEXT" ]]; then
+  echo "Empty transcription. Exiting." >&2
+  exit 0
+fi
+echo "You: $TEXT" >&2
+echo "Assistant:"
+
+export FEATHERLESS_KEY="$API_KEY"
+FEATHERLESS_URL="$API_URL" FEATHERLESS_MODEL="$MODEL_NAME" python3 - "$TEXT" "$RESP" << 'PYEOF'
+import json, os, sys, urllib.request
+
+transcript, resp_path = sys.argv[1], sys.argv[2]
+url = os.environ["FEATHERLESS_URL"]
+model = os.environ["FEATHERLESS_MODEL"]
+
+payload = {
+    "model": model,
+    "stream": True,
+    "messages": [
+        {"role": "system", "content": "You are a helpful voice assistant. Reply in a few short, conversational sentences. No markdown, no lists, no emoji."},
+        {"role": "user", "content": transcript},
+    ],
+}
+
+req = urllib.request.Request(
+    url,
+    data=json.dumps(payload).encode(),
+    headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + os.environ["FEATHERLESS_KEY"],
+    },
+)
+
+buf = []
+with urllib.request.urlopen(req, timeout=120) as r:
+    for raw in r:
+        line = raw.decode("utf-8", "replace").strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        choices = chunk.get("choices") or [{}]
+        delta = choices[0].get("delta", {}).get("content")
+        if delta:
+            buf.append(delta)
+            sys.stdout.write(delta)
+            sys.stdout.flush()
+
+sys.stdout.write("\n")
+with open(resp_path, "w") as f:
+    f.write("".join(buf).strip())
+PYEOF
+
+if [[ ! -s "$RESP" ]]; then
+  echo "(no response)" >&2
+  exit 0
+fi
+
+exec piper-tts --tag "$TAG" < "$RESP"

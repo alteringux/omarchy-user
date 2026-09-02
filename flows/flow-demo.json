@@ -1,0 +1,134 @@
+{
+  "id": "flow-demo",
+  "title": "Flow demo — feeds → classify → summarise → digest",
+  "nodes": [
+    {
+      "id": "feeds",
+      "type": "tool",
+      "cmd": "cat ~/.local/state/omarchy/newsbar.json 2>/dev/null || echo '{\"headlines\":[{\"source\":\"BBC\",\"title\":\"Talks resume in the capital\"},{\"source\":\"BBC\",\"title\":\"Markets steady after a jittery week\"},{\"source\":\"NPR\",\"title\":\"New telescope images released\"},{\"source\":\"NPR\",\"title\":\"Coastal towns brace for the storm\"},{\"source\":\"NPR\",\"title\":\"Election board certifies the count\"},{\"source\":\"Guardian\",\"title\":\"A chip startup doubles its funding round\"}]}'",
+      "ui": {
+        "x": 40,
+        "y": 40
+      }
+    },
+    {
+      "id": "counts",
+      "type": "transform",
+      "in": [
+        "feeds"
+      ],
+      "jq": "[.headlines | group_by(.source)[] | {feed: .[0].source, n: length}]",
+      "ui": {
+        "x": 40,
+        "y": 200
+      }
+    },
+    {
+      "id": "class",
+      "type": "route",
+      "in": [
+        "feeds"
+      ],
+      "prompt": "Classify these headlines. Headlines:\n{{feeds.stdout}}",
+      "edges": {
+        "mixed": [
+          "worldsum",
+          "techsum"
+        ],
+        "world": [
+          "worldsum"
+        ],
+        "tech": [
+          "techsum"
+        ]
+      },
+      "ui": {
+        "x": 300,
+        "y": 40
+      }
+    },
+    {
+      "id": "worldsum",
+      "type": "prompt",
+      "in": [
+        "feeds"
+      ],
+      "prompt": "Five bullets, world news only:\n{{feeds.stdout}}",
+      "ui": {
+        "x": 560,
+        "y": 20
+      }
+    },
+    {
+      "id": "techsum",
+      "type": "prompt",
+      "in": [
+        "feeds"
+      ],
+      "agent": true,
+      "prompt": "Five bullets, tech only, cite the source:\n{{feeds.stdout}}",
+      "ui": {
+        "x": 560,
+        "y": 160
+      }
+    },
+    {
+      "id": "mem",
+      "type": "memory",
+      "op": "append",
+      "key": "flow-demo-history",
+      "in": [
+        "worldsum",
+        "techsum"
+      ],
+      "ui": {
+        "x": 820,
+        "y": 160
+      }
+    },
+    {
+      "id": "digest",
+      "type": "reduce",
+      "mode": "llm",
+      "in": [
+        "worldsum",
+        "techsum"
+      ],
+      "prompt": "Merge into one tight brief:\n{{items}}",
+      "ui": {
+        "x": 820,
+        "y": 20
+      }
+    },
+    {
+      "id": "out",
+      "type": "view",
+      "shape": "markdown",
+      "in": [
+        "digest"
+      ],
+      "meta": {
+        "title": "Morning brief"
+      },
+      "ui": {
+        "x": 1080,
+        "y": 20
+      }
+    },
+    {
+      "id": "chart",
+      "type": "view",
+      "shape": "series",
+      "in": [
+        "counts"
+      ],
+      "meta": {
+        "title": "Headlines per feed"
+      },
+      "ui": {
+        "x": 1080,
+        "y": 200
+      }
+    }
+  ]
+}
