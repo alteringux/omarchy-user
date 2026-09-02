@@ -12,6 +12,8 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=dashboard-common.sh
 source "$SCRIPT_DIR/dashboard-common.sh"
 
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
+
 COUNTER_FILE="$STATE_DIR/dashboard-refresh-count"
 DIGEST_EVERY=5 # roughly every ~2.5h at the widget's 30-min refresh cadence
 
@@ -100,9 +102,9 @@ fi
 ) 9>"$LOCK_FILE"
 
 # --------------------------------------------------- self-improving digest
-# Every DIGEST_EVERY refreshes, ask the local `claude` CLI (already
-# authenticated — no API key needed) for a one-line glance summary of
-# what's currently on the dashboard. Cheap and infrequent by design.
+# Every DIGEST_EVERY refreshes, ask llm-blurb (Featherless) for a one-line
+# glance summary of what's currently on the dashboard. Cheap and infrequent
+# by design.
 count=0
 [[ -f "$COUNTER_FILE" ]] && count=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
 count=$((count + 1))
@@ -118,7 +120,7 @@ if ((count % DIGEST_EVERY == 0)); then
 Top headlines: ${news_titles:-none}
 System: ${sys_text:-none}"
 
-    digest=$(cd "$STATE_DIR" && timeout 45 claude -p "$prompt" 2>/dev/null || true)
+    digest=$("$LLM_BLURB" --max-tokens 120 "$prompt" 2>/dev/null || true)
     if [[ -n "$digest" ]]; then
       (
         flock 9

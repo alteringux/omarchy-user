@@ -1,0 +1,125 @@
+#!/usr/bin/env bash
+# llm-blurb -- one-shot text generation via Featherless AI (OpenAI-compatible).
+#
+# Drop-in stand-in for `claude -p` in the small Omarchy "self-improving"
+# helpers (dictionary overview / daily suggestion, stocks commentary,
+# dashboard digest, motivator pool growth). Prints the model's reply on
+# stdout; on ANY failure it prints a one-line reason to stderr and exits
+# non-zero *quietly* so callers keep whatever fallback they already have.
+#
+# Why Featherless instead of the claude CLI: these are throwaway blurbs that
+# don't need a frontier model, and routing them off the Claude subscription
+# keeps that quota for interactive work. Featherless is a flat-rate plan, so
+# the only real budget here is the account's concurrency cap (feather_pro_plus
+# = 4 units). Small models cost ~1 unit; this defaults to one so a blurb
+# refresh doesn't knock out a running opencode session (or vice versa).
+#
+# Usage:
+#   llm-blurb [options] "PROMPT"        # prompt as args, or on stdin if none
+#
+# Options:
+#   --json            ask for one JSON object (adds response_format, low temp)
+#   --system TEXT     override the system message
+#   --model NAME      override the model
+#   --max-tokens N    completion cap (default 500)
+#   --temp N          sampling temperature (default 0.7; 0.2 with --json)
+#   --timeout N       curl --max-time seconds (default 40)
+#
+# Environment:
+#   FEATHERLESS_API_KEY   API key. Falls back to ~/.config/featherless/key,
+#                         then to .provider.featherless.options.apiKey in
+#                         ~/.config/opencode/opencode.json.
+#   LLM_BLURB_MODEL       default model id.
+#
+# Exit codes: 0 ok | 2 bad args | 3 no key | 4 curl failed | 5 empty reply
+#             6 rate limited (concurrency cap) | 7 other HTTP error
+set -uo pipefail
+
+API_URL="https://api.featherless.ai/v1/chat/completions"
+model="${LLM_BLURB_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+max_tokens=500
+temp=""
+timeout=25
+want_json=0
+system=""
+# Featherless caps the account at a few concurrency units, which a running
+# opencode session can hold. Those holds are bursty, not constant, so a
+# 429 usually clears within seconds -- retry with backoff before giving up.
+retries=4
+backoff=(0 3 8 15)
+
+while (($#)); do
+  case "$1" in
+    --json)       want_json=1; shift ;;
+    --system)     system="${2:-}"; shift 2 ;;
+    --model)      model="${2:-}"; shift 2 ;;
+    --max-tokens) max_tokens="${2:-}"; shift 2 ;;
+    --temp)       temp="${2:-}"; shift 2 ;;
+    --timeout)    timeout="${2:-}"; shift 2 ;;
+    --)           shift; break ;;
+    -*)           echo "llm-blurb: unknown option $1" >&2; exit 2 ;;
+    *)            break ;;
+  esac
+done
+
+prompt="${*:-}"
+[[ -z "$prompt" ]] && prompt="$(cat)"
+[[ -z "${prompt// }" ]] && { echo "llm-blurb: empty prompt" >&2; exit 2; }
+
+key="${FEATHERLESS_API_KEY:-}"
+[[ -z "$key" && -r "$HOME/.config/featherless/key" ]] && key="$(<"$HOME/.config/featherless/key")"
+[[ -z "$key" && -r "$HOME/.config/opencode/opencode.json" ]] && \
+  key="$(jq -r '.provider.featherless.options.apiKey // empty' "$HOME/.config/opencode/opencode.json" 2>/dev/null)"
+key="${key//[$'\r\n\t ']/}"
+[[ -z "$key" ]] && { echo "llm-blurb: no Featherless API key" >&2; exit 3; }
+
+if [[ -z "$temp" ]]; then temp=0.7; ((want_json)) && temp=0.2; fi
+if [[ -z "$system" ]]; then
+  if ((want_json)); then
+    system="You output only a single minified JSON object: no markdown fences, no prose."
+  else
+    system="You write short, plain-text answers. No markdown, no preamble, no disclaimers."
+  fi
+fi
+
+req="$(jq -n \
+  --arg model "$model" --arg sys "$system" --arg user "$prompt" \
+  --argjson max "$max_tokens" --argjson temp "$temp" --argjson json "$want_json" \
+  '{
+     model: $model,
+     max_tokens: $max,
+     temperature: $temp,
+     messages: [ {role:"system", content:$sys}, {role:"user", content:$user} ]
+   }
+   + (if $json == 1 then {response_format: {type: "json_object"}} else {} end)')"
+
+for ((try = 0; try < retries; try++)); do
+  ((try > 0)) && sleep "${backoff[try]:-15}"
+  last=$((try == retries - 1))
+
+  if ! resp="$(curl -sS --max-time "$timeout" -w $'\n%{http_code}' "$API_URL" \
+        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d "$req")"; then
+    ((last)) && { echo "llm-blurb: curl failed" >&2; exit 4; }
+    continue
+  fi
+
+  code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+
+  case "$code" in
+    200)
+      content="$(printf '%s' "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+      if [[ -n "${content// }" ]]; then
+        printf '%s\n' "$content"
+        exit 0
+      fi
+      ((last)) && { echo "llm-blurb: empty completion" >&2; exit 5; } ;;
+    429)
+      ((last)) && { echo "llm-blurb: rate limited (concurrency cap)" >&2; exit 6; } ;;
+    *)
+      msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
+      echo "llm-blurb: HTTP $code${msg:+ -- $msg}" >&2
+      exit 7 ;;
+  esac
+done
+exit 1

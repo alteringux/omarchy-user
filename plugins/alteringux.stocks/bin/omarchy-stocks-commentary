@@ -1,12 +1,11 @@
 #!/bin/bash
 # Self-improving step: for the tickers the user actually clicks on in the
-# panel (tracked by omarchy-stocks-engage), asks the local `claude` CLI
-# (already authenticated on this machine — no API key needed) for a short,
-# neutral one-line take on a notable price move, and caches it so the panel
-# can show context beyond the raw percentage.
+# panel (tracked by omarchy-stocks-engage), asks llm-blurb (Featherless) for
+# a short, neutral one-line take on a notable price move, and caches it so
+# the panel can show context beyond the raw percentage.
 #
 # Rate-limited on two axes so this stays cheap and quiet:
-#   - only actually calls claude every REFRESH_EVERY invocations (this
+#   - only actually calls the model every REFRESH_EVERY invocations (this
 #     script is chained onto every price refresh, which runs every 2 min —
 #     see omarchy-stocks-refresh)
 #   - only regenerates a ticker's commentary once its move has shifted by
@@ -22,6 +21,8 @@ set -uo pipefail
 # Best-effort: absent guard file = no-op.
 OMARCHY_PLUGIN_ID="alteringux.stocks"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 
 STATE_DIR="$HOME/.local/state/omarchy"
 STATE_FILE="$STATE_DIR/stocks.json"
@@ -48,8 +49,7 @@ echo "$count" > "$COUNTER_FILE"
 top_tickers=$(jq -r 'to_entries | map(select(.value.count > 0)) | sort_by(-.value.count) | .[:'"$MAX_TICKERS"'] | .[].key' "$ENGAGEMENT_FILE" 2>/dev/null)
 [[ -z "$top_tickers" ]] && exit 0
 
-# Run from a plain state directory (no CLAUDE.md/project context) so claude
-# answers the prompt directly instead of pulling in unrelated repo context.
+# Keep the cwd in a plain state directory (no repo context needed).
 cd "$STATE_DIR" || exit 0
 
 while IFS= read -r ticker; do
@@ -75,7 +75,7 @@ while IFS= read -r ticker; do
 
   prompt="${ticker} moved ${change_pct}% today (now \$${price}). In one short, plain-text sentence (no markdown, no hedging disclaimers, no financial advice), give a neutral, informative take on what kind of move this is for a stock."
 
-  text=$(timeout 25 claude -p "$prompt" 2>/dev/null | tr -d '\r' | head -c 300)
+  text=$("$LLM_BLURB" --max-tokens 120 "$prompt" 2>/dev/null | tr -d '\r' | head -c 300)
   [[ -z "$text" ]] && continue
 
   (

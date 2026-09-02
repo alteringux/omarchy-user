@@ -1,11 +1,13 @@
 #!/bin/bash
-# Uses the local `claude` CLI (already authenticated, no API key needed) to
-# grow the quote and affirmation pools in the style of whatever the user has
-# liked so far, then prunes lines that have collected too many dislikes.
+# Uses llm-blurb (Featherless) to grow the quote and affirmation pools in the
+# style of whatever the user has liked so far, then prunes lines that have
+# collected too many dislikes.
 set -euo pipefail
 
 BASE="$HOME/.config/omarchy/motivator"
 cd "$BASE"
+
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 
 # grow KIND FLAVOUR-TEXT  -- KIND is "quotes" or "affirmations".
 grow() {
@@ -20,7 +22,7 @@ $top
 Return only the 5 lines, one per line, nothing else."
 
   local result
-  result=$(timeout 60 claude -p "$prompt" 2>/dev/null || true)
+  result=$("$LLM_BLURB" --max-tokens 300 --temp 0.9 "$prompt" 2>/dev/null || true)
   [[ -z "$result" ]] && return 0
 
   local added

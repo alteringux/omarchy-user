@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Self-improving layer: learns from starred/frequently-looked-up words and
-# asks the local `claude` CLI (no API key needed) for a related word to
-# explore next. Cheap to call often -- refresh mode only hits claude once
-# the cache is >12h stale and there's actually signal to learn from.
+# asks llm-blurb (Featherless) for a related word to explore next. Cheap to
+# call often -- refresh mode only hits the model once the cache is >12h
+# stale and there's actually signal to learn from.
 # Usage: omarchy-dictionary-suggest-daily [read|refresh]
 set -euo pipefail
+
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 
 STATE_DIR="$HOME/.local/state/omarchy"
 STATE_FILE="$STATE_DIR/dictionary.json"
@@ -53,7 +55,7 @@ EOF
 )
 
 cd "$STATE_DIR"
-raw=$(timeout 30 claude -p --output-format text "$prompt" 2>/dev/null || true)
+raw=$("$LLM_BLURB" --json --max-tokens 200 "$prompt" 2>/dev/null || true)
 parsed=$(echo "$raw" | jq -c '.' 2>/dev/null || echo "$raw" | grep -o '{.*}' | jq -c '.' 2>/dev/null || true)
 
 if [[ -z "$parsed" ]]; then

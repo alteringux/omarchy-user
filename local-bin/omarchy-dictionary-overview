@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Rich word overview via the claude CLI. Fallback/enrichment layer.
+# Rich word overview via llm-blurb (Featherless). Fallback/enrichment layer.
 # Usage: omarchy-dictionary-overview <word> [local-summary-context]
 # Output: {"word": str, "pronunciation": str, "part_of_speech": str,
 #          "definitions": [str], "examples": [str], "synonyms": [str], "etymology": str}
 set -euo pipefail
+
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 
 word="${1:-}"
 context="${2:-}"
@@ -22,8 +24,13 @@ Keep each definition and example under 120 characters. 2-3 definitions max, 1-2 
 EOF
 )
 
-raw=$(claude -p --output-format text "$prompt" 2>/dev/null)
+raw=$("$LLM_BLURB" --json --max-tokens 600 "$prompt" 2>/dev/null || true)
 
-echo "$raw" | jq -c '.' 2>/dev/null || {
-  echo "$raw" | grep -o '{.*}' | jq -c '.' 2>/dev/null || echo '{"error": "unparseable response"}'
+if [ -z "${raw//[[:space:]]/}" ]; then
+  echo '{"error": "no response"}'
+  exit 0
+fi
+
+echo "$raw" | jq -ce '.' 2>/dev/null || {
+  echo "$raw" | grep -o '{.*}' | jq -ce '.' 2>/dev/null || echo '{"error": "unparseable response"}'
 }
