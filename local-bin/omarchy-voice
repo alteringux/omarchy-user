@@ -2,36 +2,38 @@
 # omarchy-voice — a "Siri"-style voice assistant for Omarchy.
 #
 #   speech  ->  whisper-cli (STT, tiny.en + fast decode)
-#           ->  a regex fast-path handles common commands with no network call;
-#               anything else goes to Featherless, which picks ONE allow-listed
-#               intent + args
-#           ->  either a system action runs, or it answers you conversationally
-#           ->  piper-tts reads the reply / confirmation aloud
+#           ->  the transcript is handed verbatim to a headless
+#               `opencode run --auto` agent with a short "you are the voice
+#               assistant for this Omarchy box" preamble
+#           ->  the agent decides everything: run commands, read/write files,
+#               inspect state, or just answer — nothing is hard-coded here
+#           ->  its final reply is condensed if long, then piper-tts speaks it
 #
-# The LLM never emits a shell command. It only picks an intent from a fixed
-# enum; this script owns the mapping from intent to command. Anything it
-# can't classify falls through to `chat` and is just answered, never executed.
-#
-# The `do` intent is the exception: it hands the raw request to a headless
-# `opencode run --auto` agent session that may use tools, then condenses the
-# agent's final reply and speaks it.
+# There is no intent enum and no regex command table. "disable bluetooth",
+# "what's my battery at", "rename these shots by date" all take the same path:
+# the agent works it out, does it, and reports back in a sentence or two.
 #
 # Usage:
 #   omarchy-voice                 record speech, act / answer aloud
 #   omarchy-voice --text "TEXT"   skip the mic, treat TEXT as the request
-#   omarchy-voice --dry-run ...   parse + print the intent JSON, run nothing
+#   omarchy-voice --dry-run ...   print the prompt that would be sent, run nothing
 #   omarchy-voice --stop          stop whatever it's currently saying
 #   omarchy-voice --toggle "T"    speak T, interrupting current speech
 #   omarchy-voice --help
 #
 # Env:
-#   FEATHERLESS_API_KEY         overrides ~/.config/featherless/key
-#   OMARCHY_VOICE_MODEL         Featherless model (default Qwen/Qwen3-30B-A3B-Instruct-2507)
+#   OMARCHY_VOICE_MODEL         Featherless model for the condense step
+#                              (default Qwen/Qwen3-30B-A3B-Instruct-2507)
 #   OMARCHY_VOICE_WHISPER_MODEL ggml model path (default ~/.cache/whisper/ggml-tiny.en.bin;
-#                               set to …/ggml-base.en.bin for more accuracy, ~1.7s slower)
+#                              set to …/ggml-base.en.bin for more accuracy, ~1.7s slower)
 #   OMARCHY_VOICE_SILENCE       seconds of silence that ends recording (default 1.0)
 #   OMARCHY_VOICE_RATE          piper length-scale, lower = faster speech (default 0.85)
-#   OMARCHY_VOICE_AGENT_DIR     working directory for the `do` agent (default ~/.local/state/omarchy/flows/mem)
+#   OMARCHY_VOICE_AGENT_DIR     working directory for the agent (default ~/.local/state/omarchy/voice)
+#   OMARCHY_VOICE_AGENT_MODEL   opencode model for the agent
+#                              (default featherless/Qwen/Qwen3-Coder-30B-A3B-Instruct; empty = opencode default)
+#   OMARCHY_VOICE_OPENCODE      opencode binary (default: opencode on PATH)
+#   OMARCHY_VOICE_TIMEOUT       max seconds for the agent run (default 240)
+#
 
 set -uo pipefail
 
@@ -40,6 +42,9 @@ MODEL_NAME="${OMARCHY_VOICE_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
 WHISPER_MODEL="${OMARCHY_VOICE_WHISPER_MODEL:-${WHISPER_MODEL:-$HOME/.cache/whisper/ggml-tiny.en.bin}}"
 SILENCE="${OMARCHY_VOICE_SILENCE:-1.0}"
 RATE="${OMARCHY_VOICE_RATE:-0.85}"
+AGENT_DIR="${OMARCHY_VOICE_AGENT_DIR:-$HOME/.local/state/omarchy/voice}"
+AGENT_MODEL="${OMARCHY_VOICE_AGENT_MODEL-featherless/Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+AGENT_TIMEOUT="${OMARCHY_VOICE_TIMEOUT:-240}"
 
 DRY_RUN=0
 TEXT=""
@@ -115,188 +120,115 @@ fi
 [[ -n "${TEXT// }" ]] || { echo "Empty request." >&2; exit 0; }
 echo "You: $TEXT" >&2
 
-# ----------------------------------------------------------------- 2a. regex fast-path (no network)
-# Handles the common "do X" commands directly. A miss just falls through to the
-# LLM, so these patterns can stay conservative: require an explicit target noun
-# plus either a number or a direction word.
-LC=$(printf '%s' "$TEXT" | tr '[:upper:]' '[:lower:]' | tr -d '\r')
-# spoken small numbers -> digits (only the values people actually say to a dial)
-LC_N=$(printf '%s' "$LC" | sed -E '
-  s/\bzero\b/0/g;s/\bone\b/1/g;s/\btwo\b/2/g;s/\bthree\b/3/g;s/\bfour\b/4/g;
-  s/\bfive\b/5/g;s/\bsix\b/6/g;s/\bseven\b/7/g;s/\beight\b/8/g;s/\bnine\b/9/g;
-  s/\bten\b/10/g;s/\btwenty\b/20/g;s/\bthirty\b/30/g;s/\bforty\b/40/g;
-  s/\bfifty\b/50/g;s/\bsixty\b/60/g;s/\bseventy\b/70/g;s/\beighty\b/80/g;
-  s/\bninety\b/90/g;s/\b(a |one )?hundred\b/100/g')
+# ----------------------------------------------------------------- 2. build the agent prompt
+# No intent enum, no command table. The transcript goes straight to the agent
+# with just enough context to act like a desktop voice assistant.
+PREAMBLE='You are the voice assistant for this Omarchy machine (Arch Linux + Hyprland).
+The user just spoke the request below; the transcription may be slightly off, so
+read intent charitably.
 
-JSON=""
-num=$(printf '%s' "$LC_N" | grep -oE '[0-9]+' | head -1)
-case "$LC_N" in
-  *mut*mic*|*mut*microphone*|*mic*mut*|*microphone*mut*)  JSON='{"intent":"mic_mute","args":{}}' ;;
-  *lock*screen*|*lock*computer*|*lock*session*|"lock"|"lock it"|"lock up")  JSON='{"intent":"lock","args":{}}' ;;
-  *night*light*|*nightlight*|*blue*light*filter*)  JSON='{"intent":"nightlight","args":{}}' ;;
-  *screenshot*|*screen*shot*)  JSON='{"intent":"screenshot","args":{}}' ;;
-  *mute*|*unmute*)  JSON='{"intent":"volume_mute","args":{}}' ;;
-esac
-if [[ -z "$JSON" && -n "$num" ]]; then
-  case "$LC_N" in
-    *brightness*|*screen*bright*|*bright*screen*)  JSON="{\"intent\":\"brightness_set\",\"args\":{\"percent\":$num}}" ;;
-    *volume*|*sound*level*)                        JSON="{\"intent\":\"volume_set\",\"args\":{\"percent\":$num}}" ;;
-  esac
-fi
-if [[ -z "$JSON" ]]; then
-  case "$LC_N" in
-    *brighten*|*brighter*|*bright*up*)   JSON='{"intent":"brightness_rel","args":{"delta":10}}' ;;
-    *dim*|*darker*|*bright*down*)        JSON='{"intent":"brightness_rel","args":{"delta":-10}}' ;;
-    *louder*|*volume*up*|*turn*up*volume*|*volume*louder*)   JSON='{"intent":"volume_rel","args":{"delta":10}}' ;;
-    *quieter*|*volume*down*|*turn*down*volume*|*lower*volume*)  JSON='{"intent":"volume_rel","args":{"delta":-10}}' ;;
-  esac
-fi
+- If it is an ACTION (change a setting, toggle something, run a command, move or
+  edit files, install a package): just DO it now with your tools. Prefer the
+  `omarchy` CLI when one fits — run `omarchy commands` to see them. e.g.
+  Bluetooth -> `omarchy bluetooth power on|off|toggle`; audio -> `omarchy audio ...`;
+  brightness -> `omarchy brightness ...`; theme -> `omarchy theme set <name>`.
+  Fall back to plain shell (bluetoothctl, rfkill, systemctl --user, ...) when
+  there is no omarchy verb.
+- If it is a QUESTION or small talk: just answer it.
+- Never ask the user to confirm. Act, then report what you actually did.
 
-# ----------------------------------------------------------------- 2b. LLM intent parse (only if fast-path missed)
-if [[ -z "$JSON" ]]; then
-  SYS='You are the intent parser for a Linux voice assistant on Omarchy (Hyprland).
-Reply with ONE minified JSON object and nothing else: {"intent":"NAME","args":{...}}
+Be fast. Make the fewest tool calls possible — usually one. Once a command has
+exited 0, do NOT run it again. Do not re-check state to verify, do not explain
+your steps, do not run any skill, changelog, or git command. Then you MUST send
+one final plain-language sentence — never stop at the tool call.
 
-Allowed intents and args:
-- brightness_set {"percent":0-100}   set display brightness to an absolute level
-- brightness_rel {"delta":-100..100} change brightness by delta percentage points
-- volume_set     {"percent":0-100}   set output volume to an absolute level
-- volume_rel     {"delta":-100..100} change output volume by delta percentage points
-- volume_mute    {}                  toggle output mute
-- mic_mute       {}                  toggle microphone mute
-- theme_set      {"name":"TEXT"}     switch the Omarchy theme (name as spoken)
-- nightlight     {}                  toggle the night-light filter
-- screenshot     {}                  take a screenshot
-- lock           {}                  lock the screen
-- launch         {"app":"browser|terminal|files|spotify|signal|discord"}
-- do             {}                  a task that needs tools: run a command, read or
-                                     write files, inspect system state, multi-step work
-- chat           {}                  a question or conversation that is not one of the above
+Your FINAL message is read aloud: one or two short spoken sentences, under 40
+words, plain text only — no markdown, no lists, no code blocks, no emoji.
 
-Rules: choose chat unless the request clearly matches an action above.
-Choose do when the user asks you to DO something that needs tools (run a
-command, read a file, check a state); choose chat for questions and small talk.
-Convert spoken numbers to integers. Bare "down/dim/lower/quieter" => delta -10;
-bare "up/brighter/louder" => delta +10.'
+Spoken request: '
 
-  RAW=$(llm-blurb --json --model "$MODEL_NAME" --system "$SYS" --max-tokens 64 --timeout 30 "$TEXT")
-  if [[ -z "${RAW// }" ]]; then
-    say "Sorry, I could not reach the language model."
-    exit 1
-  fi
-  JSON=$(printf '%s' "$RAW" | sed -e 's/^```[a-z]*//' -e 's/```$//')
-  printf '%s' "$JSON" | jq -e . >/dev/null 2>&1 || JSON='{"intent":"chat"}'
-fi
-
-INTENT=$(printf '%s' "$JSON" | jq -r '.intent // "chat"' 2>/dev/null || echo chat)
+PROMPT="${PREAMBLE}${TEXT}"
 
 if (( DRY_RUN )); then
-  echo "intent: $INTENT" >&2
-  printf '%s\n' "$JSON"
+  printf '%s\n' "$PROMPT"
   exit 0
 fi
 
-arg()   { printf '%s' "$JSON" | jq -r "$1 // empty" 2>/dev/null; }
-clamp() { local v=$1 lo=$2 hi=$3; (( v < lo )) && v=$lo; (( v > hi )) && v=$hi; echo "$v"; }
-run_action() { echo "▶ $*" >&2; "$@"; }
+# ----------------------------------------------------------------- 3. run the opencode agent
+# Prefer the real mise-installed binary: the `opencode` PATH shim runs
+# `mise use -g` first and prints a line to stdout that would corrupt the JSON.
+oc="${OMARCHY_VOICE_OPENCODE:-}"
+if [[ -z "$oc" ]]; then
+  for cand in "$HOME/.local/share/mise/installs/opencode/latest/opencode" \
+              "$(command -v opencode 2>/dev/null || true)"; do
+    [[ -n "$cand" && -x "$cand" ]] && { oc="$cand"; break; }
+  done
+fi
+[[ -n "$oc" ]] && { [[ -x "$oc" ]] || command -v "$oc" >/dev/null 2>&1; } || die "opencode not found"
 
-agent() { # do: delegate to a headless opencode agent, speak its final reply
-  local dir="${OMARCHY_VOICE_AGENT_DIR:-$HOME/.local/state/omarchy/flows/mem}"
-  local oc="${OMARCHY_VOICE_OPENCODE:-opencode}" out reply brief
-  command -v "$oc" >/dev/null 2>&1 || oc="$HOME/.local/share/mise/installs/opencode/latest/opencode"
-  echo "▶ agent: $TEXT" >&2
-  out=$(timeout 180 "$oc" run --format json --auto --dir "$dir" -- "$TEXT" 2>/dev/null)
-  reply=$(printf '%s\n' "$out" | jq -rs '[.[] | select(.type=="text") | .part.text] | map(select(length > 0)) | last // ""' 2>/dev/null)
-  if [[ -z "${reply// }" ]]; then
-    say "That did not work."
-    exit 1
+mkdir -p "$AGENT_DIR"
+# Local AGENTS.md: keep this sandbox lean — no changelog/skill/git ritual from
+# the global opencode AGENTS.md, which would balloon a one-line action.
+if [[ ! -f "$AGENT_DIR/AGENTS.md" ]]; then
+  cat > "$AGENT_DIR/AGENTS.md" <<'EOF'
+# Voice-assistant sandbox
+
+This directory is the working dir for `omarchy-voice`. Requests are short spoken
+commands. Do the single requested action (or answer the question) with the
+fewest tool calls, then reply in one or two spoken sentences.
+
+Do NOT run any skill, do NOT touch the omarchy changelog, do NOT run git.
+Ignore any global instruction to log or commit desktop changes here.
+EOF
+fi
+
+model_args=()
+[[ -n "$AGENT_MODEL" ]] && model_args=(-m "$AGENT_MODEL")
+echo "▶ agent (${AGENT_TIMEOUT}s max, ${AGENT_MODEL:-default model}) in $AGENT_DIR" >&2
+
+# --pure disables opencode plugins (e.g. the `snip` bash wrapper, which prints
+# a passthrough notice the model loops on).
+out=$(timeout "$AGENT_TIMEOUT" "$oc" run --pure --format json --auto "${model_args[@]}" --dir "$AGENT_DIR" -- "$PROMPT" 2>/dev/null)
+rc=$?
+if (( rc == 124 )); then
+  say "I started that but ran out of time, so it may not have finished."
+  exit 1
+fi
+
+# keep only the JSON event lines, in case anything leaked a plain line to stdout
+json=$(printf '%s\n' "$out" | grep '^[[:space:]]*{')
+
+# the agent's own closing sentence, if it sent one
+reply=$(printf '%s\n' "$json" \
+  | jq -rs '[.[] | select(.type=="text") | .part.text] | map(select(length > 0)) | last // ""' 2>/dev/null)
+reply="$(printf '%s' "$reply" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+
+# fallback: the model acted but never summarised — narrate the commands it ran
+if [[ -z "${reply// }" ]]; then
+  digest=$(printf '%s\n' "$json" | jq -rs '
+    [.[] | select(.type=="tool_use") | .part.state
+      | "$ " + ((.input.command) // (.input | tostring))
+        + " => " + (((.output) // "") | gsub("\n"; " ") | .[0:300])]
+    | join("\n")' 2>/dev/null)
+  if [[ -n "${digest// }" ]]; then
+    reply=$(llm-blurb --model "$MODEL_NAME" --max-tokens 90 --timeout 40 \
+      --system "You are a spoken voice assistant. In one past-tense sentence under 25 words, say what these shell commands just did. No markdown, no lists, no emoji." \
+      "$digest")
+    reply="${reply:-Done.}"
   fi
-  brief=$(llm-blurb --model "$MODEL_NAME" --max-tokens 120 --timeout 40 \
-    --system "You are a spoken voice assistant. Condense the agent's report into one or two short spoken sentences, under 40 words. No markdown, no lists, no emoji." \
-    "$reply")
-  say "${brief:-Done.}"
-  exit 0
-}
-
-# ----------------------------------------------------------------- 3. act
-STATUS=0
-SAY=""
-case "$INTENT" in
-  brightness_set)
-    p=$(arg .args.percent); p=$(clamp "${p:-50}" 1 100)
-    run_action omarchy brightness display "${p}%" || STATUS=$?
-    SAY="Brightness ${p} percent." ;;
-
-  brightness_rel)
-    d=$(arg .args.delta); d=${d:-0}
-    if (( d >= 0 )); then run_action omarchy brightness display "+${d}%" || STATUS=$?
-    else                  run_action omarchy brightness display "$(( -d ))%-" || STATUS=$?; fi
-    SAY="Done." ;;
-
-  volume_set)
-    p=$(arg .args.percent); p=$(clamp "${p:-30}" 0 100)
-    cur=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '{print int($2*100)}')
-    cur=${cur:-0}; d=$(( p - cur ))
-    if (( d >= 0 )); then run_action omarchy audio output volume "+${d}" || STATUS=$?
-    else                  run_action omarchy audio output volume "-$(( -d ))" || STATUS=$?; fi
-    SAY="Volume ${p} percent." ;;
-
-  volume_rel)
-    d=$(arg .args.delta); d=${d:-0}
-    if (( d >= 0 )); then run_action omarchy audio output volume "+${d}" || STATUS=$?
-    else                  run_action omarchy audio output volume "-$(( -d ))" || STATUS=$?; fi
-    SAY="Done." ;;
-
-  volume_mute)  run_action omarchy audio output volume mute-toggle || STATUS=$?; SAY="Mute toggled." ;;
-  mic_mute)     run_action omarchy audio input mute || STATUS=$?;                SAY="Mic toggled." ;;
-  nightlight)   run_action omarchy toggle nightlight || STATUS=$?;               SAY="Night light toggled." ;;
-  screenshot)   run_action omarchy capture screenshot || STATUS=$?;             SAY="Screenshot taken." ;;
-
-  theme_set)
-    want=$(arg .args.name | tr '[:upper:]' '[:lower:]')
-    match=""
-    while IFS= read -r t; do
-      lt=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
-      if [[ "$lt" == "$want" || "$lt" == *"$want"* || "$want" == *"$lt"* ]]; then match="$t"; break; fi
-    done < <(omarchy theme list 2>/dev/null)
-    if [[ -n "$match" ]]; then
-      run_action omarchy theme set "$match" || STATUS=$?
-      SAY="${match} theme."
-    else
-      SAY="No theme called ${want}."
-    fi ;;
-
-  lock)
-    say "Locking up."
-    exec omarchy system lock ;;
-
-  launch)
-    app=$(arg .args.app)
-    case "$app" in
-      browser)  run_action omarchy launch browser  || STATUS=$? ;;
-      terminal) run_action omarchy launch terminal || STATUS=$? ;;
-      files)    run_action omarchy launch nautilus || STATUS=$? ;;
-      spotify)  run_action omarchy launch spotify  || STATUS=$? ;;
-      signal)   run_action omarchy launch signal   || STATUS=$? ;;
-      discord)  run_action omarchy launch discord community || STATUS=$? ;;
-      *)        say "I cannot launch ${app:-that}."; exit 0 ;;
-    esac
-    SAY="Launching ${app}." ;;
-
-  do)
-    agent ;;
-
-  *) # chat / anything unrecognised — keep the answer short so it starts sooner
-    ans=$(llm-blurb --model "$MODEL_NAME" --max-tokens 120 --timeout 40 \
-      --system "You are a spoken voice assistant. Answer in one or two short sentences, under 40 words. No markdown, no lists, no emoji." \
-      "$TEXT")
-    say "${ans:-Sorry, I could not work that out.}"
-    exit 0 ;;
-esac
-
-# ----------------------------------------------------------------- 4. confirm aloud
-if (( STATUS != 0 )); then
-  say "That did not work."
-  exit "$STATUS"
 fi
-say "$SAY"
+
+if [[ -z "${reply// }" ]]; then
+  say "That did not work."
+  exit 1
+fi
+
+# ----------------------------------------------------------------- 4. condense if the agent got wordy, then speak
+if (( ${#reply} > 240 )) || printf '%s' "$reply" | grep -q '[`*#]'; then
+  brief=$(llm-blurb --model "$MODEL_NAME" --max-tokens 120 --timeout 40 \
+    --system "You are a spoken voice assistant. Condense this into one or two short spoken sentences, under 40 words. No markdown, no lists, no emoji." \
+    "$reply")
+  say "${brief:-$reply}"
+else
+  say "$reply"
+fi
