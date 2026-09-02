@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.vpnrotate",
+  "name": "VPN Rotate",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Proton VPN free-tier connection with an IP rotator (protonvpn-rotate script)",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "VPN Rotate",
+    "description": "Shield icon showing Proton VPN state + exit country; click for connect / disconnect, rotate-now, and auto-rotate on a configurable interval",
+    "category": "Network",
+    "allowMultiple": false
+  }
+}

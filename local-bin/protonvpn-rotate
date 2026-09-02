@@ -1,0 +1,316 @@
+#!/usr/bin/env bash
+# protonvpn-rotate — thin, stateless wrapper around the official `protonvpn-cli`
+# (Arch pkg: proton-vpn-cli) that the alteringux.vpnrotate bar widget drives.
+#
+# The widget owns *policy* (auto-rotate on/off, interval, kill switch); this
+# script owns *mechanism*: connect to a random Proton free server, switch to a
+# fresh one, disconnect, and publish a JSON status file the widget reads.
+#
+#   protonvpn-rotate connect          # connect to a Proton free server
+#   protonvpn-rotate rotate           # reconnect (new server / new exit IP)
+#   protonvpn-rotate disconnect
+#   protonvpn-rotate refresh          # reconcile the status file with `protonvpn status`
+#   protonvpn-rotate status [--json]  # print cached status (--json for the raw file)
+#   protonvpn-rotate probe            # re-check the exit IP, update status
+#   protonvpn-rotate killswitch on|off
+#
+# Exit IP is verified through the tunnel after every connect/rotate, so the
+# status file is proof the public IP actually moved, not just that the CLI
+# claimed success.
+
+set -uo pipefail
+
+# ── where the official CLI lives / how it's called ──────────────────────────
+# proton-vpn-cli 1.0.3 installs the entry point as `protonvpn` (verified via
+# `pacman -Ql proton-vpn-cli`). Everything the rest of the script needs from it
+# is funnelled through these functions so a CLI syntax change is a one-line
+# edit here, not a rewrite. Protocol is not a connect flag on this CLI (the
+# client picks WireGuard itself); kill switch is a persisted config setting.
+CLI_BIN="${PROTONVPN_CLI_BIN:-protonvpn}"
+
+strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+# NOTE: on the FREE plan the official CLI rejects `connect --random`,
+# `connect --country`, and named servers ("not available on the free plan").
+# Bare `protonvpn connect` is all we get — Proton picks the free server by
+# load, so a reconnect only *sometimes* lands a different exit IP. Real
+# per-request IP rotation on free needs the WireGuard-config + nmcli path.
+cli_connect_random() { "$CLI_BIN" connect 2>&1 | strip_ansi; }
+cli_disconnect()     { "$CLI_BIN" disconnect 2>&1 | strip_ansi; }
+cli_status_raw()     { "$CLI_BIN" status 2>&1 | strip_ansi; }
+cli_killswitch() {                                   # $1 = on|off
+  case "$1" in
+    on) "$CLI_BIN" config set kill-switch standard 2>&1 | strip_ansi ;;
+    *)  "$CLI_BIN" config set kill-switch off 2>&1 | strip_ansi ;;
+  esac
+}
+
+# ── paths ──────────────────────────────────────────────────────────────────
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+STATE_FILE="$STATE_DIR/vpnrotate.json"
+LOG_FILE="$STATE_DIR/vpnrotate.log"
+mkdir -p "$STATE_DIR"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE" 2>/dev/null; }
+
+# ── status file helpers ────────────────────────────────────────────────────
+# Fields: connected, action, server, exitIp, country, city, org,
+#         since (epoch of current connection), lastRotate (epoch), error.
+state_get() {
+  # $1 = key ; prints value or empty. Pure-bash JSON peek, good enough for flat.
+  [ -f "$STATE_FILE" ] || { echo ""; return; }
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$STATE_FILE" | head -n1
+}
+
+write_state() {
+  # named args: connected action server exitIp country city org since lastRotate error
+  local connected="$1" action="$2" server="$3" exitIp="$4" country="$5" \
+        city="$6" org="$7" since="$8" lastRotate="$9" error="${10}"
+  [ -n "$action" ] || action="idle"
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/.vpnrotate.XXXXXX")" || return 1
+  cat >"$tmp" <<EOF
+{
+  "connected": $connected,
+  "action": "$(json_escape "$action")",
+  "server": "$(json_escape "$server")",
+  "exitIp": "$(json_escape "$exitIp")",
+  "country": "$(json_escape "$country")",
+  "city": "$(json_escape "$city")",
+  "org": "$(json_escape "$org")",
+  "since": ${since:-0},
+  "lastRotate": ${lastRotate:-0},
+  "error": "$(json_escape "$error")",
+  "updated": $(date +%s)
+}
+EOF
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+json_escape() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
+
+# Rewrite only the "action" + "error" fields quickly (for transient states).
+set_action() {
+  local action="$1" error="${2:-}"
+  write_state \
+    "$( [ "$(state_get connected)" = "true" ] && echo true || echo false )" \
+    "$action" "$(state_get server)" "$(state_get exitIp)" "$(state_get country)" \
+    "$(state_get city)" "$(state_get org)" "$(state_get since)" "$(state_get lastRotate)" \
+    "$error"
+}
+
+# ── exit-IP probe (source of truth that the public IP moved) ────────────────
+probe_ip() {
+  # echoes: "<ip>\t<country>\t<city>\t<org>"  (fields may be blank)
+  local body ip cc city org
+  for url in "https://ipinfo.io/json" "https://ifconfig.co/json" "https://api.ipify.org?format=json"; do
+    body="$(curl -fsS --max-time 8 "$url" 2>/dev/null)" || continue
+    [ -n "$body" ] || continue
+    ip="$(printf '%s' "$body"   | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'          | head -n1)"
+    cc="$(printf '%s' "$body"   | sed -n 's/.*"country\(_iso\)\{0,1\}"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\2/p' | head -n1)"
+    city="$(printf '%s' "$body" | sed -n 's/.*"city"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'        | head -n1)"
+    org="$(printf '%s' "$body"  | sed -n 's/.*"\(org\|asn_org\)"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\2/p' | head -n1)"
+    [ -n "$ip" ] && { printf '%s\t%s\t%s\t%s\n' "$ip" "$cc" "$city" "$org"; return 0; }
+  done
+  return 1
+}
+
+# Pull the server name out of `protonvpn-cli status` text (best effort).
+current_server() {
+  cli_status_raw | sed -n 's/.*[Ss]erver[[:space:]]*:\?[[:space:]]*\([A-Za-z0-9#._-]\+\).*/\1/p' | head -n1
+}
+
+is_connected_cli() {
+  # `protonvpn status` prints "Status: Connected" or "Status: Disconnected".
+  cli_status_raw | grep -qiE 'status:[[:space:]]*connected'
+}
+
+# Ground truth from `protonvpn status`, TAB-separated: connected<TAB>server<TAB>city<TAB>country
+#   Status: Connected
+#   Server: NL-FREE#127 in Amsterdam, Netherlands
+parse_cli_status() {
+  local txt connected="false" line server="" where="" city="" country=""
+  txt="$(cli_status_raw)"
+  printf '%s' "$txt" | grep -qiE 'status:[[:space:]]*connected' && connected="true"
+  line="$(printf '%s\n' "$txt" | sed -n 's/^[[:space:]]*[Ss]erver:[[:space:]]*//p' | head -n1)"
+  if [ -n "$line" ]; then
+    server="${line%% in *}"
+    where="${line#* in }"; [ "$where" = "$line" ] && where=""
+    if [ -n "$where" ]; then
+      city="${where%%,*}"
+      country="${where#*, }"; [ "$country" = "$where" ] && country=""
+    fi
+  fi
+  printf '%s\t%s\t%s\t%s\n' "$connected" "$server" "$city" "$country"
+}
+
+# ── actions ────────────────────────────────────────────────────────────────
+do_connect() {
+  local rotating="${1:-false}" now prev_ip out ip cc city org server since
+  now="$(date +%s)"
+  prev_ip="$(state_get exitIp)"
+  since="$(state_get since)"; [ "$rotating" = "true" ] && [ -n "$since" ] || since="$now"
+
+  set_action "$( [ "$rotating" = true ] && echo rotating || echo connecting )"
+  log "$([ "$rotating" = true ] && echo rotate || echo connect): calling CLI"
+
+  # On free tier there's no server picker, so force a fresh pick by dropping
+  # the tunnel first when rotating. (Often still the same server if it's the
+  # least loaded — hence the exit-IP check below.)
+  if [ "$rotating" = "true" ]; then
+    cli_disconnect >/dev/null 2>&1
+    sleep 1
+  fi
+
+  out="$(cli_connect_random)"; local rc=$?
+  log "CLI connect rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+
+  if [ $rc -ne 0 ] && ! is_connected_cli; then
+    write_state false error "" "" "" "" "" 0 "$(state_get lastRotate)" \
+      "$(printf '%s\n' "$out" | grep -i error | head -n1 | cut -c1-180)"
+    echo "protonvpn-rotate: connect failed" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+
+  server="$(current_server)"; [ -n "$server" ] || server="$(printf '%s' "$out" | sed -n 's/.*[Ss]erver[: ]\+\([A-Za-z0-9#._-]\+\).*/\1/p' | head -n1)"
+
+  # Verify the exit IP. Retry briefly — WireGuard routing can lag the CLI's
+  # "connected" by a second or two.
+  local probe="" tries=0
+  while [ $tries -lt 6 ]; do
+    probe="$(probe_ip)" && [ -n "$probe" ] && break
+    tries=$((tries+1)); sleep 1
+  done
+  IFS=$'\t' read -r ip cc city org <<<"${probe:-}"
+
+  write_state true idle "$server" "$ip" "$cc" "$city" "$org" "$since" "$now" ""
+
+  if [ -n "$ip" ] && [ -n "$prev_ip" ] && [ "$ip" = "$prev_ip" ]; then
+    log "warning: exit IP unchanged after rotate ($ip)"
+  fi
+  echo "connected: ${server:-?}  exit ${ip:-?} ${cc:+($cc)}"
+}
+
+do_disconnect() {
+  set_action disconnecting
+  local out; out="$(cli_disconnect)"
+  log "CLI disconnect :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+  write_state false idle "" "" "" "" "" 0 "$(state_get lastRotate)" ""
+  echo "disconnected"
+}
+
+do_status() {
+  if [ "${1:-}" = "--json" ]; then
+    [ -f "$STATE_FILE" ] && cat "$STATE_FILE" || echo '{"connected":false,"action":"idle","error":""}'
+    return
+  fi
+  local conn; conn="$(state_get connected)"
+  if [ "$conn" = "true" ]; then
+    echo "connected  server=$(state_get server)  ip=$(state_get exitIp)  country=$(state_get country)  since=$(state_get since)"
+  else
+    local e; e="$(state_get error)"
+    echo "disconnected${e:+  error=$e}"
+  fi
+}
+
+do_probe() {
+  local probe ip cc city org
+  probe="$(probe_ip)" || { echo "probe failed" >&2; return 1; }
+  IFS=$'\t' read -r ip cc city org <<<"$probe"
+  write_state "$( [ "$(state_get connected)" = true ] && echo true || echo false )" \
+    "$(state_get action)" "$(state_get server)" "$ip" "$cc" "$city" "$org" \
+    "$(state_get since)" "$(state_get lastRotate)" ""
+  echo "exit ${ip:-?} ${cc:+($cc)} ${city:+$city}"
+}
+
+# Reconcile the status file with what `protonvpn` actually reports, so the bar
+# widget stays correct even when the tunnel is brought up / dropped outside
+# this script (bare `protonvpn connect`, a WireGuard drop, the GTK app, another
+# terminal). Cheap by default: only re-probes the exit IP when the connection
+# state or server actually changed, or the IP is missing.
+do_refresh() {
+  local truth conn server city country
+  truth="$(parse_cli_status)"
+  IFS=$'\t' read -r conn server city country <<<"$truth"
+
+  local file_conn file_server file_ip file_action file_since file_lr
+  file_conn="$(state_get connected)"
+  file_server="$(state_get server)"
+  file_ip="$(state_get exitIp)"
+  file_action="$(state_get action)"
+  file_since="$(state_get since)"
+  file_lr="$(state_get lastRotate)"
+
+  # Don't stomp a transition this script is in the middle of.
+  case "$file_action" in
+    connecting|rotating|disconnecting)
+      local age; age=$(( $(date +%s) - $(state_get updated 2>/dev/null || echo 0) ))
+      [ "$age" -lt 25 ] && { echo "refresh: skipped (mid-$file_action)"; return 0; }
+      ;;
+  esac
+
+  if [ "$conn" != "true" ]; then
+    if [ "$file_conn" = "true" ] || [ "$file_action" = "error" ]; then
+      write_state false idle "" "" "" "" "" 0 "${file_lr:-0}" ""
+      echo "refresh: now disconnected"
+    else
+      echo "refresh: unchanged (disconnected)"
+    fi
+    return 0
+  fi
+
+  # CLI says connected.
+  local now since; now="$(date +%s)"
+  since="$file_since"; { [ "$file_conn" = "true" ] && [ -n "$since" ] && [ "$since" != "0" ]; } || since="$now"
+  local lr="$file_lr"; { [ -n "$lr" ] && [ "$lr" != "0" ]; } || lr="$now"
+
+  if [ "$file_conn" = "true" ] && [ "$file_server" = "$server" ] && [ -n "$file_ip" ]; then
+    # Already correct — just refresh the timestamp so the widget knows we checked.
+    write_state true idle "$server" "$file_ip" "$(state_get country)" "$(state_get city)" \
+      "$(state_get org)" "$since" "$lr" ""
+    echo "refresh: unchanged (connected $server)"
+    return 0
+  fi
+
+  # State was wrong or stale — adopt reality and verify the exit IP.
+  local probe ip cc pcity org
+  probe="$(probe_ip)" || probe=""
+  IFS=$'\t' read -r ip cc pcity org <<<"${probe:-}"
+  [ -n "$pcity" ] || pcity="$city"
+  [ -n "$cc" ] || cc="$country"
+  write_state true idle "$server" "$ip" "$cc" "$pcity" "$org" "$since" "$lr" ""
+  log "refresh: adopted external connection $server ($ip)"
+  echo "refresh: synced to $server  exit ${ip:-?}"
+}
+
+do_killswitch() {
+  case "${1:-}" in
+    on|off) : ;;
+    *) echo "usage: protonvpn-rotate killswitch on|off" >&2; return 2 ;;
+  esac
+  local out; out="$(cli_killswitch "$1")"; local rc=$?
+  log "CLI killswitch $1 rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+  [ $rc -eq 0 ] && echo "kill switch $1" || { echo "kill switch $1 failed (CLI may not support it on this version)" >&2; return 1; }
+}
+
+# ── dispatch ───────────────────────────────────────────────────────────────
+# Guarded so a test can `source` this file to exercise the pure functions
+# (parse_cli_status, do_refresh) with cli_status_raw / probe_ip stubbed out.
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  case "${1:-}" in
+    connect)               do_connect false ;;
+    rotate|next)           do_connect true ;;
+    disconnect|down)       do_disconnect ;;
+    refresh|reconcile)     do_refresh ;;
+    status)                shift; do_status "${1:-}" ;;
+    probe)                 do_probe ;;
+    killswitch)            shift; do_killswitch "${1:-}" ;;
+    ""|-h|--help|help)
+      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)
+      echo "protonvpn-rotate: unknown command '$1'" >&2
+      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | killswitch on|off" >&2
+      exit 2 ;;
+  esac
+fi

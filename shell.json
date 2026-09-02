@@ -7,6 +7,12 @@
           "id": "omarchy.indicators"
         },
         {
+          "id": "omarchy.clock",
+          "format": "dddd HH:mm",
+          "formatAlt": "d MMMM 'W'ww yyyy",
+          "verticalFormat": "HH\n—\nmm"
+        },
+        {
           "id": "alteringux.dashboard"
         },
         {
@@ -59,6 +65,9 @@
           "id": "omarchy.network"
         },
         {
+          "id": "alteringux.vpnrotate"
+        },
+        {
           "id": "alteringux.ttsplayer"
         },
         {
@@ -73,7 +82,7 @@
       ]
     },
     "position": "top",
-    "transparent": false
+    "transparent": true
   },
   "idle": {
     "lock": 300,
