@@ -12,6 +12,10 @@
 # enum; this script owns the mapping from intent to command. Anything it
 # can't classify falls through to `chat` and is just answered, never executed.
 #
+# The `do` intent is the exception: it hands the raw request to a headless
+# `opencode run --auto` agent session that may use tools, then condenses the
+# agent's final reply and speaks it.
+#
 # Usage:
 #   omarchy-voice                 record speech, act / answer aloud
 #   omarchy-voice --text "TEXT"   skip the mic, treat TEXT as the request
@@ -27,6 +31,7 @@
 #                               set to …/ggml-base.en.bin for more accuracy, ~1.7s slower)
 #   OMARCHY_VOICE_SILENCE       seconds of silence that ends recording (default 1.0)
 #   OMARCHY_VOICE_RATE          piper length-scale, lower = faster speech (default 0.85)
+#   OMARCHY_VOICE_AGENT_DIR     working directory for the `do` agent (default ~/.local/state/omarchy/flows/mem)
 
 set -uo pipefail
 
@@ -164,9 +169,13 @@ Allowed intents and args:
 - screenshot     {}                  take a screenshot
 - lock           {}                  lock the screen
 - launch         {"app":"browser|terminal|files|spotify|signal|discord"}
-- chat           {}                  ANY question or request that is not one of the above
+- do             {}                  a task that needs tools: run a command, read or
+                                     write files, inspect system state, multi-step work
+- chat           {}                  a question or conversation that is not one of the above
 
 Rules: choose chat unless the request clearly matches an action above.
+Choose do when the user asks you to DO something that needs tools (run a
+command, read a file, check a state); choose chat for questions and small talk.
 Convert spoken numbers to integers. Bare "down/dim/lower/quieter" => delta -10;
 bare "up/brighter/louder" => delta +10.'
 
@@ -190,6 +199,24 @@ fi
 arg()   { printf '%s' "$JSON" | jq -r "$1 // empty" 2>/dev/null; }
 clamp() { local v=$1 lo=$2 hi=$3; (( v < lo )) && v=$lo; (( v > hi )) && v=$hi; echo "$v"; }
 run_action() { echo "▶ $*" >&2; "$@"; }
+
+agent() { # do: delegate to a headless opencode agent, speak its final reply
+  local dir="${OMARCHY_VOICE_AGENT_DIR:-$HOME/.local/state/omarchy/flows/mem}"
+  local oc="${OMARCHY_VOICE_OPENCODE:-opencode}" out reply brief
+  command -v "$oc" >/dev/null 2>&1 || oc="$HOME/.local/share/mise/installs/opencode/latest/opencode"
+  echo "▶ agent: $TEXT" >&2
+  out=$(timeout 180 "$oc" run --format json --auto --dir "$dir" -- "$TEXT" 2>/dev/null)
+  reply=$(printf '%s\n' "$out" | jq -rs '[.[] | select(.type=="text") | .part.text] | map(select(length > 0)) | last // ""' 2>/dev/null)
+  if [[ -z "${reply// }" ]]; then
+    say "That did not work."
+    exit 1
+  fi
+  brief=$(llm-blurb --model "$MODEL_NAME" --max-tokens 120 --timeout 40 \
+    --system "You are a spoken voice assistant. Condense the agent's report into one or two short spoken sentences, under 40 words. No markdown, no lists, no emoji." \
+    "$reply")
+  say "${brief:-Done.}"
+  exit 0
+}
 
 # ----------------------------------------------------------------- 3. act
 STATUS=0
@@ -255,6 +282,9 @@ case "$INTENT" in
       *)        say "I cannot launch ${app:-that}."; exit 0 ;;
     esac
     SAY="Launching ${app}." ;;
+
+  do)
+    agent ;;
 
   *) # chat / anything unrecognised — keep the answer short so it starts sooner
     ans=$(llm-blurb --model "$MODEL_NAME" --max-tokens 120 --timeout 40 \
