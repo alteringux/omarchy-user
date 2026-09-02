@@ -72,6 +72,14 @@ o.bind("SUPER + SHIFT + T", "Typing Trainer", "omarchy-launch-webapp http://loca
 -- Voxtype: push-to-talk voice-to-text
 o.bind("SUPER + H", "Voxtype: toggle dictation", "voxtype record toggle")
 
+-- Voice assistant (~/.local/bin/omarchy-voice): speak a request, it either
+-- performs a system action (brightness, volume, theme, night light, lock,
+-- launch an app) or answers aloud. STT = whisper-cli, intent parsing +
+-- chat = Featherless, reply = Piper TTS. Auto-stops on ~1.5s of silence.
+-- SUPER+ALT+X = listen & act; a bare press with X again stops it talking.
+o.bind("SUPER + ALT + X", "Voice assistant: listen & act", "omarchy-voice")
+o.bind("SUPER + SHIFT + ALT + V", "Voice assistant: stop talking", "omarchy-voice --stop")
+
 -- Toggle the clock widget in the Omarchy bar (shell.json hot-reloads)
 o.bind("SUPER + ALT + T", "Toggle bar clock", "omarchy-toggle-clock")
 

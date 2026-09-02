@@ -1,155 +1,248 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# omarchy-voice — a "Siri"-style voice assistant for Omarchy.
+#
+#   speech  ->  whisper-cli (STT)
+#           ->  Featherless LLM parses it into ONE allow-listed intent + args
+#           ->  either a system action runs, or it answers you conversationally
+#           ->  piper-tts reads the reply / confirmation aloud
+#
+# The LLM never emits a shell command. It only picks an intent from a fixed
+# enum; this script owns the mapping from intent to command. Anything it
+# can't classify falls through to `chat` and is just answered, never executed.
+#
+# Usage:
+#   omarchy-voice                 record speech, act / answer aloud
+#   omarchy-voice --text "TEXT"   skip the mic, treat TEXT as the request
+#   omarchy-voice --dry-run ...   parse + print the intent JSON, run nothing
+#   omarchy-voice --stop          stop whatever it's currently saying
+#   omarchy-voice --toggle "T"    speak T, interrupting current speech
+#   omarchy-voice --help
+#
+# Env:
+#   FEATHERLESS_API_KEY   overrides ~/.config/featherless/key
+#   OMARCHY_VOICE_MODEL   Featherless model (default Qwen/Qwen3-30B-A3B-Instruct-2507)
+#   WHISPER_MODEL         ggml model path (default ~/.cache/whisper/ggml-base.en.bin)
 
-MODEL="${WHISPER_MODEL:-$HOME/.cache/whisper/ggml-base.en.bin}"
-API_URL="https://api.featherless.ai/v1/chat/completions"
-MODEL_NAME="Qwen/Qwen3.8-27B"
+set -uo pipefail
+
 TAG="voice"
-WAV="$(mktemp --suffix=.wav)"
-SIL="$(mktemp --suffix=.sil)"
-RESP="$(mktemp --suffix=.txt)"
-trap 'rm -f "$WAV" "$SIL" "$RESP"' EXIT
+MODEL_NAME="${OMARCHY_VOICE_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
+WHISPER_MODEL="${WHISPER_MODEL:-$HOME/.cache/whisper/ggml-base.en.bin}"
 
-case "${1:-}" in
-  --stop)
-    exec piper-tts --stop --tag "$TAG"
-    ;;
-  --toggle)
-    shift
-    exec piper-tts --toggle --tag "$TAG" "$@"
-    ;;
-  -h|--help)
-    cat <<'EOF'
-omarchy-voice — voice assistant: STT (whisper-cpp) -> LLM (Featherless) -> TTS (piper)
+DRY_RUN=0
+TEXT=""
 
-Usage:
-  omarchy-voice            record speech, transcribe, answer aloud
-  omarchy-voice --stop     stop current speech
-  omarchy-voice --toggle "text"  speak text (interrupts current speech)
-EOF
-    exit 0
-    ;;
-  "")
-    ;;
-  *)
-    echo "Unknown argument: $1 (see omarchy-voice --help)" >&2
-    exit 1
-    ;;
-esac
+say() { # speak + also echo to stderr so it's visible when run from a terminal
+  local msg="$1"
+  echo "🔊 $msg" >&2
+  [[ -n "${msg// }" ]] && printf '%s' "$msg" | piper-tts --tag "$TAG" || true
+}
 
-API_KEY="${FEATHERLESS_API_KEY:-$(python3 -c "import json,os;d=json.load(open(os.path.expanduser('~/.config/opencode/opencode.json')));print(d.get('provider',{}).get('featherless',{}).get('options',{}).get('apiKey',''))" 2>/dev/null)}"
+die() { echo "omarchy-voice: $*" >&2; exit 1; }
 
-if [[ ! -f "$MODEL" ]]; then
-  echo "Whisper model not found at $MODEL. Downloading ggml-base.en..." >&2
-  mkdir -p "$(dirname "$MODEL")"
-  curl -Ls -o "$MODEL" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+# ----------------------------------------------------------------- args
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --stop)    exec piper-tts --stop --tag "$TAG" ;;
+    --toggle)  shift; exec piper-tts --toggle --tag "$TAG" "$@" ;;
+    --text)    TEXT="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
+    -h|--help)
+      sed -n '2,32p' "$0" | sed 's/^# \?//'
+      exit 0 ;;
+    *) die "unknown argument: $1 (see --help)" ;;
+  esac
+done
+
+# ----------------------------------------------------------------- 1. get the request text
+if [[ -z "$TEXT" ]]; then
+  command -v whisper-cli >/dev/null || die "whisper-cli not found"
+  command -v parec >/dev/null      || die "parec not found (pulseaudio-utils)"
+
+  WAV="$(mktemp --suffix=.wav)"
+  SIL="$(mktemp --suffix=.sil)"
+  trap 'rm -f "$WAV" "$SIL"' EXIT
+
+  if [[ ! -f "$WHISPER_MODEL" ]]; then
+    echo "Downloading whisper model to $WHISPER_MODEL ..." >&2
+    mkdir -p "$(dirname "$WHISPER_MODEL")"
+    curl -Ls -o "$WHISPER_MODEL" \
+      "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin" \
+      || die "model download failed"
+  fi
+
+  echo "Listening… (speak, then ~1.5s of silence to stop)" >&2
+  parec -d @DEFAULT_SOURCE@ --rate=16000 --channels=1 --format=s16le 2>/dev/null \
+    | ffmpeg -y -f s16le -ar 16000 -ac 1 -i - \
+        -af "silencedetect=noise=-40dB:d=1.5" -f wav -t 120 - \
+        > "$WAV" 2> "$SIL" &
+  PID=$!
+
+  HEARD=0 MARK=0
+  while kill -0 "$PID" 2>/dev/null; do
+    if (( HEARD == 0 )); then
+      if grep -q "silence_end" "$SIL" 2>/dev/null; then
+        HEARD=1
+        MARK=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
+      fi
+    else
+      NOW=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
+      if (( NOW > MARK )); then sleep 0.3; kill "$PID" 2>/dev/null || true; break; fi
+    fi
+    sleep 0.2
+  done
+  wait "$PID" 2>/dev/null || true
+
+  (( $(stat -c%s "$WAV" 2>/dev/null || echo 0) > 1000 )) || { echo "No speech detected." >&2; exit 0; }
+
+  echo "Transcribing…" >&2
+  TEXT=$(whisper-cli -m "$WHISPER_MODEL" -f "$WAV" -nt 2>/dev/null \
+           | grep -v '^\[' | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
 fi
 
-if [[ -z "$API_KEY" ]]; then
-  echo "No Featherless API key. Set FEATHERLESS_API_KEY or add it to ~/.config/opencode/opencode.json" >&2
+[[ -n "${TEXT// }" ]] || { echo "Empty request." >&2; exit 0; }
+echo "You: $TEXT" >&2
+
+# ----------------------------------------------------------------- 2. parse into an intent
+SYS='You are the intent parser for a Linux voice assistant on Omarchy (Hyprland).
+Reply with ONE minified JSON object and nothing else:
+{"intent":"NAME","args":{...},"say":"short confirmation in present tense"}
+
+Allowed intents and their args:
+- brightness_set  {"percent":0-100}      set display brightness to an absolute level
+- brightness_rel  {"delta":-100..100}    change brightness by delta percentage points
+- volume_set      {"percent":0-100}      set output volume to an absolute level
+- volume_rel      {"delta":-100..100}    change output volume by delta percentage points
+- volume_mute     {}                     toggle output mute
+- mic_mute        {}                     toggle microphone mute
+- theme_set       {"name":"TEXT"}        switch the Omarchy theme (name as spoken)
+- nightlight      {}                     toggle the blue-light / night-light filter
+- screenshot      {}                     take a screenshot
+- lock            {}                     lock the screen
+- launch          {"app":"browser|terminal|files|spotify|signal|discord"}
+- chat            {"text":"the user request, verbatim"}   anything else
+
+Rules: choose chat unless the request clearly matches one of the above.
+Convert spoken numbers to integers ("one percent" -> 1, "half" -> 50).
+"turn it down / dim / lower / quieter" without a number => delta -10.
+"turn it up / brighter / louder" without a number => delta +10.
+"say" is one short sentence to read aloud, e.g. "Setting brightness to 1 percent."'
+
+RAW=$(llm-blurb --json --model "$MODEL_NAME" --system "$SYS" --max-tokens 200 --timeout 30 "$TEXT")
+if [[ -z "${RAW// }" ]]; then
+  say "Sorry, I couldn't reach the language model."
   exit 1
 fi
 
-echo "Listening... (speak, then stay silent ~1.5s to stop)" >&2
+# llm-blurb --json returns a bare JSON object; tolerate a stray ```json fence too
+JSON=$(printf '%s' "$RAW" | sed -e 's/^```[a-z]*//' -e 's/```$//')
+printf '%s' "$JSON" | jq -e . >/dev/null 2>&1 || JSON='{"intent":"chat"}'
 
-parec --rate=16000 --channels=1 --format=s16le \
-  | ffmpeg -y -f s16le -ar 16000 -ac 1 -i - \
-    -af "silencedetect=noise=-40dB:d=1.5" \
-    -f wav -t 120 - \
-    > "$WAV" 2> "$SIL" &
-PID=$!
+INTENT=$(printf '%s' "$JSON" | jq -r '.intent // "chat"' 2>/dev/null || echo chat)
+SAY=$(printf    '%s' "$JSON" | jq -r '.say // ""'        2>/dev/null || echo "")
 
-# silence_end = speech started; next silence_start after that = 1.5s of quiet
-HEARD=0
-MARK=0
-while kill -0 "$PID" 2>/dev/null; do
-  if (( HEARD == 0 )); then
-    if grep -q "silence_end" "$SIL" 2>/dev/null; then
-      HEARD=1
-      MARK=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
-    fi
-  else
-    NOW=$(grep -c "silence_start" "$SIL" 2>/dev/null || true)
-    if (( NOW > MARK )); then
-      sleep 0.3
-      kill "$PID" 2>/dev/null || true
-      break
-    fi
-  fi
-  sleep 0.2
-done
-wait "$PID" 2>/dev/null || true
-
-SIZE=$(stat -c%s "$WAV" 2>/dev/null || echo 0)
-if [[ "$SIZE" -lt 1000 ]]; then
-  echo "No speech detected. Exiting." >&2
+if (( DRY_RUN )); then
+  echo "intent: $INTENT" >&2
+  printf '%s\n' "$JSON"
   exit 0
 fi
 
-echo "Transcribing..." >&2
-TEXT=$(whisper-cli -m "$MODEL" -f "$WAV" -nt 2>/dev/null | grep -v '^\[' | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+arg() { printf '%s' "$JSON" | jq -r "$1 // empty" 2>/dev/null; }
 
-if [[ -z "$TEXT" ]]; then
-  echo "Empty transcription. Exiting." >&2
-  exit 0
-fi
-echo "You: $TEXT" >&2
-echo "Assistant:"
+clamp() { local v=$1 lo=$2 hi=$3; (( v < lo )) && v=$lo; (( v > hi )) && v=$hi; echo "$v"; }
 
-export FEATHERLESS_KEY="$API_KEY"
-FEATHERLESS_URL="$API_URL" FEATHERLESS_MODEL="$MODEL_NAME" python3 - "$TEXT" "$RESP" << 'PYEOF'
-import json, os, sys, urllib.request
-
-transcript, resp_path = sys.argv[1], sys.argv[2]
-url = os.environ["FEATHERLESS_URL"]
-model = os.environ["FEATHERLESS_MODEL"]
-
-payload = {
-    "model": model,
-    "stream": True,
-    "messages": [
-        {"role": "system", "content": "You are a helpful voice assistant. Reply in a few short, conversational sentences. No markdown, no lists, no emoji."},
-        {"role": "user", "content": transcript},
-    ],
+run_action() { # echo the command being run, then run it; return its status
+  echo "▶ $*" >&2
+  "$@"
 }
 
-req = urllib.request.Request(
-    url,
-    data=json.dumps(payload).encode(),
-    headers={
-        "Content-Type": "application/json",
-        "Authorization": "Bearer " + os.environ["FEATHERLESS_KEY"],
-    },
-)
+# ----------------------------------------------------------------- 3. act
+STATUS=0
+case "$INTENT" in
+  brightness_set)
+    p=$(clamp "$(arg .args.percent)" 1 100)
+    run_action omarchy brightness display "${p}%" || STATUS=$?
+    SAY="${SAY:-Setting brightness to ${p} percent.}" ;;
 
-buf = []
-with urllib.request.urlopen(req, timeout=120) as r:
-    for raw in r:
-        line = raw.decode("utf-8", "replace").strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            break
-        try:
-            chunk = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        choices = chunk.get("choices") or [{}]
-        delta = choices[0].get("delta", {}).get("content")
-        if delta:
-            buf.append(delta)
-            sys.stdout.write(delta)
-            sys.stdout.flush()
+  brightness_rel)
+    d=$(arg .args.delta); d=${d:-0}
+    if (( d >= 0 )); then run_action omarchy brightness display "+${d}%" || STATUS=$?
+    else                  run_action omarchy brightness display "$(( -d ))%-" || STATUS=$?; fi
+    SAY="${SAY:-Adjusting brightness.}" ;;
 
-sys.stdout.write("\n")
-with open(resp_path, "w") as f:
-    f.write("".join(buf).strip())
-PYEOF
+  volume_set)
+    p=$(clamp "$(arg .args.percent)" 0 100)
+    cur=$(wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | awk '{print int($2*100)}')
+    cur=${cur:-0}; d=$(( p - cur ))
+    if (( d >= 0 )); then run_action omarchy audio output volume "+${d}" || STATUS=$?
+    else                  run_action omarchy audio output volume "-$(( -d ))" || STATUS=$?; fi
+    SAY="${SAY:-Setting volume to ${p} percent.}" ;;
 
-if [[ ! -s "$RESP" ]]; then
-  echo "(no response)" >&2
-  exit 0
+  volume_rel)
+    d=$(arg .args.delta); d=${d:-0}
+    if (( d >= 0 )); then run_action omarchy audio output volume "+${d}" || STATUS=$?
+    else                  run_action omarchy audio output volume "-$(( -d ))" || STATUS=$?; fi
+    SAY="${SAY:-Adjusting volume.}" ;;
+
+  volume_mute)
+    run_action omarchy audio output volume mute-toggle || STATUS=$?
+    SAY="${SAY:-Toggled mute.}" ;;
+
+  mic_mute)
+    run_action omarchy audio input mute || STATUS=$?
+    SAY="${SAY:-Toggled the microphone.}" ;;
+
+  theme_set)
+    want=$(arg .args.name | tr '[:upper:]' '[:lower:]')
+    match=""
+    while IFS= read -r t; do
+      lt=$(printf '%s' "$t" | tr '[:upper:]' '[:lower:]')
+      if [[ "$lt" == "$want" || "$lt" == *"$want"* || "$want" == *"$lt"* ]]; then match="$t"; break; fi
+    done < <(omarchy theme list 2>/dev/null)
+    if [[ -n "$match" ]]; then
+      run_action omarchy theme set "$match" || STATUS=$?
+      SAY="${SAY:-Switching to the ${match} theme.}"
+    else
+      SAY="I don't have a theme called ${want}."
+    fi ;;
+
+  nightlight)
+    run_action omarchy toggle nightlight || STATUS=$?
+    SAY="${SAY:-Toggled night light.}" ;;
+
+  screenshot)
+    run_action omarchy capture screenshot || STATUS=$?
+    SAY="${SAY:-Screenshot taken.}" ;;
+
+  lock)
+    say "${SAY:-Locking up.}"
+    exec omarchy system lock ;;
+
+  launch)
+    app=$(arg .args.app)
+    case "$app" in
+      browser)  run_action omarchy launch browser  || STATUS=$? ;;
+      terminal) run_action omarchy launch terminal || STATUS=$? ;;
+      files)    run_action omarchy launch nautilus || STATUS=$? ;;
+      spotify)  run_action omarchy launch spotify  || STATUS=$? ;;
+      signal)   run_action omarchy launch signal   || STATUS=$? ;;
+      discord)  run_action omarchy launch discord community || STATUS=$? ;;
+      *)        SAY="I can't launch ${app:-that}."; INTENT="launch_unknown" ;;
+    esac
+    [[ "$INTENT" == launch ]] && SAY="${SAY:-Launching ${app}.}" ;;
+
+  *) # chat / anything unrecognised
+    q=$(arg .args.text); q=${q:-$TEXT}
+    ans=$(llm-blurb --model "$MODEL_NAME" --max-tokens 220 --timeout 45 \
+      --system "You are a concise spoken voice assistant. Answer in 1-3 short sentences. No markdown, no lists, no emoji." \
+      "$q")
+    say "${ans:-Sorry, I could not work that out.}"
+    exit 0 ;;
+esac
+
+# ----------------------------------------------------------------- 4. confirm aloud
+if (( STATUS != 0 )); then
+  say "That didn't work."
+  exit "$STATUS"
 fi
-
-exec piper-tts --tag "$TAG" < "$RESP"
+say "$SAY"
