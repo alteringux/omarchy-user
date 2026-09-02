@@ -225,9 +225,11 @@ Rules of this terminal:
   `omarchy audio input mute`, `omarchy brightness display <N%|+N%|N%->`,
   `omarchy theme set <name>` / `omarchy theme list`, `omarchy toggle nightlight`,
   `omarchy capture screenshot`, `omarchy launch <app>`, `omarchy system lock`,
-  `omarchy restart <svc>`, `omarchy install <pkg...>` / `omarchy install service <name>`,
-  `omarchy tailscale ...`. For anything not covered, fall back to plain shell
-  (wpctl, brightnessctl, bluetoothctl, rfkill, systemctl --user, nmcli, wg-quick, ...).
+  `omarchy restart <svc>`, `omarchy install <pkg...>` / `omarchy install service <name>`.
+  VPN on/off means Proton VPN: `protonvpn connect` / `protonvpn disconnect` /
+  `protonvpn status` (Tailscale is separate: `tailscale up` / `tailscale down`).
+  For anything not covered, fall back to plain shell (wpctl, brightnessctl,
+  bluetoothctl, rfkill, systemctl --user, nmcli, ...).
 - A pure question (no state change) is answered directly, no command needed.
 - Never ask the user to confirm. Never run a skill, changelog, or git command.
 - If a command exits 0, trust it and stop — do not re-run it or re-check state.
