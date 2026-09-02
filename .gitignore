@@ -49,3 +49,11 @@ __pycache__/
 
 # ─── Local-only adult-content feed flows (like the alteringux.newsbar eronews scrapers) ──
 flows/confessions*.json
+
+# ─── Multi-source story scraper for alteringux.newsbar left half (adult URLs; kept local like the eronews scripts) ──
+newsbar-sources.json
+plugins/alteringux.newsbar/bin/stories_fetch.py
+plugins/alteringux.newsbar/bin/newsbar-add-source
+plugins/alteringux.newsbar/bin/newsbar-set-source
+plugins/alteringux.newsbar/test/stories_fetch_test.py
+plugins/alteringux.newsbar/bin/__pycache__/
