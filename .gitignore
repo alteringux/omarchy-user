@@ -46,3 +46,6 @@ node_modules/
 __pycache__/
 *.pyc
 .DS_Store
+
+# ─── Local-only adult-content feed flows (like the alteringux.newsbar eronews scrapers) ──
+flows/confessions*.json

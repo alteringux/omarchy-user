@@ -27,20 +27,25 @@ function parseDoc(raw) {
   for (var i = 0; i < rawNodes.length; i++) {
     var n = rawNodes[i] || {};
     var ui = n.ui && typeof n.ui === "object" ? n.ui : {};
-    nodes.push({
-      id: typeof n.id === "string" && n.id ? n.id : "node" + (i + 1),
-      type: typeof n.type === "string" ? n.type : "",
-      in: normList(n.in),
-      x: isFiniteNum(ui.x) ? ui.x : 40 + (i % 5) * (NODE_W + 40),
-      y: isFiniteNum(ui.y) ? ui.y : 40 + Math.floor(i / 5) * (NODE_H + 40),
-      label: typeof n.label === "string" && n.label ? n.label : (typeof n.id === "string" ? n.id : "node" + (i + 1)),
-      prompt: typeof n.prompt === "string" ? n.prompt : "",
-      cmd: typeof n.cmd === "string" ? n.cmd : "",
-      jq: typeof n.jq === "string" ? n.jq : "",
-      shape: typeof n.shape === "string" ? n.shape : "",
-      agent: !!n.agent,
-      edges: n.edges && typeof n.edges === "object" ? n.edges : {}
-    });
+    var fallbackId = "node" + (i + 1);
+    // Keep EVERY original field (op, key, mode, meta, system, timeoutSec, …) so
+    // a canvas edit round-trips losslessly — only the drawing-derived keys
+    // (x/y/label) and the normalised in/edges are overlaid.
+    var node = {};
+    for (var k in n) if (n.hasOwnProperty(k)) node[k] = n[k];
+    node.id = typeof n.id === "string" && n.id ? n.id : fallbackId;
+    node.type = typeof n.type === "string" ? n.type : "";
+    node.in = normList(n.in);
+    node.edges = n.edges && typeof n.edges === "object" ? n.edges : {};
+    node.agent = !!n.agent;
+    node.prompt = typeof n.prompt === "string" ? n.prompt : "";
+    node.cmd = typeof n.cmd === "string" ? n.cmd : "";
+    node.jq = typeof n.jq === "string" ? n.jq : "";
+    node.shape = typeof n.shape === "string" ? n.shape : "";
+    node.label = typeof n.label === "string" && n.label ? n.label : node.id;
+    node.x = isFiniteNum(ui.x) ? ui.x : 40 + (i % 5) * (NODE_W + 40);
+    node.y = isFiniteNum(ui.y) ? ui.y : 40 + Math.floor(i / 5) * (NODE_H + 40);
+    nodes.push(node);
   }
   return {
     ok: true,
@@ -211,19 +216,26 @@ function cloneDoc(doc) {
   return JSON.parse(JSON.stringify(doc));
 }
 
-// parsed doc -> the on-disk JSON text (round-trips ui back into `ui:{x,y}`).
+// parsed doc -> the on-disk JSON text. Preserves every field the node came in
+// with (op, key, mode, meta, system, …); only rewrites the drawing-derived
+// keys and drops empties the parser had defaulted in.
 function serializeDoc(doc) {
   var out = { id: doc.id, title: doc.title, nodes: [] };
+  var DERIVED = { x: 1, y: 1, label: 1, ui: 1 };
   for (var i = 0; i < doc.nodes.length; i++) {
     var n = doc.nodes[i];
-    var o = { id: n.id, type: n.type };
+    var o = {};
+    for (var k in n) {
+      if (!n.hasOwnProperty(k) || DERIVED[k]) continue;
+      var v = n[k];
+      // drop the parser's empty defaults so the file stays sparse
+      if ((k === "prompt" || k === "cmd" || k === "jq" || k === "shape") && v === "") continue;
+      if (k === "agent" && !v) continue;
+      if (k === "in" && (!v || !v.length)) continue;
+      if (k === "edges" && (!v || !Object.keys(v).length)) continue;
+      o[k] = v;
+    }
     if (n.in && n.in.length) o.in = n.in.slice();
-    if (n.prompt) o.prompt = n.prompt;
-    if (n.cmd) o.cmd = n.cmd;
-    if (n.jq) o.jq = n.jq;
-    if (n.shape) o.shape = n.shape;
-    if (n.agent) o.agent = true;
-    if (n.edges && Object.keys(n.edges).length) o.edges = n.edges;
     if (n.label && n.label !== n.id) o.label = n.label;
     o.ui = { x: n.x, y: n.y };
     out.nodes.push(o);

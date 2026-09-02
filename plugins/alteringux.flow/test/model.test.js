@@ -70,6 +70,28 @@ test("sparkCells: monotonic input yields ascending blocks (zero baseline)", () =
   assert.equal(Model.sparkCells([]), "");
 });
 
+test("serializeDoc: a canvas edit round-trips WITHOUT dropping op/key/mode/meta", () => {
+  const src = JSON.stringify({
+    id: "f",
+    title: "t",
+    nodes: [
+      { id: "m", type: "memory", op: "append", key: "hist", in: ["a"], meta: { title: "M" } },
+      { id: "d", type: "reduce", mode: "llm", in: ["a"], prompt: "go", ui: { x: 5, y: 5 } },
+      { id: "a", type: "input", value: { text: "hi" } }
+    ]
+  });
+  const moved = Model.moveNode(Model.parseDoc(src), "d", 40, 40);
+  const back = JSON.parse(Model.serializeDoc(moved));
+  const m = back.nodes.find((n) => n.id === "m");
+  const d = back.nodes.find((n) => n.id === "d");
+  assert.equal(m.op, "append");
+  assert.equal(m.key, "hist");
+  assert.deepEqual(m.meta, { title: "M" });
+  assert.equal(d.mode, "llm");
+  assert.deepEqual(d.ui, { x: 40, y: 40 });
+  assert.deepEqual(back.nodes.find((n) => n.id === "a").value, { text: "hi" });
+});
+
 test("addNode / removeNode / toggleEdge keep the doc consistent", () => {
   let d = Model.parseDoc(JSON.stringify({ id: "f", nodes: [{ id: "a", type: "tool" }] }));
   const added = Model.addNode(d, "prompt");
