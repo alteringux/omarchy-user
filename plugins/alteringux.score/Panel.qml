@@ -82,7 +82,7 @@ Panel {
             text: root.config.icon || ""
             color: root.bar.foreground
             font.family: root.bar.fontFamily
-            font.pixelSize: 48
+            font.pixelSize: Style.fontPx(4)
             anchors.verticalCenter: parent.verticalCenter
           }
 
@@ -90,12 +90,9 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
 
-            Text {
-              text: "SCORE"
-              color: Qt.darker(root.bar.foreground, 1.5)
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.caption
-              font.letterSpacing: 1
+            Kit.MetaText {
+              content: "Score"
+              foreground: root.bar.foreground
             }
             Text {
               text: String(root.score)

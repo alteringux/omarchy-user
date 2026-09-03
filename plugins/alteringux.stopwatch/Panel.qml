@@ -57,8 +57,9 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
-        PanelSectionHeader {
-          text: "STOPWATCH"
+        Kit.PanelHead {
+          title: "Stopwatch"
+          meta: (hostWidget && hostWidget.active) ? "Running" : "Ready"
           foreground: root.barForeground
         }
 

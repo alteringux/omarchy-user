@@ -77,6 +77,16 @@ Panel {
       anchors.top: parent.top
       spacing: Style.space(14)
 
+      Kit.PanelHead {
+        title: "Pomodoro"
+        meta: hostWidget
+          ? (hostWidget.phase === "IDLE"
+             ? "idle"
+             : Model.phaseLabel(hostWidget.phase) + (hostWidget.running ? " · running" : hostWidget.ready ? " · ready" : " · paused"))
+          : "idle"
+        foreground: root.barForeground
+      }
+
       PanelSectionHeader {
         text: "STATISTICS"
         foreground: root.barForeground

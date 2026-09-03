@@ -91,8 +91,9 @@ Panel {
           width: parent.width
           spacing: Style.spacing.panelGap
 
-          PanelSectionHeader {
-            text: "TIMERS"
+          Kit.PanelHead {
+            title: "Timers"
+            meta: root.entries.length > 0 ? (root.entries.length + " running") : "idle"
             foreground: root.barForeground
           }
 

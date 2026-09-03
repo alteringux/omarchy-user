@@ -120,30 +120,17 @@ Panel {
         width: parent.width
         spacing: Style.spacing.panelGap
 
-        RowLayout {
-          width: parent.width
-          spacing: Style.spacing.md
-
-          PanelSectionHeader {
-            text: "STOCKS"
-            foreground: root.barForeground
-            Layout.fillWidth: true
-          }
-
-          Text {
-            visible: root.refreshing
-            text: "refreshing…"
-            color: root.barForeground
-            opacity: 0.55
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Button {
-            text: "Refresh"
-            foreground: root.barForeground
-            bordered: true
-            onClicked: if (hostWidget) hostWidget.runRefresh()
+        Kit.PanelHead {
+          title: "Stocks"
+          meta: root.refreshing ? "refreshing…" : ""
+          foreground: root.barForeground
+          trailingControl: Component {
+            Button {
+              text: "Refresh"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (hostWidget) hostWidget.runRefresh()
+            }
           }
         }
 

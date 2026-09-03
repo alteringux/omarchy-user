@@ -35,13 +35,15 @@ decide what to import instead of hand-rolling.
 | `Kit.EmptyState`      | `EmptyState.qml` | The "nothing here yet" block every panel hand-rolls — a `text` line plus an optional dimmer `hint` line, styled once. Set `foreground` to the host panel's text color. | `timers`; other panels as they are restyled |
 | `Kit.PanelScroll`     | `PanelScroll.qml` | The scrollable panel body every overlay hand-rolled as a bare `Flickable { clip; contentHeight; boundsBehavior: StopAtBounds }`. Same thing — it *is* a `Flickable`, so `contentHeight` bindings and a nested `Column { width: parent.width }` are unchanged — plus a fading `ScrollBar.vertical` (AsNeeded) so overflow is discoverable, `interactive` only while overflowing (matches the stock shell panels), and a brisker wheel/two-finger step via an embedded `Kit.WheelBoost`. One knob, `wheelScale` (default `1.9`), tunes the step; `handleColor` tints the bar. | `countdown`, `dashboard`, `stocks`, `timers`, `dictionary` (overview) |
 | `Kit.WheelBoost`      | `WheelBoost.qml` | A tuned `WheelHandler` — point `flick` at a `Flickable`/`ListView`, nest it inside, and mouse-wheel + touchpad scrolling move `scale`× further per event (default `1.9`). Reads `pixelDelta` for touchpads and `angleDelta` for notched wheels, clamps to bounds, and accepts the event so the target's own wheel handling doesn't compound it. Used on its own for `ListView`s (which `PanelScroll` can't wrap); `PanelScroll` embeds one. | `dictionary` (suggestion list); inside every `Kit.PanelScroll` |
+| `Kit.PanelHead`       | `PanelHead.qml` | The standard panel opener — the shape of the battery overlay's hero: optional `glyph` (nerd-font code point), Title-Case `title` (`Style.font.title`, bold), and an UPPERCASE tracked `meta` sub-line (hidden when empty). Thin wrapper over `qs.Ui.PanelHero` that takes the glyph as a string and passes `detail` / `trailingControl` straight through. Every `alteringux.*` status panel opens with one; the type ramp it encodes is `../../docs/adr/0005-panel-text-hierarchy.md`. | `countdown`, `dashboard`, `pomodoro`, `stocks`, `stopwatch`, `timers`, `ttsplayer`, `vpnrotate` |
+| `Kit.MetaText`        | `MetaText.qml` | The dim, tracked caption sub-line on its own — the "DRAINING WATTS" treatment (`Qt.darker(fg,1.4)`, `Style.font.caption`, bold, `letterSpacing 1.2`), for a status line that isn't inside a `Kit.PanelHead`. `content` in, `uppercase` (default true) toggles the case; hides itself when `content` is empty. Retires the per-panel hand-rolled `Text { color: Qt.darker(fg,1.4); … }` / `opacity: 0.55` status lines. | `score` (the "Score" caption), `vpnrotate` (the connection detail line) |
 
 ## Trade-offs of sharing this way
 
-- **Blast radius.** A syntax error in `Store.qml`, `Palette.qml`, or
-  `EmptyState.qml` breaks every plugin that imports it; a broken
-  `BugGuard.js` breaks all ten. `Usage.qml` degrades to an empty doc rather
-  than throwing.
+- **Blast radius.** A syntax error in `Store.qml`, `Palette.qml`,
+  `EmptyState.qml`, `PanelHead.qml`, or `MetaText.qml` breaks every plugin
+  that imports it; a broken `BugGuard.js` breaks all ten. `Usage.qml`
+  degrades to an empty doc rather than throwing.
 - **Hot reload.** The shell's file watcher keys on the top-level plugin
   directory, so editing a file in here emits `localPluginChanged("alteringux.kit")`
   only — dependent plugins don't reload on their own. Run
@@ -78,3 +80,20 @@ change per adaptation). `Palette` / `EmptyState` are the shared restyle primitiv
 scattered per-plugin hex and copy-pasted empty-state markup. Per-plugin adoption rolls out plugin by
 plugin. See `../../docs/adr/0003-edit-in-place-for-card-labels.md` (addenda)
 for the history.
+
+`Kit.PanelHead` / `Kit.MetaText` are the text-hierarchy pass: the battery
+overlay's "title + UPPERCASE meta sub-line" hero, made the house standard for
+every `alteringux.*` status panel and codified in
+`../../docs/adr/0005-panel-text-hierarchy.md`. `PanelHead` wraps the stock
+`qs.Ui.PanelHero`; `MetaText` is the same dim tracked-caption treatment for a
+status line outside a hero. First pass promoted the opener to `Kit.PanelHead`
+in `countdown`, `dashboard`, `pomodoro`, `stocks`, `stopwatch`, `timers`,
+`ttsplayer`, `vpnrotate` (`dashboard` / `stocks` fold their one Refresh button
+into `trailingControl`; `pomodoro` prepends the head above its STATISTICS
+section), and swapped hand-rolled dim status lines to `Kit.MetaText` in `score`
+(the "Score" caption, plus its `font.pixelSize: 48` icon literal → `Style.fontPx(4)`)
+and `vpnrotate` (the connection detail line). `flow` keeps its multi-button
+toolbar header and its deliberately red "last run" error line unchanged.
+`dictionary` is exempt (a launcher-style search surface, not a status panel);
+the packaged `omarchy.power` battery panel keeps its own inline hero but the
+tokens match.

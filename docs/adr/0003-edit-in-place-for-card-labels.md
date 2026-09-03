@@ -111,3 +111,11 @@ bidirectional, seeded with a bespoke JSON string, not `Model`-parsed), its
 `toggles/` directory watch (watches a dir, not a file), and `agenda`'s state
 write (a base64 `printf | base64 -d >` hop, never a `FileView`). Everything else
 in every plugin goes through the kit now.
+
+**Follow-up 4 (2026-09-03):** the panel *text hierarchy* is now its own
+concern — see `0005-panel-text-hierarchy.md`. Two kit components landed:
+`Kit.PanelHead` (the standard opener, wrapping `qs.Ui.PanelHero`) and
+`Kit.MetaText` (the dim tracked-caption status sub-line on its own). This does
+not change what "copied per plugin" describes — the per-plugin `Kit.InlineEdit`
+host wiring (`inlineEditors` count OR-ed into `PanelKeyCatcher.blocked`) is
+unchanged; `Kit.PanelHead`'s `title` is a plain string, not editable in place.

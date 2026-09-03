@@ -8,11 +8,18 @@
 #
 # BugGuard is a `.pragma library` JS resource, not a component: consumers reach
 # it as `Kit.BugGuard.create(pluginId, execFn)` and keep the returned guard.
+# Str is a plain (non-pragma) JS helper file: `Kit.Str.escapeHtml(s)`.
 Store 1.0 Store.qml
 InlineEdit 1.0 InlineEdit.qml
 BugGuard 1.0 BugGuard.js
+Str 1.0 Str.js
 Usage 1.0 Usage.qml
 EmptyState 1.0 EmptyState.qml
 PanelScroll 1.0 PanelScroll.qml
 WheelBoost 1.0 WheelBoost.qml
+Card 1.0 Card.qml
+SectionHeading 1.0 SectionHeading.qml
+Bullet 1.0 Bullet.qml
+PanelHead 1.0 PanelHead.qml
+MetaText 1.0 MetaText.qml
 singleton Palette 1.0 Palette.qml

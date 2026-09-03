@@ -130,8 +130,11 @@ Panel {
           width: parent.width
           spacing: Style.spacing.panelGap
 
-          PanelSectionHeader {
-            text: "COUNTDOWNS"
+          Kit.PanelHead {
+            title: "Countdowns"
+            meta: root.entries.length > 0
+              ? (root.entries.length + (root.entries.length === 1 ? " countdown" : " countdowns"))
+              : "none set"
             foreground: root.barForeground
           }
 

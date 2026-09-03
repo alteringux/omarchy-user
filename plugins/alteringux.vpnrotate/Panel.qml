@@ -60,26 +60,18 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
-        PanelSectionHeader {
-          text: "PROTON VPN"
+        Kit.PanelHead {
+          title: "Proton VPN"
+          meta: Model.summaryLine(root.st)
           foreground: root.barForeground
         }
 
-        // ── status ────────────────────────────────────────────────────────
-        Text {
+        // ── status detail ─────────────────────────────────────────────────
+        Kit.MetaText {
           width: content.width
-          text: Model.summaryLine(root.st)
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-          wrapMode: Text.WordWrap
-        }
-
-        Text {
-          width: content.width
-          visible: text.length > 0
-          text: {
+          uppercase: false
+          foreground: root.barForeground
+          content: {
             if (!root.st) return ""
             if (root.st.error) return "The rotator script reported a failure. Check ~/.local/state/omarchy/vpnrotate.log"
             if (root.connected) {
@@ -91,10 +83,6 @@ Panel {
             }
             return ""
           }
-          color: Qt.darker(root.barForeground, 1.4)
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
         }
 
         // Next-rotation readout + thin progress bar (only meaningful while

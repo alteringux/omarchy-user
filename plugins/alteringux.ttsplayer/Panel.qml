@@ -77,24 +77,23 @@ Panel {
         anchors.top: parent.top
         spacing: Style.space(14)
 
-        PanelSectionHeader {
-          text: "TEXT TO SPEECH"
+        Kit.PanelHead {
+          title: "Text to Speech"
+          meta: !root.speaking ? "Idle" : (hostWidget.paused ? "Paused" : "Speaking")
           foreground: root.barForeground
         }
 
         Text {
+          visible: root.speaking
           width: content.width
           text: {
-            if (!root.speaking) return "Nothing speaking"
-            var base = hostWidget.paused ? "Paused" : "Speaking"
-            base += "  ·  " + Model.formatElapsed(hostWidget.elapsedSeconds)
+            var base = Model.formatElapsed(hostWidget.elapsedSeconds)
             if (root.chunkText.length > 0) base += "  ·  " + root.chunkText
             return base
           }
           color: root.barForeground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
-          font.bold: true
           elide: Text.ElideRight
         }
 
@@ -122,9 +121,10 @@ Panel {
           visible: root.speaking
           width: content.width
           text: "Seeking isn't available for streaming TTS."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: root.barForeground
+          opacity: 0.55
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
         }
 
