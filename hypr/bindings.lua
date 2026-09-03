@@ -34,6 +34,16 @@ o.bind("SUPER + ALT + L", "Stocks: open panel", "omarchy-shell -q alteringux.sto
 o.bind("SUPER + ALT + U", "Stopwatch: open panel", "omarchy-shell -q alteringux.stopwatch toggle")
 o.bind("SUPER + ALT + H", "Dashboard: open panel", "omarchy-shell -q shell toggle alteringux.dashboard")
 
+-- Conductor plugin (alteringux.conductor): runs whole "rituals" -- ordered
+-- sequences of every other alteringux plugin's CLI verb -- and shows a live
+-- cockpit of all of them. G toggles the panel; the CTRL+ALT chords fire a
+-- ritual headless via ~/.local/bin/omarchy-conductor (SUPER+ALT+F is Omarchy's
+-- "Full width", so Focus lives on CTRL+ALT+F).
+o.bind("SUPER + ALT + G", "Conductor: open panel", "omarchy-shell -q alteringux.conductor toggle")
+o.bind("SUPER + CTRL + ALT + F", "Conductor: run Focus ritual", "omarchy-conductor run focus")
+o.bind("SUPER + CTRL + ALT + M", "Conductor: run Morning ritual", "omarchy-conductor run morning")
+o.bind("SUPER + CTRL + ALT + W", "Conductor: run Wind-down ritual", "omarchy-conductor run winddown")
+
 -- Narrator: read selected/copied text aloud (press again to stop)
 o.bind("SUPER + ALT + N", "Narrate selection", "omarchy-narrate")
 
