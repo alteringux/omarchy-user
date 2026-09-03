@@ -63,7 +63,9 @@ overlays a real scrollbar and a faster scroll step. `PanelScroll` is in
 `countdown`, `dashboard`, `stocks`, `timers`, and `dictionary`'s overview
 step; `dictionary`'s suggestion `ListView` takes a bare `Kit.WheelBoost` +
 `ScrollBar`. `flow`'s output/canvas Flickables are the remaining bare ones —
-left for the same commit as that plugin's in-flight work.
+left for the same commit as that plugin's in-flight work. The standard for
+what uses these, and the resting-visible-scrollbar + touchpad-travel
+decisions, is `../../docs/adr/0004-scrollable-panel-bodies.md`.
 
 `Kit.Usage` / `Kit.Palette` / `Kit.EmptyState` landed together as the
 "foundation" pass for the adaptive-UI + restyle work. (A `Kit.Card` wrapper
