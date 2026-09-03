@@ -24,7 +24,11 @@ set -uo pipefail
 
 VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
-UA="Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
+# Yahoo now 429s browser-mimic User-Agents (Firefox/Chrome strings, bare curl).
+# A short app-identifying UA still gets 200 -- the same trick the sibling
+# alteringux.stocks widget's omarchy-stocks-refresh relies on. Do NOT put a
+# "Mozilla/... Gecko/... Firefox/..." string back here; it kills every fetch.
+UA="Mozilla/5.0 (X11; Linux x86_64) omarchy-speak-asx"
 ENV_FILE="$HOME/.config/omarchy/ai-briefing/env"
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-speak-asx"
@@ -120,10 +124,19 @@ get_crumb() {
      && (( $(date +%s) - $(stat -c %Y "$CRUMB_FILE") < 21600 )); then
     cat "$CRUMB_FILE"; return 0
   fi
-  curl -fsS --max-time 8 -A "$UA" -c "$COOKIE_JAR" "https://finance.yahoo.com/" -o /dev/null 2>/dev/null || return 1
+  # A bare hit on finance.yahoo.com no longer sets the A1/GUC cookies the
+  # crumb is bound to -- the screener then rejects every crumb as "Invalid
+  # Crumb". Prime through the consent endpoints first (fc.yahoo.com 404s but
+  # still sets cookies; the quote page seals a usable GUC/A1S pair), keeping
+  # one jar across all four calls.
+  rm -f "$COOKIE_JAR"
+  curl -fsS -L --max-time 8 -A "$UA" -c "$COOKIE_JAR" -b "$COOKIE_JAR" "https://fc.yahoo.com/" -o /dev/null 2>/dev/null
+  curl -fsS -L --max-time 8 -A "$UA" -c "$COOKIE_JAR" -b "$COOKIE_JAR" "https://guce.yahoo.com/consent" -o /dev/null 2>/dev/null
+  curl -fsS -L --max-time 8 -A "$UA" -c "$COOKIE_JAR" -b "$COOKIE_JAR" "https://finance.yahoo.com/quote/CBA.AX" -o /dev/null 2>/dev/null || return 1
   local c
   c=$(curl -fsS --max-time 8 -A "$UA" -b "$COOKIE_JAR" "https://query1.finance.yahoo.com/v1/test/getcrumb" 2>/dev/null)
-  [[ -n "$c" && "$c" != *"Too Many Requests"* && "$c" != *"<"* && ${#c} -lt 40 ]] || return 1
+  [[ -n "$c" && "$c" != *"Too Many Requests"* && "$c" != *"<"* && "$c" != *"{"* \
+     && "$c" != *nauthorized* && "$c" != *Invalid* && ${#c} -lt 40 ]] || return 1
   printf '%s' "$c" > "$CRUMB_FILE"
   printf '%s' "$c"
 }
