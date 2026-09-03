@@ -45,11 +45,13 @@ Environment:
                          ~/.config/opencode/opencode.json  (same as llm-blurb).
     LLM_AGENT_MODEL      overrides the default model id.
     SEARXNG_URL          overrides the default SearXNG base URL.
-    OLLAMA_URL / LLM_AGENT_OLLAMA_MODEL
-                         local fallback endpoint + model, used automatically when
-                         Featherless is unreachable or rate-limited. Disable with
-                         --no-fallback or LLM_AGENT_FALLBACK=0. Search still needs
-                         internet; offline, also pass --no-search.
+    OLLAMA_URL / LLM_AGENT_OLLAMA_MODEL / LLM_AGENT_OLLAMA_TIMEOUT
+                         local fallback endpoint, model and per-call deadline
+                         (default 180s -- local cold-load is slow), used
+                         automatically when Featherless is unreachable or
+                         rate-limited. Disable with --no-fallback or
+                         LLM_AGENT_FALLBACK=0. Search still needs internet;
+                         offline, also pass --no-search.
 
 Exit codes: 0 ok | 2 bad args | 3 no key | 4 transport failure
             5 empty/no final answer | 6 rate limited | 7 other HTTP error
@@ -352,7 +354,10 @@ def call_model(payload: dict, key: str, args, state: dict):
         eprint(f"llm-agent: Featherless failed (code {code}) -- falling back to Ollama ({args.ollama_model})")
         state["backend"] = "ollama"
         args.active_model = args.ollama_model
-    return call_ollama({**payload, "model": args.ollama_model}, args.ollama_url, args.timeout)
+    # Local inference (cold model load + slow CPU decode) can badly overrun the
+    # Featherless --timeout; give the Ollama leg its own, roomier deadline.
+    ollama_timeout = max(args.timeout, args.ollama_timeout)
+    return call_ollama({**payload, "model": args.ollama_model}, args.ollama_url, ollama_timeout)
 
 
 def main() -> int:
@@ -369,6 +374,7 @@ def main() -> int:
     ap.add_argument("--searxng-url", default=DEFAULT_SEARXNG)
     ap.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
     ap.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
+    ap.add_argument("--ollama-timeout", type=float, default=float(os.environ.get("LLM_AGENT_OLLAMA_TIMEOUT", "180")))
     ap.add_argument("--no-fallback", action="store_true")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--no-search", action="store_true")
