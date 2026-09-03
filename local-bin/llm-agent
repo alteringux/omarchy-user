@@ -1,0 +1,378 @@
+#!/usr/bin/env python3
+"""llm-agent -- a client-side tool-calling loop over Featherless AI.
+
+Featherless is inference-only: it will tell you *which* tool to call, but it
+never runs one. This script closes that loop locally --
+
+    prompt --> Featherless (OpenAI-compatible /chat/completions with `tools`)
+           --> model emits tool_calls
+           --> WE run them here (currently: web_search via local SearXNG)
+           --> feed results back as role:"tool" messages
+           --> repeat until the model answers in prose
+
+So it's the Featherless equivalent of `omarchy-speak-briefing`'s Anthropic
+`web_search` call, but the search runs on your own SearXNG (127.0.0.1:8080,
+the `searxng.service` user unit) instead of a vendor's hosted tool.
+
+Usage:
+    llm-agent [options] "PROMPT"          # prompt in args, or on stdin if none
+    echo "PROMPT" | llm-agent [options]
+
+Options:
+    --json               ask for one JSON object back (final answer only)
+    --system TEXT        system message (default: a terse research operator)
+    --model NAME         Featherless model id (default below; must be a
+                         tool-calling-capable family -- Qwen 3 or Kimi-K2)
+    --max-tokens N       completion cap per call (default 1500)
+    --temp N             sampling temperature (default 0.4; 0.1 with --json)
+    --max-iters N        max model<->tool round trips (default 6)
+    --results N          search results kept per web_search call (default 5)
+    --searxng-url URL    base URL of the SearXNG instance
+                         (default $SEARXNG_URL or http://127.0.0.1:8080)
+    --timeout N          per-HTTP-call timeout seconds (default 60; 20 for search)
+    --no-search          register no tools -- a plain one-shot completion
+    --verbose            log each tool call + result count to stderr
+
+Environment:
+    FEATHERLESS_API_KEY  API key. Falls back to ~/.config/featherless/key, then
+                         .provider.featherless.options.apiKey in
+                         ~/.config/opencode/opencode.json  (same as llm-blurb).
+    LLM_AGENT_MODEL      overrides the default model id.
+    SEARXNG_URL          overrides the default SearXNG base URL.
+
+Exit codes: 0 ok | 2 bad args | 3 no key | 4 transport failure
+            5 empty/no final answer | 6 rate limited | 7 other HTTP error
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+FEATHERLESS_URL = "https://api.featherless.ai/v1/chat/completions"
+# Must be a family Featherless actually serves with tool-calling grammar. Their
+# docs name Qwen 3 and Kimi-K2; in practice Kimi-K2-Instruct is the best-behaved
+# (real tool_call ids, clean JSON args, no thinking-token burn). Qwen/Qwen3-32B
+# also works but reasons first, so needs a bigger --max-tokens. Qwen3-30B-A3B and
+# the smaller Qwen3s currently 500 or ignore `tools` here.
+DEFAULT_MODEL = os.environ.get("LLM_AGENT_MODEL", "moonshotai/Kimi-K2-Instruct")
+DEFAULT_SEARXNG = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
+
+# Featherless concurrency is bursty (feather_pro_plus = 4 units); a 429 usually
+# clears in seconds. Same backoff ladder as llm-blurb.
+RETRY_BACKOFF = (0, 3, 8, 15)
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def load_key() -> str:
+    k = os.environ.get("FEATHERLESS_API_KEY", "").strip()
+    if not k:
+        p = os.path.expanduser("~/.config/featherless/key")
+        if os.path.isfile(p):
+            try:
+                k = open(p, encoding="utf-8").read().strip()
+            except OSError:
+                pass
+    if not k:
+        p = os.path.expanduser("~/.config/opencode/opencode.json")
+        if os.path.isfile(p):
+            try:
+                cfg = json.load(open(p, encoding="utf-8"))
+                k = (
+                    cfg.get("provider", {})
+                    .get("featherless", {})
+                    .get("options", {})
+                    .get("apiKey", "")
+                    .strip()
+                )
+            except (OSError, ValueError):
+                pass
+    return "".join(k.split())
+
+
+# --------------------------------------------------------------------------
+# the one tool we expose
+# --------------------------------------------------------------------------
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": (
+                "Search the live web through a local metasearch engine and get "
+                "back result titles, URLs and text snippets. Call this whenever "
+                "the answer depends on current events, prices, dates or any fact "
+                "you are not certain of. Prefer several focused queries over one "
+                "broad query."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Search query, as you would type it into a search box.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["general", "news"],
+                        "description": "Use 'news' for breaking or very recent events; otherwise 'general'.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    }
+]
+
+
+def searxng_search(query: str, base_url: str, n: int, timeout: float, category: str = "general") -> dict:
+    params = {"q": query, "format": "json"}
+    params["categories"] = "news" if category == "news" else "general"
+    url = f"{base_url.rstrip('/')}/search?{urllib.parse.urlencode(params)}"
+    req = urllib.request.Request(url, headers={"User-Agent": "llm-agent/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return {"error": f"SearXNG HTTP {e.code} -- is the searxng.service unit running?"}
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        return {"error": f"SearXNG unreachable at {base_url}: {e}"}
+
+    results = []
+    for item in (body.get("results") or [])[:n]:
+        results.append(
+            {
+                "title": item.get("title"),
+                "url": item.get("url"),
+                "snippet": (item.get("content") or "")[:500],
+                "engine": item.get("engine"),
+                "published": item.get("publishedDate"),
+            }
+        )
+    payload = {"query": query, "results": results}
+    if body.get("answers"):
+        payload["answers"] = body["answers"]
+    infoboxes = [ib.get("content") for ib in (body.get("infoboxes") or []) if ib.get("content")]
+    if infoboxes:
+        payload["infoboxes"] = infoboxes
+    if not results and not payload.get("answers"):
+        payload["note"] = "no results; try a broader or differently worded query"
+    return payload
+
+
+# --------------------------------------------------------------------------
+# Featherless call with 429 retry
+# --------------------------------------------------------------------------
+def call_featherless(payload: dict, key: str, timeout: float):
+    data = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        # Featherless is behind Cloudflare, which 403s (error 1010) the bare
+        # "Python-urllib/x.y" default UA. Any ordinary token gets through.
+        "User-Agent": "llm-agent/1.0 (+https://featherless.ai)",
+        "Accept": "application/json",
+    }
+    last_err = None
+    for attempt, wait in enumerate(RETRY_BACKOFF):
+        if wait:
+            time.sleep(wait)
+        req = urllib.request.Request(FEATHERLESS_URL, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return 200, json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode("utf-8", "replace")
+            try:
+                msg = json.loads(raw).get("error", {})
+                msg = msg.get("message") if isinstance(msg, dict) else msg
+            except ValueError:
+                msg = raw[:200]
+            if e.code == 429:
+                last_err = (6, f"rate limited (concurrency cap): {msg}")
+                continue
+            return e.code, {"_error": msg}
+        except (urllib.error.URLError, TimeoutError) as e:
+            last_err = (4, f"transport failure: {e}")
+            continue
+    return last_err or (4, "transport failure")
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--json", action="store_true", dest="want_json")
+    ap.add_argument("--system", default="")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--max-tokens", type=int, default=1500)
+    ap.add_argument("--temp", type=float, default=None)
+    ap.add_argument("--max-iters", type=int, default=6)
+    ap.add_argument("--results", type=int, default=5)
+    ap.add_argument("--searxng-url", default=DEFAULT_SEARXNG)
+    ap.add_argument("--timeout", type=float, default=60.0)
+    ap.add_argument("--no-search", action="store_true")
+    ap.add_argument("--verbose", action="store_true")
+    ap.add_argument("-h", "--help", action="store_true")
+    ap.add_argument("prompt", nargs="*")
+    args = ap.parse_args()
+
+    if args.help:
+        print(__doc__)
+        return 0
+
+    prompt = " ".join(args.prompt).strip()
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    if not prompt:
+        eprint("llm-agent: empty prompt")
+        return 2
+
+    key = load_key()
+    if not key:
+        eprint("llm-agent: no Featherless API key (env FEATHERLESS_API_KEY or ~/.config/featherless/key)")
+        return 3
+
+    temp = args.temp
+    if temp is None:
+        temp = 0.1 if args.want_json else 0.4
+
+    system = args.system
+    if not system:
+        system = (
+            "You are a terse research operator. Use the web_search tool to gather "
+            "current facts before answering; make several focused searches rather "
+            "than one broad one, and cross-check anything time-sensitive. When you "
+            "have enough, answer directly with no preamble."
+        )
+    if args.want_json:
+        system += " Your final message must be exactly one JSON object and nothing else."
+
+    search_timeout = min(args.timeout, 20.0)
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": prompt},
+    ]
+    tools = None if args.no_search else TOOLS
+
+    for it in range(1, args.max_iters + 1):
+        payload = {
+            "model": args.model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": args.max_tokens,
+        }
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+
+        code, body = call_featherless(payload, key, args.timeout)
+        if code != 200:
+            if code == 6:
+                eprint(f"llm-agent: {body}")
+                return 6
+            if code == 4:
+                eprint(f"llm-agent: {body}")
+                return 4
+            eprint(f"llm-agent: Featherless HTTP {code} -- {body.get('_error', body)}")
+            return 7
+
+        try:
+            msg = body["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError):
+            eprint(f"llm-agent: unexpected response shape: {json.dumps(body)[:300]}")
+            return 5
+
+        tool_calls = msg.get("tool_calls") or []
+
+        # Normalise the assistant turn we echo back into history.
+        asst = {"role": "assistant", "content": msg.get("content") or ""}
+        if tool_calls:
+            asst["tool_calls"] = tool_calls
+        messages.append(asst)
+
+        if not tool_calls:
+            content = (msg.get("content") or "").strip()
+            if not content:
+                eprint("llm-agent: model returned an empty final answer")
+                return 5
+            print(content)
+            return 0
+
+        if args.verbose:
+            eprint(f"[iter {it}] {len(tool_calls)} tool call(s)")
+
+        for idx, tc in enumerate(tool_calls):
+            # Some backends (Qwen3-32B) return a null id; the API still wants a
+            # tool_call_id on the matching role:"tool" turn, so synthesise one
+            # and echo it back on the assistant turn too.
+            if not tc.get("id"):
+                tc["id"] = f"call_{it}_{idx}"
+            fn = (tc.get("function") or {}).get("name")
+            raw_args = (tc.get("function") or {}).get("arguments")
+            try:
+                call_args = raw_args if isinstance(raw_args, dict) else json.loads(raw_args or "{}")
+            except ValueError:
+                call_args = {}
+
+            if fn == "web_search":
+                q = str(call_args.get("query", "")).strip()
+                cat = call_args.get("category", "general")
+                if args.verbose:
+                    eprint(f"    web_search({cat}): {q!r}")
+                result = (
+                    {"error": "empty query"}
+                    if not q
+                    else searxng_search(q, args.searxng_url, args.results, search_timeout, cat)
+                )
+                if args.verbose and "results" in result:
+                    eprint(f"    -> {len(result['results'])} results")
+            else:
+                result = {"error": f"unknown tool {fn!r}"}
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tc.get("id", ""),
+                    "name": fn or "unknown",
+                    "content": json.dumps(result, ensure_ascii=False)[:8000],
+                }
+            )
+
+    # Ran out of iterations -- force a final prose answer with no tools.
+    messages.append(
+        {"role": "user", "content": "Stop searching now and answer with what you have."}
+    )
+    code, body = call_featherless(
+        {
+            "model": args.model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": args.max_tokens,
+        },
+        key,
+        args.timeout,
+    )
+    if code == 200:
+        try:
+            content = (body["choices"][0]["message"].get("content") or "").strip()
+        except (KeyError, IndexError, TypeError):
+            content = ""
+        if content:
+            print(content)
+            return 0
+    eprint(f"llm-agent: no final answer after {args.max_iters} iterations")
+    return 5
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

@@ -12,8 +12,10 @@
 #         "crumb"; cached in the state dir, best-effort -- if it can't be
 #         had, the movers list is left for the AI to source via web search)
 #   * The "why is it moving" colour, and the market-tone overview, come from
-#     the Anthropic API with web search -- the same key + pattern as
-#     omarchy-speak-briefing, read from ~/.config/omarchy/ai-briefing/env.
+#     a client-side tool-calling loop on Featherless: `llm-agent --json` runs
+#     a Kimi-K2 / Qwen3 model that calls web_search against the local SearXNG
+#     (searxng.service user unit) until it can return the briefing JSON. No
+#     Anthropic key needed. Override via ASX_LLM_MODEL / ASX_AI_ITERS.
 #   * Output streams section-by-section straight into piper --output_raw so it
 #     starts talking in ~1s and the stop-toggle stays responsive, exactly
 #     like omarchy-speak-reddit.
@@ -194,10 +196,14 @@ say "Fetching the movers and the news behind them. One moment."
 GAINERS_TSV=$(bg_capture screener DESC); LOSERS_TSV=$(bg_capture screener ASC)
 
 # --- AI layer: overview colour + per-mover reasons, via web search --------
+# Runs the tool-calling loop on Featherless (open-weights, flat-rate) instead
+# of Anthropic: `llm-agent --json` drives a model that calls web_search against
+# the local SearXNG (searxng.service user unit) and returns one JSON object.
+# Override the model with ASX_LLM_MODEL, the search-loop depth with ASX_AI_ITERS.
 [[ -f "$ENV_FILE" ]] && source "$ENV_FILE"
 
 ai_json() {
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
+  command -v llm-agent >/dev/null 2>&1 || { echo "ai_json: llm-agent not on PATH" >>"$LOG_FILE"; return 1; }
   local facts
   facts=$(jq -cn \
     --arg t "$SYD_TIME" \
@@ -229,30 +235,24 @@ Exactly up to 10 per list, ordered biggest move first. changePct is a string lik
 EOF
 )
 
-  local resp
-  resp=$(curl -sS https://api.anthropic.com/v1/messages --max-time 60 \
-    -H "x-api-key: $ANTHROPIC_API_KEY" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d "$(jq -n --arg p "$prompt" '{
-      model:"claude-haiku-4-5-20251001",
-      max_tokens:2000,
-      tools:[{type:"web_search_20250305",name:"web_search",max_uses:6}],
-      messages:[{role:"user",content:$p}]
-    }')") || return 1
+  local sys_msg="You are a financial wire editor writing a spoken ASX briefing. Use the web_search tool to confirm today's index direction, the real top movers, and a one-line catalyst for each before you answer. Make several focused searches. Your final message must be exactly one JSON object in the schema the user describes -- no prose, no markdown fence."
 
-  printf '%s' "$resp" | python3 -c "
+  local -a model_args=()
+  [[ -n "${ASX_LLM_MODEL:-}" ]] && model_args=(--model "$ASX_LLM_MODEL")
+
+  local raw
+  raw=$(llm-agent --json --max-iters "${ASX_AI_ITERS:-7}" --max-tokens 2500 \
+        "${model_args[@]}" --system "$sys_msg" "$prompt" 2>>"$LOG_FILE") || return 1
+
+  # Kimi-K2 / Qwen3 honour "JSON only" well, but strip a stray fence or prose
+  # just in case -- keep the widest brace-balanced span.
+  printf '%s' "$raw" | python3 -c "
 import json,sys,re
 try:
-    d=json.load(sys.stdin)
-    if 'error' in d:
-        sys.stderr.write(json.dumps(d['error'])+chr(10)); sys.exit(1)
-    txt=''.join(b.get('text','') for b in d.get('content',[]) if b.get('type')=='text')
+    txt=sys.stdin.read()
     m=re.search(r'\{.*\}', txt, re.S)
     if not m: sys.exit(1)
-    obj=json.loads(m.group(0))
-    print(json.dumps(obj))
-except SystemExit: raise
+    print(json.dumps(json.loads(m.group(0))))
 except Exception as e:
     sys.stderr.write(str(e)+chr(10)); sys.exit(1)
 "
