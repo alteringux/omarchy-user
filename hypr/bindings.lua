@@ -92,6 +92,11 @@ o.bind("SUPER + ALT + T", "Toggle bar clock", "omarchy-toggle-clock")
 hl.unbind("SUPER + SHIFT + B")
 o.bind("SUPER + SHIFT + B", "Toggle bar (top + bottom)", "omarchy-toggle-bar")
 
+-- Cycle the bottom news bar's two halves: press once to hide the left
+-- (stories) half, again to hide the right (news) half, again to show both.
+-- (SUPER + SHIFT + N is Omarchy's Editor launcher, so this rides PERIOD.)
+o.bind("SUPER + SHIFT + PERIOD", "News bar: cycle halves (left / right / both)", "omarchy-shell -q alteringux.newsbar cycleHalves")
+
 -- Speak the current time aloud (Piper TTS; press again to stop).
 -- SUPER + ALT + T is taken by the bar-clock toggle above, so this lives on Y.
 o.bind("SUPER + ALT + Y", "Speak the time", "omarchy-speak-time")
