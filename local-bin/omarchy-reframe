@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# omarchy-reframe -- SUPER+SHIFT+ALT+N
+#
+# Grab the highlighted text (primary selection, else clipboard), send it to a
+# local Ollama model for a very short bulleted gist PLUS one or two "seen
+# differently" bullets that reframe it from another angle, then speak the whole
+# thing aloud with Piper TTS. Fully offline; nothing leaves the machine.
+#
+# Press again while it's talking to stop (same toggle behaviour as
+# omarchy-narrate). Synthesis/playback/queueing are handled by piper-tts, so
+# this won't talk over another TTS job.
+set -uo pipefail
+
+MODEL="${OMARCHY_REFRAME_MODEL:-qwen2.5:3b}"
+OLLAMA_URL="${OLLAMA_HOST:-http://localhost:11434}"
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+TAG=reframe
+MAX_INPUT_CHARS=6000
+
+note() { notify-send -a "Reframe" "$@" 2>/dev/null || true; }
+
+# Re-run while speaking (or while a reframe is queued) => stop it.
+if "$PIPER_TTS" --tag "$TAG" --stop; then exit 0; fi
+
+TEXT="$(wl-paste --primary --no-newline 2>/dev/null)"
+[[ -z "$TEXT" ]] && TEXT="$(wl-paste --no-newline 2>/dev/null)"
+if [[ -z "${TEXT// }" ]]; then
+  note "Nothing selected or copied to reframe."
+  exit 0
+fi
+TEXT="${TEXT:0:MAX_INPUT_CHARS}"
+
+command -v curl >/dev/null || { note "curl not found."; exit 1; }
+if ! curl -sf --max-time 2 "$OLLAMA_URL/api/tags" >/dev/null; then
+  note "Ollama isn't running ($OLLAMA_URL)."
+  exit 1
+fi
+
+note "Thinking…" "Summarising + reframing the selection."
+
+SYSTEM='You compress a passage for someone who wants to also see it from other angles. Reply as a plain-text bullet list, "- " prefix, no headings, no markdown bold, no preamble. First 2 to 3 bullets: the gist, each a few words, telegraphic. Then 1 to 2 bullets that each start with "Seen differently:" and offer a genuinely different framing, stakeholder view, or counter-reading of the same passage. Keep the whole reply under 60 words. No closing remarks.'
+
+REQ="$(jq -n \
+  --arg model "$MODEL" \
+  --arg system "$SYSTEM" \
+  --arg prompt "Passage:"$'\n'"$TEXT" \
+  '{
+     model: $model,
+     system: $system,
+     prompt: $prompt,
+     stream: false,
+     keep_alive: "30m",
+     options: { temperature: 0.4, num_predict: 120, top_p: 0.9 }
+   }')"
+
+RESP="$(curl -sS --max-time 90 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)" || {
+  note "Ollama request failed."
+  exit 1
+}
+
+OUT="$(printf '%s' "$RESP" | jq -r '.response // empty' 2>/dev/null)"
+if [[ -z "${OUT// }" ]]; then
+  note "Model returned nothing." "$(printf '%s' "$RESP" | jq -r '.error // empty' 2>/dev/null | head -c 200)"
+  exit 1
+fi
+OUT="$(printf '%s' "$OUT" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d')"
+
+# Show the bulleted result; speak a de-bulleted version so Piper doesn't
+# stumble over the dashes (each bullet becomes its own sentence).
+note "Reframe" "$OUT"
+SPOKEN="$(printf '%s\n' "$OUT" \
+  | sed -E 's/^[[:space:]]*[-*•]+[[:space:]]*//; s/[[:space:]]+$//' \
+  | sed -E 's/([^.!?:])$/\1./')"
+
+printf '%s\n' "$SPOKEN" | "$PIPER_TTS" --tag "$TAG" --voice "$VOICE"

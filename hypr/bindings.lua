@@ -37,6 +37,10 @@ o.bind("SUPER + ALT + H", "Dashboard: open panel", "omarchy-shell -q shell toggl
 -- Narrator: read selected/copied text aloud (press again to stop)
 o.bind("SUPER + ALT + N", "Narrate selection", "omarchy-narrate")
 
+-- Reframe: local Ollama gist + "seen differently" perspectives of the
+-- selection, spoken via Piper TTS. Offline; press again to stop.
+o.bind("SUPER + SHIFT + ALT + N", "Reframe selection (gist + other perspectives, TTS)", "omarchy-reframe")
+
 -- Spoken notifications: toggle reading incoming notifications aloud (Piper TTS)
 o.bind("SUPER + ALT + V", "Spoken notifications: toggle", "omarchy-speak-notifications-toggle")
 
