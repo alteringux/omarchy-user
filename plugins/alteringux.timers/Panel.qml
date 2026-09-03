@@ -82,11 +82,9 @@ Panel {
       onCloseRequested: root.close()
       onActivateRequested: root.submit()
 
-      Flickable {
+      Kit.PanelScroll {
         anchors.fill: parent
-        clip: true
         contentHeight: content.implicitHeight
-        boundsBehavior: Flickable.StopAtBounds
 
         Column {
           id: content

@@ -13,4 +13,6 @@ InlineEdit 1.0 InlineEdit.qml
 BugGuard 1.0 BugGuard.js
 Usage 1.0 Usage.qml
 EmptyState 1.0 EmptyState.qml
+PanelScroll 1.0 PanelScroll.qml
+WheelBoost 1.0 WheelBoost.qml
 singleton Palette 1.0 Palette.qml

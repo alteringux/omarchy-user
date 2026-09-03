@@ -111,11 +111,9 @@ Panel {
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
       onDeleteRequested: if (hostWidget) hostWidget.clearWatchlist()
 
-    Flickable {
+    Kit.PanelScroll {
       anchors.fill: parent
-      clip: true
       contentHeight: content.implicitHeight
-      boundsBehavior: Flickable.StopAtBounds
 
       Column {
         id: content

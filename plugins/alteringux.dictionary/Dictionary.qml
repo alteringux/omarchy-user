@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import QtQuick
+import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 import "../alteringux.kit" as Kit
@@ -431,6 +432,9 @@ Item {
             spacing: Style.space(4)
             boundsBehavior: Flickable.StopAtBounds
 
+            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            Kit.WheelBoost { flick: resultList }
+
             delegate: Rectangle {
               required property int index
               required property string word
@@ -537,13 +541,11 @@ Item {
         }
 
         // Overview step: full word breakdown, progressive local -> LLM.
-        Flickable {
+        Kit.PanelScroll {
           width: parent.width
           height: parent.height - root.headerHeight - root.contentSpacing
           visible: root.step === "overview"
-          clip: true
           contentHeight: overviewColumn.height
-          boundsBehavior: Flickable.StopAtBounds
 
           Column {
             id: overviewColumn

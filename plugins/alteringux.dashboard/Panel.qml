@@ -68,11 +68,9 @@ Panel {
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
       onDeleteRequested: if (root.state.notes.items.length > 0) root.clearNotes()
 
-    Flickable {
+    Kit.PanelScroll {
       anchors.fill: parent
-      clip: true
       contentHeight: content.implicitHeight
-      boundsBehavior: Flickable.StopAtBounds
 
       Column {
         id: content

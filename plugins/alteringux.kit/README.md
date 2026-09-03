@@ -33,6 +33,8 @@ decide what to import instead of hand-rolling.
 | `Kit.Usage` (+ `UsageModel.js`) | `Usage.qml` | Per-plugin usage analytics + adaptive-UI signal. Give it `pluginId`, call `record("<action>")` from every user action; it keeps `~/.local/state/omarchy/usage/<pluginId>.json` (per-action `count` / `lastAt` / a capped recency ring) via `Kit.Store`. Read-side is pure and total: `rankActions(subset)` orders actions most-used-first (freq × 7-day-half-life recency), plus `topActions(n)`, `actionScore(a)`, `count(a)`, `lastAt(a)`, `isActionDead(a)` (never used, or idle ≥21d and used <3× ever). Assigning a fresh doc on `record()` makes bindings that read the results re-evaluate; `revision` bumps too as a coarse signal. Ranking/decay math is the QML-free, Node-tested `UsageModel.js` (`test/usage.test.js`). | `timers`; rolling out to the other bar-widget plugins |
 | `Kit.Palette`         | `Palette.qml` | Singleton of semantic status colors the shell palette lacks: `positive` / `negative` / `warning` (fixed, legible on light + dark), `info` / `urgent` (track the theme), `faint` (pre-dimmed foreground). Replaces the hardcoded hex every plugin grew (`#d29922`, `#4CAF50` / `#F44336` / `#FF9800`, stocks' up/down greens). | `timers`; `pomodoro` / `countdown` / `stocks` per their restyle pass |
 | `Kit.EmptyState`      | `EmptyState.qml` | The "nothing here yet" block every panel hand-rolls — a `text` line plus an optional dimmer `hint` line, styled once. Set `foreground` to the host panel's text color. | `timers`; other panels as they are restyled |
+| `Kit.PanelScroll`     | `PanelScroll.qml` | The scrollable panel body every overlay hand-rolled as a bare `Flickable { clip; contentHeight; boundsBehavior: StopAtBounds }`. Same thing — it *is* a `Flickable`, so `contentHeight` bindings and a nested `Column { width: parent.width }` are unchanged — plus a fading `ScrollBar.vertical` (AsNeeded) so overflow is discoverable, `interactive` only while overflowing (matches the stock shell panels), and a brisker wheel/two-finger step via an embedded `Kit.WheelBoost`. One knob, `wheelScale` (default `1.9`), tunes the step; `handleColor` tints the bar. | `countdown`, `dashboard`, `stocks`, `timers`, `dictionary` (overview) |
+| `Kit.WheelBoost`      | `WheelBoost.qml` | A tuned `WheelHandler` — point `flick` at a `Flickable`/`ListView`, nest it inside, and mouse-wheel + touchpad scrolling move `scale`× further per event (default `1.9`). Reads `pixelDelta` for touchpads and `angleDelta` for notched wheels, clamps to bounds, and accepts the event so the target's own wheel handling doesn't compound it. Used on its own for `ListView`s (which `PanelScroll` can't wrap); `PanelScroll` embeds one. | `dictionary` (suggestion list); inside every `Kit.PanelScroll` |
 
 ## Trade-offs of sharing this way
 
@@ -55,6 +57,13 @@ by the two card-list plugins; `Kit.Store` by nine plugins — every one that
 touches a JSON file except `newsbar`'s feeds config and `agenda`'s
 runtime-dir state write (a base64 hop, not a `FileView`). No plugin
 hand-rolls a `FileView` + save `Timer` + `mkdir` cluster any more.
+
+`Kit.PanelScroll` / `Kit.WheelBoost` landed together to give the overflowing
+overlays a real scrollbar and a faster scroll step. `PanelScroll` is in
+`countdown`, `dashboard`, `stocks`, `timers`, and `dictionary`'s overview
+step; `dictionary`'s suggestion `ListView` takes a bare `Kit.WheelBoost` +
+`ScrollBar`. `flow`'s output/canvas Flickables are the remaining bare ones —
+left for the same commit as that plugin's in-flight work.
 
 `Kit.Usage` / `Kit.Palette` / `Kit.EmptyState` landed together as the
 "foundation" pass for the adaptive-UI + restyle work. (A `Kit.Card` wrapper
