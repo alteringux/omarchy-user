@@ -91,6 +91,7 @@ Panel {
             spacing: Style.space(4)
 
             Kit.MetaText {
+              width: implicitWidth   // parent Column is shrink-wrapped, not width-bound
               content: "Score"
               foreground: root.bar.foreground
             }

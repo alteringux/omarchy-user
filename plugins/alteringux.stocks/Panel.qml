@@ -121,6 +121,7 @@ Panel {
         spacing: Style.spacing.panelGap
 
         Kit.PanelHead {
+          glyph: "\uf201"   // nf-fa-line_chart, matches the bar widget
           title: "Stocks"
           meta: root.refreshing ? "refreshing…" : ""
           foreground: root.barForeground

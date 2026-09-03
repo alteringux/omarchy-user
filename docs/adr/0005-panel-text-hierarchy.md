@@ -90,17 +90,25 @@ First pass:
 
 - **Opener promoted to `Kit.PanelHead`:** `countdown`, `dashboard`, `pomodoro`
   (prepended, above STATISTICS), `stocks`, `stopwatch`, `timers`, `ttsplayer`,
-  `vpnrotate`. `dashboard` and `stocks` fold their single Refresh button into
-  `trailingControl` and their "refreshing…" text into `meta`.
+  `vpnrotate`. Each carries a `glyph:` — a static nerd-font code point matching
+  the bar widget, except `ttsplayer` / `vpnrotate` which bind `hostWidget.icon`
+  so the hero glyph tracks bar state (speaking / paused / muted, connected /
+  rotating / error), the way the battery hero cycles. `dashboard` and `stocks`
+  fold their single Refresh button into `trailingControl` and their
+  "refreshing…" text into `meta`.
 - **Hand-rolled dim status line → `Kit.MetaText`:** `score` (the "SCORE"
-  caption; the icon literal `48` → `Style.fontPx(4)`), `vpnrotate` (the
-  connection detail line). `ttsplayer`'s old bold status `Text` was folded
-  into the head's `meta`; its remaining detail line lost the redundant state
-  word.
-- **Left as-is:** `flow` — its header is a four-control toolbar (`PanelSectionHeader`
-  + Output / Canvas / Run), which `PanelHero`'s single `trailingControl` can't
-  hold, and its "last run" line is deliberately `Kit.Palette.negative` red, not
-  the neutral meta grey. Font tokens there were already clean.
+  caption; the icon literal `48` → `Style.fontPx(4)`). `ttsplayer`'s old bold
+  status `Text` was folded into the head's `meta`; its remaining detail line
+  lost the redundant state word. `vpnrotate`'s connection detail line is a
+  sentence-shaped fragment, so it is the **hint role** (`Kit.Palette.faint` +
+  caption, regular weight, `WordWrap`), not `MetaText`.
+- **Left as-is:** `flow` — its header is a four-control toolbar
+  (`PanelSectionHeader` + Output / Canvas / Run), which `PanelHero`'s single
+  `trailingControl` can't hold; the toolbar-header exemption is permanent by
+  design. Its title (`FLOW · <id>`) should still be promoted to a prepended
+  `Kit.PanelHead { title }` per the `pomodoro` precedent — deferred only
+  because that plugin has concurrent uncommitted work. Its "last run" line is
+  deliberately `Kit.Palette.negative` red, not the neutral meta grey.
 - **Exempt:** `alteringux.dictionary` — a launcher-style search surface built
   on `Color.menu.*` and custom card chrome, not a status panel. Its header is
   a search field, not a title.

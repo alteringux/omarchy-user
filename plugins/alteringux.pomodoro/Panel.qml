@@ -78,11 +78,10 @@ Panel {
       spacing: Style.space(14)
 
       Kit.PanelHead {
+        glyph: "\uf017"   // nf-fa-clock_o, matches the bar widget at rest
         title: "Pomodoro"
-        meta: hostWidget
-          ? (hostWidget.phase === "IDLE"
-             ? "idle"
-             : Model.phaseLabel(hostWidget.phase) + (hostWidget.running ? " · running" : hostWidget.ready ? " · ready" : " · paused"))
+        meta: hostWidget && hostWidget.phase !== Model.PHASE_IDLE
+          ? Model.phaseLabel(hostWidget.phase) + (hostWidget.running ? " · running" : hostWidget.ready ? " · ready" : " · paused")
           : "idle"
         foreground: root.barForeground
       }

@@ -61,17 +61,17 @@ Panel {
         spacing: Style.space(14)
 
         Kit.PanelHead {
+          glyph: root.hostWidget ? root.hostWidget.icon : ""   // nf-fa-shield / sync / warning, live from the bar widget
           title: "Proton VPN"
           meta: Model.summaryLine(root.st)
           foreground: root.barForeground
         }
 
-        // ── status detail ─────────────────────────────────────────────────
-        Kit.MetaText {
+        // ── status detail (hint role: sentences + wrapping, per ADR 0005) ──
+        Text {
           width: content.width
-          uppercase: false
-          foreground: root.barForeground
-          content: {
+          visible: text.length > 0
+          text: {
             if (!root.st) return ""
             if (root.st.error) return "The rotator script reported a failure. Check ~/.local/state/omarchy/vpnrotate.log"
             if (root.connected) {
@@ -83,6 +83,10 @@ Panel {
             }
             return ""
           }
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
 
         // Next-rotation readout + thin progress bar (only meaningful while

@@ -35,8 +35,11 @@ decide what to import instead of hand-rolling.
 | `Kit.EmptyState`      | `EmptyState.qml` | The "nothing here yet" block every panel hand-rolls — a `text` line plus an optional dimmer `hint` line, styled once. Set `foreground` to the host panel's text color. | `timers`; other panels as they are restyled |
 | `Kit.PanelScroll`     | `PanelScroll.qml` | The scrollable panel body every overlay hand-rolled as a bare `Flickable { clip; contentHeight; boundsBehavior: StopAtBounds }`. Same thing — it *is* a `Flickable`, so `contentHeight` bindings and a nested `Column { width: parent.width }` are unchanged — plus a fading `ScrollBar.vertical` (AsNeeded) so overflow is discoverable, `interactive` only while overflowing (matches the stock shell panels), and a brisker wheel/two-finger step via an embedded `Kit.WheelBoost`. One knob, `wheelScale` (default `1.9`), tunes the step; `handleColor` tints the bar. | `countdown`, `dashboard`, `stocks`, `timers`, `dictionary` (overview) |
 | `Kit.WheelBoost`      | `WheelBoost.qml` | A tuned `WheelHandler` — point `flick` at a `Flickable`/`ListView`, nest it inside, and mouse-wheel + touchpad scrolling move `scale`× further per event (default `1.9`). Reads `pixelDelta` for touchpads and `angleDelta` for notched wheels, clamps to bounds, and accepts the event so the target's own wheel handling doesn't compound it. Used on its own for `ListView`s (which `PanelScroll` can't wrap); `PanelScroll` embeds one. | `dictionary` (suggestion list); inside every `Kit.PanelScroll` |
-| `Kit.PanelHead`       | `PanelHead.qml` | The standard panel opener — the shape of the battery overlay's hero: optional `glyph` (nerd-font code point), Title-Case `title` (`Style.font.title`, bold), and an UPPERCASE tracked `meta` sub-line (hidden when empty). Thin wrapper over `qs.Ui.PanelHero` that takes the glyph as a string and passes `detail` / `trailingControl` straight through. Every `alteringux.*` status panel opens with one; the type ramp it encodes is `../../docs/adr/0005-panel-text-hierarchy.md`. | `countdown`, `dashboard`, `pomodoro`, `stocks`, `stopwatch`, `timers`, `ttsplayer`, `vpnrotate` |
-| `Kit.MetaText`        | `MetaText.qml` | The dim, tracked caption sub-line on its own — the "DRAINING WATTS" treatment (`Qt.darker(fg,1.4)`, `Style.font.caption`, bold, `letterSpacing 1.2`), for a status line that isn't inside a `Kit.PanelHead`. `content` in, `uppercase` (default true) toggles the case; hides itself when `content` is empty. Retires the per-panel hand-rolled `Text { color: Qt.darker(fg,1.4); … }` / `opacity: 0.55` status lines. | `score` (the "Score" caption), `vpnrotate` (the connection detail line) |
+| `Kit.Card`            | `Card.qml` | Translucent panel card (`Palette.cardBg` / `cardBorder`, `Style.cornerRadius`) with an optional coloured left spine keyed to a semantic `tone` (`neutral`/`accent`/`positive`/`negative`/`warning`) and an optional UPPERCASE accent title. Content is an explicit `body: Item` it reparents + positions (a default-property slot collapsed height inside Repeater delegates — see ADR-0003). | `flow` (envelope cards) |
+| `Kit.SectionHeading`  | `SectionHeading.qml` | The louder header that introduces a card or a group of rows *inside* one — accent, optionally UPPERCASE, bold, optional hairline `rule`. Distinct from the stock `PanelSectionHeader` (the small dim caption at the very top of a whole panel), which stays the panel title. | `flow`, `dashboard` (news/section headings) |
+| `Kit.Bullet`          | `Bullet.qml` | One row of a prose list: a glyph in the margin (`▪` default) + a wrapping line. `styled: true` switches the line to `Text.StyledText` (caller escapes via `Kit.Str`). Replaces the per-plugin `Column { Text; Text }` list delegates. | `flow` (brief bullets), `dashboard` |
+| `Kit.PanelHead`       | `PanelHead.qml` | The standard panel opener — the shape of the battery overlay's hero: optional `glyph` (nerd-font code point, live or static), Title-Case `title` (`Style.font.title`, bold), and an UPPERCASE tracked `meta` sub-line (hidden when empty). Thin wrapper over `qs.Ui.PanelHero` that takes the glyph as a string and passes `detail` / `trailingControl` straight through. Every `alteringux.*` status panel opens with one; the type ramp it encodes is `../../docs/adr/0005-panel-text-hierarchy.md`. | `countdown`, `dashboard`, `pomodoro`, `stocks`, `stopwatch`, `timers`, `ttsplayer`, `vpnrotate` |
+| `Kit.MetaText`        | `MetaText.qml` | The dim, tracked caption sub-line on its own — the "DRAINING WATTS" treatment (`Qt.darker(fg,1.4)`, `Style.font.caption`, bold, `letterSpacing 1.2`), for a status *tag* that isn't inside a `Kit.PanelHead`. `content` in, `uppercase` (default true) toggles the case; elides on one line (set `wrapMode` to override); hides itself when `content` is empty. **Not** for sentences — those are the hint role (`Kit.Palette.faint` + caption, regular weight). | `score` (the "Score" caption) |
 
 ## Trade-offs of sharing this way
 
@@ -70,10 +73,10 @@ what uses these, and the resting-visible-scrollbar + touchpad-travel
 decisions, is `../../docs/adr/0004-scrollable-panel-bodies.md`.
 
 `Kit.Usage` / `Kit.Palette` / `Kit.EmptyState` landed together as the
-"foundation" pass for the adaptive-UI + restyle work. (A `Kit.Card` wrapper
-was trialled and dropped — its nested content slot collapsed height inside
-Repeater delegates, and a plain themed `Rectangle` per panel is a couple of
-lines anyway.) `Usage` is the
+"foundation" pass for the adaptive-UI + restyle work. (`Kit.Card` was first
+trialled with a default-property content slot, which collapsed height inside
+Repeater delegates; it shipped later with an explicit reparented `body: Item`
+instead — see its catalogue row and ADR-0003.) `Usage` is the
 substrate for the per-plugin usage-analytics feature (each plugin records its
 own actions and reorders / demotes UI from `rank()` / `isDead()`, no code
 change per adaptation). `Palette` / `EmptyState` are the shared restyle primitives that retire the
@@ -88,12 +91,15 @@ every `alteringux.*` status panel and codified in
 `qs.Ui.PanelHero`; `MetaText` is the same dim tracked-caption treatment for a
 status line outside a hero. First pass promoted the opener to `Kit.PanelHead`
 in `countdown`, `dashboard`, `pomodoro`, `stocks`, `stopwatch`, `timers`,
-`ttsplayer`, `vpnrotate` (`dashboard` / `stocks` fold their one Refresh button
-into `trailingControl`; `pomodoro` prepends the head above its STATISTICS
-section), and swapped hand-rolled dim status lines to `Kit.MetaText` in `score`
-(the "Score" caption, plus its `font.pixelSize: 48` icon literal → `Style.fontPx(4)`)
-and `vpnrotate` (the connection detail line). `flow` keeps its multi-button
-toolbar header and its deliberately red "last run" error line unchanged.
+`ttsplayer`, `vpnrotate` — each with a `glyph:` (static bar icon, or
+`hostWidget.icon` bound live for `ttsplayer` / `vpnrotate`). `dashboard` /
+`stocks` fold their one Refresh button into `trailingControl`; `pomodoro`
+prepends the head above its STATISTICS section. `score` swapped its
+hand-rolled "SCORE" caption to `Kit.MetaText` (and `font.pixelSize: 48` →
+`Style.fontPx(4)`). `vpnrotate`'s connection detail line became the hint role
+(`Kit.Palette.faint` + caption, regular weight), not `MetaText` — it carries
+sentences. `flow` keeps its multi-button toolbar header and its deliberately
+red "last run" error line (its title promotion is deferred, concurrent WIP).
 `dictionary` is exempt (a launcher-style search surface, not a status panel);
 the packaged `omarchy.power` battery panel keeps its own inline hero but the
 tokens match.

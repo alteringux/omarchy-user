@@ -92,6 +92,7 @@ Panel {
           spacing: Style.spacing.panelGap
 
           Kit.PanelHead {
+            glyph: "\uf252"   // nf-fa-hourglass_half, matches the bar widget
             title: "Timers"
             meta: root.entries.length > 0 ? (root.entries.length + " running") : "idle"
             foreground: root.barForeground

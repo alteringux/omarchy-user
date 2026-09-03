@@ -131,6 +131,7 @@ Panel {
           spacing: Style.spacing.panelGap
 
           Kit.PanelHead {
+            glyph: "\uf073"   // nf-fa-calendar — matches the bar widget
             title: "Countdowns"
             meta: root.entries.length > 0
               ? (root.entries.length + (root.entries.length === 1 ? " countdown" : " countdowns"))

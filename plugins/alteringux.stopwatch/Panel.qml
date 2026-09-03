@@ -58,6 +58,7 @@ Panel {
         spacing: Style.space(14)
 
         Kit.PanelHead {
+          glyph: "\uf2f2"   // nf-fa-stopwatch, matches the bar widget
           title: "Stopwatch"
           meta: (hostWidget && hostWidget.active) ? "Running" : "Ready"
           foreground: root.barForeground

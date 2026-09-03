@@ -78,6 +78,7 @@ Panel {
         spacing: Style.spacing.panelGap
 
         Kit.PanelHead {
+          glyph: "\uf1ea"   // nf-fa-newspaper_o, matches the bar widget
           title: "Dashboard"
           meta: root.refreshing ? "refreshing…" : ""
           foreground: root.barForeground

@@ -78,6 +78,7 @@ Panel {
         spacing: Style.space(14)
 
         Kit.PanelHead {
+          glyph: hostWidget ? hostWidget.icon : ""   // nf-fa-bullhorn / pause / volume-off, live from the bar widget
           title: "Text to Speech"
           meta: !root.speaking ? "Idle" : (hostWidget.paused ? "Paused" : "Speaking")
           foreground: root.barForeground
@@ -121,8 +122,7 @@ Panel {
           visible: root.speaking
           width: content.width
           text: "Seeking isn't available for streaming TTS."
-          color: root.barForeground
-          opacity: 0.55
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap

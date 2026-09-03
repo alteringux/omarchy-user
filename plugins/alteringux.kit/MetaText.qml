@@ -3,8 +3,9 @@ import qs.Commons
 
 // Kit.MetaText — the dim, tracked caption sub-line that sits under a title or
 // section header: the "DRAINING WATTS" line beneath the battery overlay's
-// "Battery". Identical treatment to qs.Ui.PanelHero's `meta` slot, pulled out
-// for panels that show a status line without a full hero.
+// "Battery". Same treatment as qs.Ui.PanelHero's `meta` slot (plus the
+// nerd-font top-padding the other kit labels carry), pulled out for panels
+// that show a status line without a full hero.
 //
 //   Kit.MetaText {
 //     content: root.running ? (root.count + " running") : "idle"
@@ -12,9 +13,11 @@ import qs.Commons
 //   }
 //
 // `uppercase` (default true) + the 1.2 letter-spacing make it a glanceable
-// status tag. Set `uppercase: false` for a short lowercase detail fragment;
-// for a full explanatory sentence use Style.font.caption + Kit.Palette.faint
-// at regular weight instead (see ../../docs/adr/0005-panel-text-hierarchy.md).
+// status tag. It elides on one line by default (like PanelHero's meta); a
+// caller that needs a fragment to wrap can set `wrapMode: Text.WordWrap`.
+// For a full explanatory sentence, don't use this at all — Style.font.caption
+// + Kit.Palette.faint at regular weight is the hint role
+// (see ../../docs/adr/0005-panel-text-hierarchy.md).
 Text {
   id: root
 

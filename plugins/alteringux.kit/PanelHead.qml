@@ -23,7 +23,8 @@ PanelHero {
 
   property string glyph: ""
 
-  fontFamily: Style.font.family
+  // PanelHero already defaults foreground / fontFamily / iconSize; we only add
+  // the glyph-string → iconComponent convenience.
   iconComponent: root.glyph.length > 0 ? glyphIcon : null
 
   Component {
