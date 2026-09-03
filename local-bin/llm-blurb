@@ -116,6 +116,12 @@ for ((try = 0; try < retries; try++)); do
       ((last)) && { echo "llm-blurb: empty completion" >&2; exit 5; } ;;
     429)
       ((last)) && { echo "llm-blurb: rate limited (concurrency cap)" >&2; exit 6; } ;;
+    500 | 502 | 503 | 504 | 529)
+      # Transient: a cold/low-traffic model reports "temporarily at capacity"
+      # (503) while it loads, or the gateway hiccups (502/504). Same retry
+      # ladder as 429 -- it usually clears within a few seconds.
+      msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
+      ((last)) && { echo "llm-blurb: HTTP $code (transient)${msg:+ -- $msg}" >&2; exit 7; } ;;
     *)
       msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
       echo "llm-blurb: HTTP $code${msg:+ -- $msg}" >&2

@@ -2,23 +2,55 @@
 # omarchy-reframe -- SUPER+SHIFT+ALT+N
 #
 # Grab the highlighted text (primary selection, else clipboard), send it to an
-# uncensored Featherless model (via llm-blurb) for a short bulleted explanation:
-# what it says, the main idea, how it works, why it matters, its limits,
-# something it is like, plus "seen differently" reframes, then speak the whole
-# thing aloud with Piper TTS. The selection leaves the machine (Featherless);
-# only the TTS is local.
+# uncensored Featherless model for a short bulleted explanation: what it says,
+# the main idea, how it works, why it matters, its limits, something it is like,
+# plus "seen differently" reframes, then speak the whole thing aloud with Piper
+# TTS. The selection leaves the machine (Featherless); only the TTS is local.
+#
+# For accuracy the passage's topic is first looked up on the local SearXNG
+# (127.0.0.1:8080, the searxng.service user unit) and the top snippets are
+# handed to the model as background context -- so "How it works" / "Why it
+# matters" / "Watch out" are grounded rather than guessed. Best-effort: if
+# SearXNG is down the reframe still runs, just ungrounded.
+#   OMARCHY_REFRAME_SEARCH=0   -> skip the lookup
+#   OMARCHY_REFRAME_AGENT=1    -> route the whole thing through llm-agent
+#                                instead (multi-search tool-calling loop, needs
+#                                a tool-capable model, slower) for dense text
 #
 # Press again while it's talking to stop (same toggle behaviour as
 # omarchy-narrate). Synthesis/playback/queueing are handled by piper-tts, so
 # this won't talk over another TTS job.
 set -uo pipefail
 
-# Default: an abliterated (uncensored) 4B instruct model -- 1 Featherless
-# concurrency unit, no <think> blocks, a size-analog to the old local qwen2.5:3b.
-MODEL="${OMARCHY_REFRAME_MODEL:-huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated}"
+# Model fallback chain, tried in order until one returns a non-empty completion.
+# The abliterated (uncensored) models are low-traffic on Featherless and cold-503
+# ("temporarily at capacity") when nothing keeps them warm -- llm-blurb now
+# retries that on the SAME model (a few seconds, usually enough), and only if it
+# still fails do we switch. Keep the chain SHORT: the plan caps model switching
+# at 4/min, so a long chain hits its own rate limit. The chain ends on a
+# Feather-owned Qwen (always warm, non-thinking) so reframe never hard-fails.
+#   OMARCHY_REFRAME_MODEL   -> pin to exactly one model (no fallback)
+#   OMARCHY_REFRAME_MODELS  -> replace the chain (space- or comma-separated)
+# Chain members must be non-thinking instruct models: a reasoning model returns
+# its answer in a separate field and llm-blurb sees an empty completion.
+if [[ -n "${OMARCHY_REFRAME_MODEL:-}" ]]; then
+  MODELS=("$OMARCHY_REFRAME_MODEL")
+elif [[ -n "${OMARCHY_REFRAME_MODELS:-}" ]]; then
+  IFS=$' ,' read -r -a MODELS <<<"$OMARCHY_REFRAME_MODELS"
+else
+  MODELS=(
+    "huihui-ai/Huihui-Qwen3-8B-abliterated-v2"
+    "huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated"
+    "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  )
+fi
 VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
 LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blurb")"
+LLM_AGENT="$(command -v llm-agent 2>/dev/null || echo "$HOME/.local/bin/llm-agent")"
+SEARCH="${OMARCHY_REFRAME_SEARCH:-1}"
+AGENT="${OMARCHY_REFRAME_AGENT:-0}"
+SEARXNG_URL="${OMARCHY_REFRAME_SEARXNG_URL:-${SEARXNG_URL:-http://127.0.0.1:8080}}"
 TAG=reframe
 MAX_INPUT_CHARS=4000
 
@@ -37,9 +69,28 @@ TEXT="${TEXT:0:MAX_INPUT_CHARS}"
 
 [[ -x "$LLM_BLURB" ]] || { note "llm-blurb helper not found."; exit 1; }
 
+# --- best-effort grounding: look the topic up on the local SearXNG ----------
+# The passage's first ~240 chars are usually enough to name the subject. Keep
+# the top few titles+snippets; on any failure CONTEXT stays empty and we carry
+# on ungrounded. Skipped entirely when routing through llm-agent (it searches
+# on its own) or when OMARCHY_REFRAME_SEARCH=0.
+CONTEXT=""
+if [[ "$SEARCH" != 0 && "$AGENT" == 0 ]] && command -v jq >/dev/null; then
+  note "Searching…" "Looking up the topic, then explaining."
+  q="$(printf '%s' "${TEXT:0:240}" | jq -sRr @uri 2>/dev/null)"
+  if [[ -n "$q" ]]; then
+    sj="$(curl -sS --max-time 8 "$SEARXNG_URL/search?q=$q&format=json" 2>/dev/null)" || sj=""
+    CONTEXT="$(printf '%s' "$sj" | jq -r '
+        [ (.answers // [])[] | "- " + (if type=="object" then (.answer // .content // tostring) else tostring end) ]
+        + [ (.results // [])[:4][] | "- \(.title // "?"): \((.content // "") | gsub("\\s+"; " ") | .[:240])" ]
+        | map(select(. != "- ")) | join("\n")' 2>/dev/null)"
+  fi
+fi
 note "Thinking…" "Explaining + reframing the selection."
 
 SYSTEM='You explain things to a curious 5-year-old, but you still keep the real facts.
+
+You may be given "Background" -- a few web-search snippets about the topic. Use them only to keep names, numbers and mechanisms accurate. Do NOT summarise the Background; summarise the Passage. If the Background is irrelevant, ignore it.
 
 Read the passage. Reply with 10 short bullet lines, each starting "- ", nothing else (no title, no intro, no closing line, under 170 words total):
 - Bullets 1 to 3: what the passage is saying, in tiny everyday words and short sentences. Keep the real names and things from the passage (say "the bank", "the rent", "the team"), do not turn it into a made-up story. If a word is hard, say what it means simply.
@@ -50,13 +101,54 @@ Read the passage. Reply with 10 short bullet lines, each starting "- ", nothing 
 - Bullet 8: start with "Like something you know: " then link it to a familiar everyday thing, idea, or experience.
 - Bullets 9 and 10: start each with "Another way to see it: " and then, on the same line, give one different simple way to look at the very same thing (a different person''s point of view, a possible upside, or a possible downside).'
 
-# llm-blurb prints the completion on stdout and, on any failure, one line on
-# stderr + a non-zero exit. Merge streams so the failure reason is shown.
-if ! OUT="$("$LLM_BLURB" --model "$MODEL" --system "$SYSTEM" \
-             --max-tokens 320 --temp 0.4 --timeout 90 \
-             "Passage:"$'\n'"$TEXT" 2>&1)"; then
-  note "Featherless request failed." "$(printf '%s' "$OUT" | tail -c 200)"
-  exit 1
+# Grounded user message: Background block first (if any), then the passage.
+if [[ -n "${CONTEXT// }" ]]; then
+  USERMSG="Background:"$'\n'"$CONTEXT"$'\n\n'"Passage:"$'\n'"$TEXT"
+else
+  USERMSG="Passage:"$'\n'"$TEXT"
+fi
+
+# Both helpers print the completion on stdout and, on any failure, one line on
+# stderr + a non-zero exit. Merge streams so the failure reason is shown. Walk
+# the model chain until one answers; keep the last error for the toast.
+OUT=""
+ERR=""
+if [[ "$AGENT" != 0 ]]; then
+  [[ -x "$LLM_AGENT" ]] || { note "llm-agent helper not found."; exit 1; }
+  if [[ -n "${OMARCHY_REFRAME_AGENT_MODEL:-}" ]]; then
+    AGENT_MODELS=("$OMARCHY_REFRAME_AGENT_MODEL")
+  else
+    AGENT_MODELS=("moonshotai/Kimi-K2-Instruct" "Qwen/Qwen3-32B")
+  fi
+  for m in "${AGENT_MODELS[@]}"; do
+    if OUT="$("$LLM_AGENT" --model "$m" --system "$SYSTEM" \
+               --max-tokens 900 --temp 0.4 --searxng-url "$SEARXNG_URL" \
+               "Passage:"$'\n'"$TEXT" 2>&1)"; then
+      ERR=""; break
+    fi
+    ERR="$m: $(printf '%s' "$OUT" | tail -c 160)"; OUT=""
+  done
+  [[ -n "${OUT// }" ]] || { note "Reframe (agent) failed." "${ERR:-all models unavailable}"; exit 1; }
+else
+  # Walk the chain. Accept the first answer that looks complete (>= 6 bullet
+  # lines -- Featherless sometimes ends a stream early under load); otherwise
+  # keep the first non-empty answer as a fallback and try the next model.
+  BEST=""
+  for m in "${MODELS[@]}"; do
+    [[ -n "$m" ]] || continue
+    if OUT="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
+               --max-tokens 500 --temp 0.4 --timeout 90 "$USERMSG" 2>&1)"; then
+      [[ -n "${BEST// }" ]] || BEST="$OUT"
+      nb="$(printf '%s\n' "$OUT" | grep -c '^[[:space:]]*[-*•]')"
+      (( nb >= 6 )) && { ERR=""; break; }
+      ERR="$m: short answer ($nb bullets)"
+    else
+      ERR="$m: $(printf '%s' "$OUT" | tail -c 160)"
+    fi
+    OUT=""
+  done
+  [[ -n "${OUT// }" ]] || OUT="$BEST"
+  [[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; exit 1; }
 fi
 
 # Drop any <think>…</think> reasoning block a thinking-variant override might emit.
