@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.cliamp",
+  "name": "cliamp",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Transport + spectrum widget for the cliamp terminal music player. Play/pause/prev/next straight from the bar, a live 10-band wave synthesiser fed by `cliamp visstream`, and a panel for seek / volume / shuffle / repeat / visualizer mode. Hosted on the bottom bar.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "cliamp",
+    "description": "cliamp transport controls + spectrum visualiser",
+    "category": "Media",
+    "allowMultiple": false
+  }
+}

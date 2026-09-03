@@ -25,30 +25,6 @@
         },
         {
           "id": "omarchy.workspaces"
-        },
-        {
-          "id": "alteringux.timers"
-        },
-        {
-          "id": "alteringux.pomodoro"
-        },
-        {
-          "id": "alteringux.countdown"
-        },
-        {
-          "id": "alteringux.grip"
-        },
-        {
-          "id": "alteringux.stopwatch"
-        },
-        {
-          "id": "alteringux.stocks"
-        },
-        {
-          "id": "alteringux.score"
-        },
-        {
-          "id": "alteringux.conductor"
         }
       ],
       "right": [
@@ -57,9 +33,6 @@
         },
         {
           "id": "omarchy.tailscale"
-        },
-        {
-          "id": "alteringux.flow"
         },
         {
           "id": "omarchy.agents"
@@ -88,7 +61,7 @@
       ]
     },
     "position": "top",
-    "transparent": true
+    "transparent": false
   },
   "idle": {
     "lock": 300,
@@ -103,6 +76,9 @@
     },
     {
       "id": "alteringux.newsbar"
+    },
+    {
+      "id": "alteringux.bottombar"
     },
     {
       "id": "alteringux.notifications"
