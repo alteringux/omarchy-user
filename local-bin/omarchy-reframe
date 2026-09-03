@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 # omarchy-reframe -- SUPER+SHIFT+ALT+N
 #
-# Grab the highlighted text (primary selection, else clipboard), send it to a
-# local Ollama model for a short bulleted explanation: what it says, the main
-# idea, how it works, why it matters, its limits, something it is like, plus
-# "seen differently" reframes, then speak the whole thing aloud with Piper TTS.
-# Fully offline; nothing leaves the machine.
+# Grab the highlighted text (primary selection, else clipboard), send it to an
+# uncensored Featherless model (via llm-blurb) for a short bulleted explanation:
+# what it says, the main idea, how it works, why it matters, its limits,
+# something it is like, plus "seen differently" reframes, then speak the whole
+# thing aloud with Piper TTS. The selection leaves the machine (Featherless);
+# only the TTS is local.
 #
 # Press again while it's talking to stop (same toggle behaviour as
 # omarchy-narrate). Synthesis/playback/queueing are handled by piper-tts, so
 # this won't talk over another TTS job.
 set -uo pipefail
 
-MODEL="${OMARCHY_REFRAME_MODEL:-qwen2.5:3b}"
-OLLAMA_URL="${OLLAMA_HOST:-http://localhost:11434}"
+# Default: an abliterated (uncensored) 4B instruct model -- 1 Featherless
+# concurrency unit, no <think> blocks, a size-analog to the old local qwen2.5:3b.
+MODEL="${OMARCHY_REFRAME_MODEL:-huihui-ai/Huihui-Qwen3-4B-Instruct-2507-abliterated}"
 VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blurb")"
 TAG=reframe
 MAX_INPUT_CHARS=4000
 
@@ -32,11 +35,7 @@ if [[ -z "${TEXT// }" ]]; then
 fi
 TEXT="${TEXT:0:MAX_INPUT_CHARS}"
 
-command -v curl >/dev/null || { note "curl not found."; exit 1; }
-if ! curl -sf --max-time 2 "$OLLAMA_URL/api/tags" >/dev/null; then
-  note "Ollama isn't running ($OLLAMA_URL)."
-  exit 1
-fi
+[[ -x "$LLM_BLURB" ]] || { note "llm-blurb helper not found."; exit 1; }
 
 note "Thinking…" "Explaining + reframing the selection."
 
@@ -51,27 +50,20 @@ Read the passage. Reply with 10 short bullet lines, each starting "- ", nothing 
 - Bullet 8: start with "Like something you know: " then link it to a familiar everyday thing, idea, or experience.
 - Bullets 9 and 10: start each with "Another way to see it: " and then, on the same line, give one different simple way to look at the very same thing (a different person''s point of view, a possible upside, or a possible downside).'
 
-REQ="$(jq -n \
-  --arg model "$MODEL" \
-  --arg system "$SYSTEM" \
-  --arg prompt "Passage:"$'\n'"$TEXT" \
-  '{
-     model: $model,
-     system: $system,
-     prompt: $prompt,
-     stream: false,
-     keep_alive: "30m",
-     options: { temperature: 0.4, num_predict: 250, top_p: 0.9 }
-   }')"
-
-RESP="$(curl -sS --max-time 180 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)" || {
-  note "Ollama request failed."
+# llm-blurb prints the completion on stdout and, on any failure, one line on
+# stderr + a non-zero exit. Merge streams so the failure reason is shown.
+if ! OUT="$("$LLM_BLURB" --model "$MODEL" --system "$SYSTEM" \
+             --max-tokens 320 --temp 0.4 --timeout 90 \
+             "Passage:"$'\n'"$TEXT" 2>&1)"; then
+  note "Featherless request failed." "$(printf '%s' "$OUT" | tail -c 200)"
   exit 1
-}
+fi
 
-OUT="$(printf '%s' "$RESP" | jq -r '.response // empty' 2>/dev/null)"
+# Drop any <think>…</think> reasoning block a thinking-variant override might emit.
+OUT="$(printf '%s' "$OUT" | perl -0pe 's{<think>.*?</think>}{}gs' 2>/dev/null || printf '%s' "$OUT")"
+
 if [[ -z "${OUT// }" ]]; then
-  note "Model returned nothing." "$(printf '%s' "$RESP" | jq -r '.error // empty' 2>/dev/null | head -c 200)"
+  note "Model returned nothing."
   exit 1
 fi
 OUT="$(printf '%s' "$OUT" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d')"
