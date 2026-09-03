@@ -39,7 +39,11 @@ fi
 
 note "Thinking…" "Summarising + reframing the selection."
 
-SYSTEM='You compress a passage for someone who wants to also see it from other angles. Reply as a plain-text bullet list, "- " prefix, no headings, no markdown bold, no preamble. First 2 to 3 bullets: the gist, each a few words, telegraphic. Then 1 to 2 bullets that each start with "Seen differently:" and offer a genuinely different framing, stakeholder view, or counter-reading of the same passage. Keep the whole reply under 60 words. No closing remarks.'
+SYSTEM='You explain things to a curious 5-year-old, but you still keep the real facts.
+
+Read the passage. Reply with 5 short bullet lines, each starting "- ", nothing else (no title, no intro, no closing line, under 80 words total):
+- Bullets 1 to 3: what the passage is saying, in tiny everyday words and short sentences. Keep the real names and things from the passage (say "the bank", "the rent", "the team"), do not turn it into a made-up story. If a word is hard, say what it means simply.
+- Bullets 4 and 5: start each with "Another way to see it: " and then, on the same line, give one different simple way to look at the very same thing (a different person''s point of view, a possible upside, or a possible downside).'
 
 REQ="$(jq -n \
   --arg model "$MODEL" \
@@ -68,6 +72,10 @@ OUT="$(printf '%s' "$OUT" | sed -e 's/[[:space:]]*$//' -e '/^[[:space:]]*$/d')"
 
 # Show the bulleted result; speak a de-bulleted version so Piper doesn't
 # stumble over the dashes (each bullet becomes its own sentence).
+if [[ -n "${OMARCHY_REFRAME_DRY_RUN:-}" ]]; then
+  printf '%s\n' "$OUT"
+  exit 0
+fi
 note "Reframe" "$OUT"
 SPOKEN="$(printf '%s\n' "$OUT" \
   | sed -E 's/^[[:space:]]*[-*•]+[[:space:]]*//; s/[[:space:]]+$//' \

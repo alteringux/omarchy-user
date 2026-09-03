@@ -54,7 +54,7 @@ SKIP_APPS = {
     a.strip().lower()
     for a in os.environ.get(
         "OMARCHY_SPEAK_SKIP_APPS",
-        "Daily briefing,Weekly recap,Reddit stories,ASX briefing,TTS guard,Window hide,Voice assistant",
+        "Daily briefing,Weekly recap,Reddit stories,ASX briefing,TTS guard,Window hide,Voice assistant,Reframe",
     ).split(",")
     if a.strip()
 }
