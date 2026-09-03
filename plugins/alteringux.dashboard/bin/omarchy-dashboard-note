@@ -16,7 +16,7 @@ set -uo pipefail
 OMARCHY_PLUGIN_ID="alteringux.dashboard"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 # shellcheck source=dashboard-common.sh
 source "$SCRIPT_DIR/dashboard-common.sh"
 

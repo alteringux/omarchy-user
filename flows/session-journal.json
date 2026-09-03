@@ -1,0 +1,50 @@
+{
+  "id": "session-journal",
+  "title": "Session journal — a short entry from the focus session's numbers",
+  "nodes": [
+    {
+      "id": "conductor",
+      "type": "tool",
+      "cmd": "omarchy-conductor status",
+      "ui": { "x": 40, "y": 40 }
+    },
+    {
+      "id": "pomo",
+      "type": "tool",
+      "cmd": "omarchy-pomodoro status",
+      "ui": { "x": 40, "y": 160 }
+    },
+    {
+      "id": "score",
+      "type": "tool",
+      "cmd": "omarchy-score status",
+      "ui": { "x": 40, "y": 280 }
+    },
+    {
+      "id": "journal",
+      "type": "prompt",
+      "in": ["conductor", "pomo", "score"],
+      "timeoutSec": 90,
+      "system": "You write a terse first-person work-session journal entry: 2-4 sentences, plain past tense, no preamble, no headings, no bullet points. Mention what the session was about, whether the pomodoro block(s) completed, the win tally, and one honest note on how it went. If a number is 0 or missing, don't invent a story around it.",
+      "prompt": "Focus session just ended. Raw state:\n\nCONDUCTOR: {{conductor.stdout}}\n\nPOMODORO: {{pomo.stdout}}\n\nSCORE (wins this session): {{score.stdout}}\n\nWrite the journal entry.",
+      "ui": { "x": 320, "y": 160 }
+    },
+    {
+      "id": "save",
+      "type": "tool",
+      "in": ["journal"],
+      "cmd": "{ printf '\\n### %s\\n' \"$(date '+%Y-%m-%d %H:%M')\"; cat; printf '\\n'; } >> ~/Documents/focus-journal.md && echo saved",
+      "stdin": "{{journal.text}}",
+      "ui": { "x": 600, "y": 160 }
+    },
+    {
+      "id": "out",
+      "type": "view",
+      "shape": "markdown",
+      "in": ["journal", "save"],
+      "template": "### Session journal\n\n{{journal.text}}\n\n_(appended to ~/Documents/focus-journal.md — {{save.stdout}})_",
+      "meta": { "title": "Session journal" },
+      "ui": { "x": 880, "y": 160 }
+    }
+  ]
+}
