@@ -7,12 +7,6 @@
           "id": "omarchy.indicators"
         },
         {
-          "id": "omarchy.clock",
-          "format": "dddd HH:mm",
-          "formatAlt": "d MMMM 'W'ww yyyy",
-          "verticalFormat": "HH\n—\nmm"
-        },
-        {
           "id": "alteringux.dashboard"
         },
         {
@@ -49,11 +43,17 @@
         },
         {
           "id": "alteringux.score"
+        },
+        {
+          "id": "alteringux.conductor"
         }
       ],
       "right": [
         {
           "id": "omarchy.tray"
+        },
+        {
+          "id": "omarchy.tailscale"
         },
         {
           "id": "alteringux.flow"
@@ -77,10 +77,10 @@
           "id": "omarchy.audio"
         },
         {
-          "id": "omarchy.monitor"
+          "id": "omarchy.power"
         },
         {
-          "id": "omarchy.power"
+          "id": "omarchy.monitor"
         }
       ]
     },
@@ -103,13 +103,18 @@
     },
     {
       "id": "alteringux.notifications"
+    },
+    {
+      "id": "alteringux.reminders"
     }
   ],
   "version": 1,
   "disabledPlugins": [
-    "omarchy.notifications"
+    "omarchy.notifications",
+    "omarchy.reminders"
   ],
   "cloneSourceRestores": [
-    "alteringux.notifications"
+    "alteringux.notifications",
+    "alteringux.reminders"
   ]
 }
