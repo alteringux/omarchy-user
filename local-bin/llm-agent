@@ -20,6 +20,12 @@ Usage:
 
 Options:
     --json               ask for one JSON object back (final answer only)
+    --json-full          print a JSON envelope: {text, steps[], citations[],
+                         iters, model} -- the prose answer plus the tool trace.
+                         Leaves `text` as prose (unlike --json). Used by the
+                         Omarchy Flows `agent` node.
+    --rag-store NAME     also expose a `rag_search` tool over this local vector
+                         store (see `flow-rag`); repeatable. Off by default.
     --system TEXT        system message (default: a terse research operator)
     --model NAME         Featherless model id (default below; must be a
                          tool-calling-capable family -- Qwen 3 or Kimi-K2)
@@ -39,6 +45,11 @@ Environment:
                          ~/.config/opencode/opencode.json  (same as llm-blurb).
     LLM_AGENT_MODEL      overrides the default model id.
     SEARXNG_URL          overrides the default SearXNG base URL.
+    OLLAMA_URL / LLM_AGENT_OLLAMA_MODEL
+                         local fallback endpoint + model, used automatically when
+                         Featherless is unreachable or rate-limited. Disable with
+                         --no-fallback or LLM_AGENT_FALLBACK=0. Search still needs
+                         internet; offline, also pass --no-search.
 
 Exit codes: 0 ok | 2 bad args | 3 no key | 4 transport failure
             5 empty/no final answer | 6 rate limited | 7 other HTTP error
@@ -48,6 +59,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -63,6 +76,14 @@ FEATHERLESS_URL = "https://api.featherless.ai/v1/chat/completions"
 DEFAULT_MODEL = os.environ.get("LLM_AGENT_MODEL", "moonshotai/Kimi-K2-Instruct")
 DEFAULT_SEARXNG = os.environ.get("SEARXNG_URL", "http://127.0.0.1:8080")
 
+# Featherless is primary. When a call fails outright (transport error / offline,
+# or the concurrency cap), we switch -- for this call and every one after it in
+# the run -- to a local Ollama over its OpenAI-compatible endpoint. The tool loop
+# is unchanged; only the completion backend moves. Note web_search still needs
+# upstream internet, so a genuinely offline run wants --no-search too.
+DEFAULT_OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+DEFAULT_OLLAMA_MODEL = os.environ.get("LLM_AGENT_OLLAMA_MODEL", "qwen2.5:3b")
+
 # Featherless concurrency is bursty (feather_pro_plus = 4 units); a 429 usually
 # clears in seconds. Same backoff ladder as llm-blurb.
 RETRY_BACKOFF = (0, 3, 8, 15)
@@ -70,6 +91,18 @@ RETRY_BACKOFF = (0, 3, 8, 15)
 
 def eprint(*a):
     print(*a, file=sys.stderr, flush=True)
+
+
+def emit_final(content: str, args, steps: list, citations: list, iters: int) -> None:
+    """Print the final answer -- prose, or a JSON envelope under --json-full."""
+    if getattr(args, "want_json_full", False):
+        print(json.dumps(
+            {"text": content, "steps": steps, "citations": citations, "iters": iters,
+             "model": getattr(args, "active_model", args.model)},
+            ensure_ascii=False,
+        ))
+    else:
+        print(content)
 
 
 def load_key() -> str:
@@ -131,6 +164,64 @@ TOOLS = [
         },
     }
 ]
+
+
+def rag_tool(stores: list) -> dict:
+    return {
+        "type": "function",
+        "function": {
+            "name": "rag_search",
+            "description": (
+                "Search the user's own indexed document stores (notes, changelogs, "
+                "docs) by meaning and get back the most relevant passages with their "
+                "source location. Use this for questions about the user's material "
+                "rather than the open web."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store": {
+                        "type": "string",
+                        "enum": list(stores),
+                        "description": "Which store to search." + (f" Default: {stores[0]}." if stores else ""),
+                    },
+                    "query": {"type": "string", "description": "What to look for, in natural language."},
+                },
+                "required": ["query"],
+            },
+        },
+    }
+
+
+def rag_search(store: str, query: str, n: int, timeout: float) -> dict:
+    exe = "flow-rag"
+    if not shutil.which(exe):
+        fallback = os.path.expanduser("~/Work/bin/flow-rag")
+        if os.path.exists(fallback):
+            exe = fallback
+        else:
+            return {"error": "flow-rag not on PATH (add ~/Work/bin, or run flow-rag once)"}
+    try:
+        p = subprocess.run(
+            [exe, "query", store, query, "-k", str(n), "--json"],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return {"error": f"flow-rag failed: {e}"}
+    if p.returncode != 0:
+        return {"error": (p.stderr or f"flow-rag exit {p.returncode}").strip()[:300]}
+    try:
+        data = json.loads(p.stdout)
+    except ValueError:
+        return {"error": "flow-rag: unparseable output"}
+    return {
+        "store": store,
+        "query": query,
+        "passages": [
+            {"source": h.get("source"), "score": round(h.get("score", 0), 3), "text": (h.get("text") or "")[:800]}
+            for h in data.get("hits", [])
+        ],
+    }
 
 
 def searxng_search(query: str, base_url: str, n: int, timeout: float, category: str = "general") -> dict:
@@ -215,15 +306,60 @@ def call_featherless(payload: dict, key: str, timeout: float):
                 last_err = (6, f"rate limited (concurrency cap): {msg}")
                 continue
             return e.code, {"_error": msg}
-        except (urllib.error.URLError, TimeoutError) as e:
+        except TimeoutError as e:
             last_err = (4, f"transport failure: {e}")
             continue
+        except urllib.error.URLError as e:
+            # Connection refused / DNS failure / no route => offline. Retrying
+            # the backoff ladder just delays the fallback; bail immediately.
+            return (4, f"transport failure: {e}")
     return last_err or (4, "transport failure")
+
+
+def call_ollama(payload: dict, base_url: str, timeout: float):
+    """Same (code, body) contract as call_featherless, against Ollama's
+    OpenAI-compatible /v1/chat/completions (tools included)."""
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return 200, json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            msg = json.loads(raw).get("error", {})
+            msg = msg.get("message") if isinstance(msg, dict) else msg
+        except ValueError:
+            msg = raw[:200]
+        return e.code, {"_error": f"Ollama: {msg}"}
+    except (urllib.error.URLError, TimeoutError, ValueError) as e:
+        return 4, f"Ollama unreachable at {base_url}: {e}"
+
+
+def call_model(payload: dict, key: str, args, state: dict):
+    """Featherless first; on any non-200 (unless --no-fallback) switch to local
+    Ollama and stay there for the rest of the run. `state` holds the choice."""
+    if state["backend"] == "featherless":
+        code, body = call_featherless({**payload, "model": args.model}, key, args.timeout)
+        if code == 200 or args.no_fallback:
+            return code, body
+        eprint(f"llm-agent: Featherless failed (code {code}) -- falling back to Ollama ({args.ollama_model})")
+        state["backend"] = "ollama"
+        args.active_model = args.ollama_model
+    return call_ollama({**payload, "model": args.ollama_model}, args.ollama_url, args.timeout)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--json", action="store_true", dest="want_json")
+    ap.add_argument("--json-full", action="store_true", dest="want_json_full")
+    ap.add_argument("--rag-store", action="append", dest="rag_store", default=[], metavar="NAME")
     ap.add_argument("--system", default="")
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--max-tokens", type=int, default=1500)
@@ -231,6 +367,9 @@ def main() -> int:
     ap.add_argument("--max-iters", type=int, default=6)
     ap.add_argument("--results", type=int, default=5)
     ap.add_argument("--searxng-url", default=DEFAULT_SEARXNG)
+    ap.add_argument("--ollama-url", default=DEFAULT_OLLAMA_URL)
+    ap.add_argument("--ollama-model", default=DEFAULT_OLLAMA_MODEL)
+    ap.add_argument("--no-fallback", action="store_true")
     ap.add_argument("--timeout", type=float, default=60.0)
     ap.add_argument("--no-search", action="store_true")
     ap.add_argument("--verbose", action="store_true")
@@ -242,6 +381,11 @@ def main() -> int:
         print(__doc__)
         return 0
 
+    if os.environ.get("LLM_AGENT_FALLBACK", "1") == "0":
+        args.no_fallback = True
+    args.active_model = args.model
+    backend_state = {"backend": "featherless"}
+
     prompt = " ".join(args.prompt).strip()
     if not prompt and not sys.stdin.isatty():
         prompt = sys.stdin.read().strip()
@@ -251,8 +395,12 @@ def main() -> int:
 
     key = load_key()
     if not key:
-        eprint("llm-agent: no Featherless API key (env FEATHERLESS_API_KEY or ~/.config/featherless/key)")
-        return 3
+        if args.no_fallback:
+            eprint("llm-agent: no Featherless API key (env FEATHERLESS_API_KEY or ~/.config/featherless/key)")
+            return 3
+        eprint(f"llm-agent: no Featherless API key -- running on Ollama ({args.ollama_model})")
+        backend_state["backend"] = "ollama"
+        args.active_model = args.ollama_model
 
     temp = args.temp
     if temp is None:
@@ -274,8 +422,18 @@ def main() -> int:
         {"role": "system", "content": system},
         {"role": "user", "content": prompt},
     ]
-    tools = None if args.no_search else TOOLS
+    tools = []
+    if not args.no_search:
+        tools.append(TOOLS[0])
+    if args.rag_store:
+        tools.append(rag_tool(args.rag_store))
+    tools = tools or None
 
+    steps: list = []
+    citations: list = []
+    seen: set = set()
+
+    it = 0
     for it in range(1, args.max_iters + 1):
         payload = {
             "model": args.model,
@@ -287,7 +445,7 @@ def main() -> int:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
 
-        code, body = call_featherless(payload, key, args.timeout)
+        code, body = call_model(payload, key, args, backend_state)
         if code != 200:
             if code == 6:
                 eprint(f"llm-agent: {body}")
@@ -295,7 +453,8 @@ def main() -> int:
             if code == 4:
                 eprint(f"llm-agent: {body}")
                 return 4
-            eprint(f"llm-agent: Featherless HTTP {code} -- {body.get('_error', body)}")
+            detail = body.get("_error", body) if isinstance(body, dict) else body
+            eprint(f"llm-agent: HTTP {code} -- {detail}")
             return 7
 
         try:
@@ -317,7 +476,7 @@ def main() -> int:
             if not content:
                 eprint("llm-agent: model returned an empty final answer")
                 return 5
-            print(content)
+            emit_final(content, args, steps, citations, it)
             return 0
 
         if args.verbose:
@@ -348,8 +507,35 @@ def main() -> int:
                 )
                 if args.verbose and "results" in result:
                     eprint(f"    -> {len(result['results'])} results")
+            elif fn == "rag_search":
+                q = str(call_args.get("query", "")).strip()
+                st = str(call_args.get("store") or (args.rag_store[0] if args.rag_store else "")).strip()
+                if args.verbose:
+                    eprint(f"    rag_search({st}): {q!r}")
+                if not q:
+                    result = {"error": "empty query"}
+                elif not st:
+                    result = {"error": "no store given and no --rag-store default"}
+                else:
+                    result = rag_search(st, q, args.results, min(args.timeout, 30.0))
+                if args.verbose and "passages" in result:
+                    eprint(f"    -> {len(result['passages'])} passages")
             else:
                 result = {"error": f"unknown tool {fn!r}"}
+
+            steps.append({"iter": it, "tool": fn, "args": call_args, "ok": "error" not in (result or {})})
+            if fn == "web_search":
+                for rr in result.get("results", []) or []:
+                    u = rr.get("url")
+                    if u and u not in seen:
+                        seen.add(u)
+                        citations.append({"title": rr.get("title"), "url": u})
+            elif fn == "rag_search":
+                for pp in result.get("passages", []) or []:
+                    src = pp.get("source")
+                    if src and src not in seen:
+                        seen.add(src)
+                        citations.append({"source": src})
 
             messages.append(
                 {
@@ -364,7 +550,7 @@ def main() -> int:
     messages.append(
         {"role": "user", "content": "Stop searching now and answer with what you have."}
     )
-    code, body = call_featherless(
+    code, body = call_model(
         {
             "model": args.model,
             "messages": messages,
@@ -372,7 +558,8 @@ def main() -> int:
             "max_tokens": args.max_tokens,
         },
         key,
-        args.timeout,
+        args,
+        backend_state,
     )
     if code == 200:
         try:
@@ -380,7 +567,7 @@ def main() -> int:
         except (KeyError, IndexError, TypeError):
             content = ""
         if content:
-            print(content)
+            emit_final(content, args, steps, citations, args.max_iters)
             return 0
     eprint(f"llm-agent: no final answer after {args.max_iters} iterations")
     return 5

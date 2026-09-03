@@ -30,9 +30,14 @@
 #                         then to .provider.featherless.options.apiKey in
 #                         ~/.config/opencode/opencode.json.
 #   LLM_BLURB_MODEL       default model id.
+#   OLLAMA_URL            local fallback endpoint (default http://localhost:11434),
+#   LLM_BLURB_OLLAMA_MODEL  and model (default qwen2.5:3b). Used automatically when
+#                         Featherless is unreachable / capped / keyless, so blurbs
+#                         still generate offline. Disable with LLM_BLURB_FALLBACK=0.
 #
 # Exit codes: 0 ok | 2 bad args | 3 no key | 4 curl failed | 5 empty reply
 #             6 rate limited (concurrency cap) | 7 other HTTP error
+#   (a successful Ollama fallback exits 0 with a one-line note on stderr)
 set -uo pipefail
 
 API_URL="https://api.featherless.ai/v1/chat/completions"
@@ -71,7 +76,8 @@ key="${FEATHERLESS_API_KEY:-}"
 [[ -z "$key" && -r "$HOME/.config/opencode/opencode.json" ]] && \
   key="$(jq -r '.provider.featherless.options.apiKey // empty' "$HOME/.config/opencode/opencode.json" 2>/dev/null)"
 key="${key//[$'\r\n\t ']/}"
-[[ -z "$key" ]] && { echo "llm-blurb: no Featherless API key" >&2; exit 3; }
+no_key=0
+[[ -z "$key" ]] && no_key=1
 
 if [[ -z "$temp" ]]; then temp=0.7; ((want_json)) && temp=0.2; fi
 if [[ -z "$system" ]]; then
@@ -93,13 +99,53 @@ req="$(jq -n \
    }
    + (if $json == 1 then {response_format: {type: "json_object"}} else {} end)')"
 
+# --- Ollama local fallback -------------------------------------------------
+# Featherless is primary. When it can't be reached (offline), is rate-limited,
+# or there's no key at all, retry the same request against a local Ollama over
+# its OpenAI-compatible endpoint so the blurb still generates.
+ollama_url="${OLLAMA_URL:-http://localhost:11434}"
+ollama_model="${LLM_BLURB_OLLAMA_MODEL:-qwen2.5:3b}"
+fallback_disabled=0
+[[ "${LLM_BLURB_FALLBACK:-1}" == 0 ]] && fallback_disabled=1
+
+fallback_ollama() {
+  # $1 = short reason, for the stderr note. On success: prints the completion
+  # and exits 0. Otherwise returns non-zero so the caller runs its own hard exit.
+  local reason="$1" oreq oresp ocode obody ocontent
+  ((fallback_disabled)) && return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  oreq="$(printf '%s' "$req" | jq --arg m "$ollama_model" '.model = $m')" || return 1
+  oresp="$(curl -sS --max-time "$timeout" -w $'\n%{http_code}' \
+        "$ollama_url/v1/chat/completions" \
+        -H 'Content-Type: application/json' -d "$oreq" 2>/dev/null)" || return 1
+  ocode="${oresp##*$'\n'}"
+  obody="${oresp%$'\n'*}"
+  [[ "$ocode" == 200 ]] || return 1
+  ocontent="$(printf '%s' "$obody" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
+  [[ -n "${ocontent// }" ]] || return 1
+  printf '%s\n' "$ocontent"
+  echo "llm-blurb: Featherless $reason -- used Ollama ($ollama_model)" >&2
+  exit 0
+}
+
+if ((no_key)); then
+  fallback_ollama "has no API key"
+  echo "llm-blurb: no Featherless API key" >&2
+  exit 3
+fi
+
 for ((try = 0; try < retries; try++)); do
   ((try > 0)) && sleep "${backoff[try]:-15}"
   last=$((try == retries - 1))
 
-  if ! resp="$(curl -sS --max-time "$timeout" -w $'\n%{http_code}' "$API_URL" \
-        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d "$req")"; then
-    ((last)) && { echo "llm-blurb: curl failed" >&2; exit 4; }
+  resp="$(curl -sS --max-time "$timeout" -w $'\n%{http_code}' "$API_URL" \
+        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d "$req")"
+  curl_rc=$?
+  if ((curl_rc != 0)); then
+    # curl 6 (DNS) / 7 (connect refused) => offline: skip the retry ladder and
+    # go straight to the local fallback.
+    ((curl_rc == 6 || curl_rc == 7)) && fallback_ollama "unreachable (offline?)"
+    ((last)) && { fallback_ollama "curl failed"; echo "llm-blurb: curl failed" >&2; exit 4; }
     continue
   fi
 
@@ -113,17 +159,18 @@ for ((try = 0; try < retries; try++)); do
         printf '%s\n' "$content"
         exit 0
       fi
-      ((last)) && { echo "llm-blurb: empty completion" >&2; exit 5; } ;;
+      ((last)) && { fallback_ollama "returned empty"; echo "llm-blurb: empty completion" >&2; exit 5; } ;;
     429)
-      ((last)) && { echo "llm-blurb: rate limited (concurrency cap)" >&2; exit 6; } ;;
+      ((last)) && { fallback_ollama "rate limited"; echo "llm-blurb: rate limited (concurrency cap)" >&2; exit 6; } ;;
     500 | 502 | 503 | 504 | 529)
       # Transient: a cold/low-traffic model reports "temporarily at capacity"
       # (503) while it loads, or the gateway hiccups (502/504). Same retry
       # ladder as 429 -- it usually clears within a few seconds.
       msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
-      ((last)) && { echo "llm-blurb: HTTP $code (transient)${msg:+ -- $msg}" >&2; exit 7; } ;;
+      ((last)) && { fallback_ollama "HTTP $code"; echo "llm-blurb: HTTP $code (transient)${msg:+ -- $msg}" >&2; exit 7; } ;;
     *)
       msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
+      fallback_ollama "HTTP $code"
       echo "llm-blurb: HTTP $code${msg:+ -- $msg}" >&2
       exit 7 ;;
   esac
