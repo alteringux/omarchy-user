@@ -2,9 +2,10 @@
 # omarchy-reframe -- SUPER+SHIFT+ALT+N
 #
 # Grab the highlighted text (primary selection, else clipboard), send it to a
-# local Ollama model for a very short bulleted gist PLUS one or two "seen
-# differently" bullets that reframe it from another angle, then speak the whole
-# thing aloud with Piper TTS. Fully offline; nothing leaves the machine.
+# local Ollama model for a short bulleted explanation: what it says, the main
+# idea, how it works, why it matters, its limits, something it is like, plus
+# "seen differently" reframes, then speak the whole thing aloud with Piper TTS.
+# Fully offline; nothing leaves the machine.
 #
 # Press again while it's talking to stop (same toggle behaviour as
 # omarchy-narrate). Synthesis/playback/queueing are handled by piper-tts, so
@@ -16,7 +17,7 @@ OLLAMA_URL="${OLLAMA_HOST:-http://localhost:11434}"
 VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
 TAG=reframe
-MAX_INPUT_CHARS=6000
+MAX_INPUT_CHARS=4000
 
 note() { notify-send -a "Reframe" "$@" 2>/dev/null || true; }
 
@@ -37,13 +38,18 @@ if ! curl -sf --max-time 2 "$OLLAMA_URL/api/tags" >/dev/null; then
   exit 1
 fi
 
-note "Thinking…" "Summarising + reframing the selection."
+note "Thinking…" "Explaining + reframing the selection."
 
 SYSTEM='You explain things to a curious 5-year-old, but you still keep the real facts.
 
-Read the passage. Reply with 5 short bullet lines, each starting "- ", nothing else (no title, no intro, no closing line, under 80 words total):
+Read the passage. Reply with 10 short bullet lines, each starting "- ", nothing else (no title, no intro, no closing line, under 170 words total):
 - Bullets 1 to 3: what the passage is saying, in tiny everyday words and short sentences. Keep the real names and things from the passage (say "the bank", "the rent", "the team"), do not turn it into a made-up story. If a word is hard, say what it means simply.
-- Bullets 4 and 5: start each with "Another way to see it: " and then, on the same line, give one different simple way to look at the very same thing (a different person''s point of view, a possible upside, or a possible downside).'
+- Bullet 4: start with "The main idea: " then the core definition or central thesis, in one simple sentence.
+- Bullet 5: start with "How it works: " then the mechanism, steps, or causal chain behind it, in simple words.
+- Bullet 6: start with "Why it matters: " then its practical importance, real-world value, or broader implications.
+- Bullet 7: start with "Watch out: " then what must be true for it to work, and where it breaks down or stops being true.
+- Bullet 8: start with "Like something you know: " then link it to a familiar everyday thing, idea, or experience.
+- Bullets 9 and 10: start each with "Another way to see it: " and then, on the same line, give one different simple way to look at the very same thing (a different person''s point of view, a possible upside, or a possible downside).'
 
 REQ="$(jq -n \
   --arg model "$MODEL" \
@@ -55,10 +61,10 @@ REQ="$(jq -n \
      prompt: $prompt,
      stream: false,
      keep_alive: "30m",
-     options: { temperature: 0.4, num_predict: 120, top_p: 0.9 }
+     options: { temperature: 0.4, num_predict: 250, top_p: 0.9 }
    }')"
 
-RESP="$(curl -sS --max-time 90 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)" || {
+RESP="$(curl -sS --max-time 180 "$OLLAMA_URL/api/generate" -d "$REQ" 2>/dev/null)" || {
   note "Ollama request failed."
   exit 1
 }
