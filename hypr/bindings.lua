@@ -108,11 +108,18 @@ o.bind("SUPER + ALT + Q", "AI briefing notification", "/home/alteringux/.config/
 -- Speak an AI briefing of how the Australian share market is doing today:
 -- ASX 200 / All Ords / AUDUSD from Yahoo Finance (same keyless API as the
 -- alteringux.stocks plugin), then the day's top 10 gainers and top 10
--- losers each with a one-line reason (Anthropic API + web search).
+-- losers each with a one-line reason. Movers colour comes from a Featherless
+-- tool-calling loop (llm-agent) searching the local SearXNG, not Anthropic.
 -- Piper TTS; press again to stop. A re-press within 10 min replays.
 -- Lives on CTRL+ALT+L (pairs with the Stocks panel on SUPER+ALT+L); the
 -- old SUPER+ALT+F collided with Omarchy's default "Full width" action.
 o.bind("SUPER + CTRL + ALT + L", "Speak ASX market briefing", "omarchy-speak-asx")
+
+-- Open the local SearXNG metasearch (the searxng.service --user unit that
+-- llm-agent's web_search also uses) in the default browser. No args = home
+-- page, which is also where Zen offers "Add Search Engine" for the address
+-- bar. S = Search, same modifier family as the ASX briefing on L.
+o.bind("SUPER + CTRL + ALT + S", "Open SearXNG search", "omarchy-searxng")
 
 -- Speak the day's 10 most interesting Reddit stories (Piper TTS; press again
 -- to stop). Ranking self-tunes: subreddits you hear out float up, ones you

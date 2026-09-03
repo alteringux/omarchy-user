@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# omarchy-searxng -- open the local SearXNG metasearch (the searxng.service
+# --user unit) in the default browser.
+#
+#   omarchy-searxng              open the SearXNG home page
+#   omarchy-searxng QUERY...     open the results page for QUERY
+#
+# The home page is also where Zen / Firefox offers "Add Search Engine" in the
+# address-bar overflow, so this doubles as the on-ramp to wiring SearXNG in as
+# a real address-bar keyword. Bound to SUPER+CTRL+ALT+S.
+set -euo pipefail
+
+BASE="${SEARXNG_URL:-http://127.0.0.1:8080}"
+
+# Best-effort: bring the service up if it isn't answering yet.
+if ! curl -sf -o /dev/null --max-time 2 "$BASE/"; then
+  systemctl --user start searxng.service 2>/dev/null || true
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    curl -sf -o /dev/null --max-time 2 "$BASE/" && break
+    sleep 0.5
+  done
+fi
+
+if (($#)); then
+  q=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(" ".join(sys.argv[1:])))' "$@")
+  url="$BASE/search?q=$q"
+else
+  url="$BASE/"
+fi
+
+exec xdg-open "$url"

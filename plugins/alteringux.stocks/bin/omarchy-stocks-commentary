@@ -1,8 +1,14 @@
 #!/bin/bash
 # Self-improving step: for the tickers the user actually clicks on in the
-# panel (tracked by omarchy-stocks-engage), asks llm-blurb (Featherless) for
-# a short, neutral one-line take on a notable price move, and caches it so
-# the panel can show context beyond the raw percentage.
+# panel (tracked by omarchy-stocks-engage), asks the model for a short one-line
+# take on a notable price move and caches it so the panel can show context
+# beyond the raw percentage.
+#
+# Uses `llm-agent` (Featherless tool-calling loop -> local SearXNG) so the take
+# can name the actual catalyst — earnings, an upgrade, sector news — not just
+# "that's a big move". Falls back to `llm-blurb` (no web) if llm-agent isn't
+# there or errors. Disable the web path with COMMENTARY_WEB=0; pick the model
+# with STOCKS_COMMENTARY_MODEL.
 #
 # Rate-limited on two axes so this stays cheap and quiet:
 #   - only actually calls the model every REFRESH_EVERY invocations (this
@@ -23,6 +29,9 @@ OMARCHY_PLUGIN_ID="alteringux.stocks"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
 
 LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
+LLM_AGENT="$(command -v llm-agent || echo "$HOME/.local/bin/llm-agent")"
+COMMENTARY_WEB="${COMMENTARY_WEB:-1}"           # 1 = research the catalyst via llm-agent
+COMMENTARY_MODEL="${STOCKS_COMMENTARY_MODEL:-}" # empty = llm-agent's default
 
 STATE_DIR="$HOME/.local/state/omarchy"
 STATE_FILE="$STATE_DIR/stocks.json"
@@ -73,10 +82,27 @@ while IFS= read -r ticker; do
     [[ "$stale" != "1" ]] && continue
   fi
 
-  prompt="${ticker} moved ${change_pct}% today (now \$${price}). In one short, plain-text sentence (no markdown, no hedging disclaimers, no financial advice), give a neutral, informative take on what kind of move this is for a stock."
+  name=$(echo "$quote" | jq -r '.chart.result[0].meta.shortName // .chart.result[0].meta.longName // empty' 2>/dev/null)
+  exch=$(echo "$quote" | jq -r '.chart.result[0].meta.fullExchangeName // .chart.result[0].meta.exchangeName // empty' 2>/dev/null)
+  label="${name:-$ticker}${exch:+ ($exch)}"
+  dir=$(awk -v c="$change_pct" 'BEGIN{ print (c+0>0)?"up":"down" }')
 
-  text=$("$LLM_BLURB" --max-tokens 120 "$prompt" 2>/dev/null | tr -d '\r' | head -c 300)
-  [[ -z "$text" ]] && continue
+  text=""
+  if [[ "$COMMENTARY_WEB" == "1" && -x "$LLM_AGENT" ]]; then
+    web_prompt="${label}, ticker ${ticker%.*}, is ${dir} ${abs_change}% today at \$${price}. Search for what's driving it, then reply with ONE plain sentence naming the most likely catalyst — earnings or guidance, an analyst upgrade or downgrade, an M&A or capital-raise story, a product or contract announcement, a sector-wide move, or an index rebalance. If you find no news, say exactly: no clear news catalyst; moving with the sector. No markdown, no hedging disclaimers, no financial advice."
+    agent_args=(--max-iters 3 --results 4 --max-tokens 200)
+    [[ -n "$COMMENTARY_MODEL" ]] && agent_args+=(--model "$COMMENTARY_MODEL")
+    text=$("$LLM_AGENT" "${agent_args[@]}" \
+             --system "You are a terse equity-desk assistant. Use web_search to find today's catalyst, then answer in exactly ONE sentence, 30 words max. State the catalyst directly — never mention searching, sources, or 'the results'. No preamble." \
+             "$web_prompt" 2>/dev/null | tr -d '\r' | tr '\n' ' ' | sed 's/  */ /g;s/^ //;s/ $//' | head -c 280)
+  fi
+
+  # No web path, or it came back empty/errored: number-only take, no search.
+  if [[ -z "${text// }" ]]; then
+    prompt="${label} moved ${change_pct}% today (now \$${price}). In one short, plain-text sentence (no markdown, no hedging disclaimers, no financial advice), give a neutral, informative take on what kind of move this is for a stock."
+    text=$("$LLM_BLURB" --max-tokens 120 "$prompt" 2>/dev/null | tr -d '\r' | head -c 300)
+  fi
+  [[ -z "${text// }" ]] && continue
 
   (
     flock -x 200
