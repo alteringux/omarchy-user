@@ -44,26 +44,49 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.countdown", function(argv) { Quickshell.execDetached(argv) })
 
-  // ---- persistence: two JSON files, each via the shared Kit.Store -------
-  // Store owns the FileView, atomic writes, the ~/.local/state/omarchy/ path,
-  // `mkdir -p`, and the save debounce. We hand it a file name and the matching
-  // tolerant parser from Model.js; it gives back `value` (aliased above to
-  // `state` / `history`) and `loaded`. Mutations go: assign a fresh object to
-  // `state` / `history`, then call `<store>.save()`.
+  // ---- persistence: both files are now written only by
+  // ~/.local/bin/omarchy-countdowns (docs/adr/0006-cli-first-plugins.md).
+  // Kit.Store runs in watch mode — it re-reads + re-parses as the CLI rewrites
+  // them and the `state` / `history` aliases update straight through. The idle
+  // poll covers FileView's watch-on-create blind spot.
   Kit.Store {
     id: stateStore
     fileName: "countdowns.json"
+    watch: true
+    pollMs: 2000
     parse: function (raw) { return Model.parseState(raw) }
     onLoadedChanged: if (loaded) root.nowMs = Date.now()
+    onExternallyChanged: root.nowMs = Date.now()
   }
 
-  // A SEPARATE rolling log of added countdowns (label + day count, capped in
-  // Model.js) — feeds the panel's most-used-label chips. The active list
-  // itself stays history-free.
+  // The rolling log of added countdowns (label + day count, capped by the CLI)
+  // — feeds the panel's most-used-label chips.
   Kit.Store {
     id: historyStore
     fileName: "countdown-history.json"
+    watch: true
+    pollMs: 3000
     parse: function (raw) { return Model.parseHistory(raw) }
+  }
+
+  // ---- the CLI that owns every write to countdowns.json / countdown-history.json
+  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-countdowns"
+
+  Process {
+    id: actionProc
+    running: false
+    onExited: { stateStore.reload(); historyStore.reload() }
+  }
+
+  // Run one omarchy-countdowns verb (argv after the script path). Serialised
+  // through actionProc; a verb fired mid-run falls back to execDetached.
+  function runVerb(argv) {
+    guard.run("runVerb:" + argv[0], function() {
+      var cmd = [root.scriptPath].concat(argv)
+      if (actionProc.running) { Quickshell.execDetached(cmd); return }
+      actionProc.command = cmd
+      actionProc.running = true
+    })
   }
 
   function entryById(id) {
@@ -72,71 +95,34 @@ BarWidget {
     return null
   }
 
-  // ---- actions ------------------------------------------------------
+  // ---- actions — each runs the matching omarchy-countdowns verb; the watch
+  //      on the two stores reflects the result back into `state` / `history`.
+  //      The CLI also owns folding an add into the history log.
   function addEntry(label, days) {
-    guard.run("addEntry", function() {
-      var before = root.entries.length
-      root.state = Model.addEntry(root.state, label, days)
-      if (root.entries.length !== before) {
-        root.nowMs = Date.now()
-        stateStore.save()
-        if (root.historyLoaded) {
-          root.history = Model.recordAdd(root.history, label, days)
-          historyStore.save()
-        }
-      }
-    })
+    if (!label || label.trim().length === 0) return
+    root.runVerb(["add", String(days), label])
+    root.nowMs = Date.now()
   }
 
-  // Add by an absolute target epoch (the panel's date picker). History still
-  // records a day count so the label chips keep working.
+  // Add by an absolute target epoch (the panel's date picker). The CLI takes a
+  // yyyy-MM-dd key, so convert here with the same Model helper the picker uses.
   function addEntryAt(label, targetEpoch) {
-    guard.run("addEntryAt", function() {
-      var before = root.entries.length
-      root.state = Model.addEntryAt(root.state, label, targetEpoch)
-      if (root.entries.length !== before) {
-        root.nowMs = Date.now()
-        stateStore.save()
-        if (root.historyLoaded) {
-          root.history = Model.recordAdd(root.history, label, Model.daysRemaining(targetEpoch, root.nowMs))
-          historyStore.save()
-        }
-      }
-    })
+    if (!label || label.trim().length === 0) return
+    var key = Model.keyForEpoch(targetEpoch)
+    if (!key) return
+    root.runVerb(["add-at", key, label])
+    root.nowMs = Date.now()
   }
 
-  function removeEntry(id) {
-    guard.run("removeEntry", function() {
-      root.state = Model.removeEntry(root.state, id)
-      stateStore.save()
-    })
-  }
+  function removeEntry(id) { root.runVerb(["remove", id]) }
 
-  // Edit-in-place: rename one countdown from its card. Same persist path as
-  // add/remove. See docs/adr/0003.
-  function renameEntry(id, label) {
-    guard.run("renameEntry", function() {
-      root.state = Model.renameEntry(root.state, id, label)
-      stateStore.save()
-    })
-  }
+  // Edit-in-place: rename one countdown from its card (see docs/adr/0003).
+  function renameEntry(id, label) { root.runVerb(["rename", id, label]) }
 
-  function clearEntries() {
-    guard.run("clearEntries", function() {
-      root.state = Model.defaultState()
-      stateStore.save()
-    })
-  }
+  function clearEntries() { root.runVerb(["clear"]) }
 
   // Forget one remembered "usual label" — the × on that chip in the panel.
-  // Other remembered labels and the active countdown list are left untouched.
-  function forgetLabel(label) {
-    guard.run("forgetLabel", function() {
-      if (!root.historyLoaded) return
-      root.history = Model.forgetLabel(root.history, label)
-      historyStore.save()
-    })
-  }
+  function forgetLabel(label) { root.runVerb(["forget", label]) }
 
   // ---- tick -------------------------------------------------------
   Timer {

@@ -1,0 +1,447 @@
+#!/usr/bin/env bash
+# omarchy-pomodoro — the pomodoro timer engine + daemon.
+#
+# Sole writer of ~/.local/state/omarchy/pomodoro-session.json, -stats.json and
+# -history.json. A `systemd --user` transient unit (this script, `__run`) owns
+# the 1-second countdown, phase transitions, transition sounds, ready-reminders,
+# and streak/stats bookkeeping. The alteringux.pomodoro bar widget is a thin
+# view: it watches the files and calls the verbs below. It still owns
+# pomodoro-config.json (durations/sounds, hand- and panel-edited).
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-pomodoro get              print pomodoro-session.json
+#   omarchy-pomodoro status          live { phase, running, ready, remainingMs, ... }
+#   omarchy-pomodoro toggle          IDLE->start WORK · running<->paused · ready->start next
+#   omarchy-pomodoro start|pause|resume    the explicit forms of toggle
+#   omarchy-pomodoro skip            end the current phase now, uncredited
+#   omarchy-pomodoro complete        end the current phase now, credited (finished early)
+#   omarchy-pomodoro reset           back to IDLE, stop the daemon
+#   omarchy-pomodoro restore         reconcile a persisted session against wall clock
+#
+# Env: OMARCHY_STATE_DIR overrides the state dir (tests).
+#      OMARCHY_POMODORO_NO_DAEMON=1 skips all systemd calls (tests).
+#      OMARCHY_POMODORO_QUIET=1 skips notify-send / sound (tests).
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+CONFIG_FILE="$STATE_DIR/pomodoro-config.json"
+SESSION_FILE="$STATE_DIR/pomodoro-session.json"
+STATS_FILE="$STATE_DIR/pomodoro-stats.json"
+HISTORY_FILE="$STATE_DIR/pomodoro-history.json"
+UNIT="omarchy-pomodoro"
+
+DAILY_HISTORY_DAYS=90
+SESSION_HISTORY_MAX=200
+DEFAULT_SOUND="/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
+
+DEFAULT_CONFIG='{"version":1,"workMinutes":25,"shortBreakMinutes":5,"longBreakMinutes":15,"longBreakCycle":4,"reminderMinutes":5,"sounds":{"workStart":"","breakStart":"","longBreakStart":""}}'
+DEFAULT_SESSION='{"version":1,"phase":"IDLE","running":false,"ready":false,"remainingMs":0,"elapsedReadyMs":0,"completedPomodorosThisSession":0,"savedAtMs":0}'
+DEFAULT_STATS='{"version":1,"streak":0,"lastActiveDate":"","daily":{}}'
+DEFAULT_HISTORY='{"version":1,"sessions":[]}'
+
+mkdir -p "$STATE_DIR"
+
+now_ms() { date +%s%3N; }
+today()  { date +%F; }
+yesterday_of() { date -d "$1 -1 day" +%F; }
+
+# ── config: seeded on every invocation, only ever read here ──────────────
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  local tmp="$CONFIG_FILE.tmp.$$"
+  printf '%s\n' "$DEFAULT_CONFIG" | jq . > "$tmp" && mv -f "$tmp" "$CONFIG_FILE"
+}
+read_config() { seed_config; jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"; }
+
+# ── tolerant readers ───────────────────────────────────────────────────
+PLIB='
+def parse_session:
+  (if type == "object" then . else {} end) as $s
+  | (["IDLE","WORK","SHORT_BREAK","LONG_BREAK"]) as $phases
+  | {
+      version: 1,
+      phase: (if ($phases | index($s.phase)) != null then $s.phase else "IDLE" end),
+      running: ($s.running == true),
+      ready: ($s.ready == true),
+      remainingMs: ([($s.remainingMs // 0 | if type=="number" then . else 0 end), 0] | max),
+      elapsedReadyMs: ([($s.elapsedReadyMs // 0 | if type=="number" then . else 0 end), 0] | max),
+      completedPomodorosThisSession: ([(($s.completedPomodorosThisSession // 0 | if type=="number" then floor else 0 end)), 0] | max),
+      savedAtMs: ([($s.savedAtMs // 0 | if type=="number" then . else 0 end), 0] | max)
+    }
+  | if .phase == "IDLE" then .running = false | .ready = false | .remainingMs = 0 | .elapsedReadyMs = 0 else . end;
+
+def phase_dur($cfg; $phase):
+  (if   $phase == "WORK"        then $cfg.workMinutes
+   elif $phase == "SHORT_BREAK" then $cfg.shortBreakMinutes
+   elif $phase == "LONG_BREAK"  then $cfg.longBreakMinutes
+   else 0 end) as $m
+  | ((if ($m | type) == "number" and $m > 0 then $m else 0 end) * 60000);
+
+def next_phase($cur; $completed; $cycle):
+  if $cur == "WORK"
+  then (if $cycle > 0 then $cycle else 4 end) as $c
+       | (if ((($completed + 1) % $c) == 0) then "LONG_BREAK" else "SHORT_BREAK" end)
+  else "WORK" end;
+'
+
+read_session() { { [ -f "$SESSION_FILE" ] && jq "$PLIB parse_session" "$SESSION_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_SESSION"; }
+read_stats()   { { [ -f "$STATS_FILE" ]   && jq -e . "$STATS_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATS"; }
+read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
+
+write_json() {   # $1 = file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-pomodoro: refusing to write empty/invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+put_session() { write_json "$SESSION_FILE"; }
+
+# ── side effects (skipped when QUIET) ─────────────────────────────────
+sound_for() {   # $1 = transitionKey  (workStart|breakStart|longBreakStart)
+  local cfg key configured
+  cfg="$(read_config)"; key="$1"
+  configured="$(jq -r --arg k "$key" '.sounds[$k] // ""' <<<"$cfg")"
+  [ -n "$configured" ] && printf '%s' "$configured" || printf '%s' "$DEFAULT_SOUND"
+}
+play_sound() {
+  [ "${OMARCHY_POMODORO_QUIET:-0}" = 1 ] && return 0
+  local path; path="$(sound_for "$1")"
+  [ -n "$path" ] || return 0
+  ( command -v mpv >/dev/null 2>&1 && exec mpv --no-video --really-quiet "$path"
+    command -v paplay >/dev/null 2>&1 && exec paplay "$path"
+    command -v pw-play >/dev/null 2>&1 && exec pw-play "$path"
+    exec canberra-gtk-play -f "$path" ) >/dev/null 2>&1 &
+}
+phase_label() {
+  case "$1" in
+    WORK) echo "Work" ;; SHORT_BREAK) echo "Short Break" ;;
+    LONG_BREAK) echo "Long Break" ;; *) echo "Pomodoro" ;;
+  esac
+}
+phase_glyph() {
+  case "$1" in
+    WORK) printf '' ;; SHORT_BREAK) printf '' ;;
+    LONG_BREAK) printf '' ;; *) printf '' ;;
+  esac
+}
+transition_key() {
+  case "$1" in
+    WORK) echo workStart ;; SHORT_BREAK) echo breakStart ;;
+    LONG_BREAK) echo longBreakStart ;; *) echo "" ;;
+  esac
+}
+send_reminder() {   # $1 = ready phase
+  [ "${OMARCHY_POMODORO_QUIET:-0}" = 1 ] && return 0
+  notify-send -a "Pomodoro" \
+    "$(phase_glyph "$1") $(phase_label "$1") ready" \
+    "Press Super+Alt+P (or click the bar timer) to start it." 2>/dev/null || true
+}
+
+# ── daemon lifecycle (stubbed by NO_DAEMON) ──────────────────────────
+daemon_active() {
+  [ "${OMARCHY_POMODORO_NO_DAEMON:-0}" = 1 ] && return 1
+  systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null
+}
+ensure_daemon() {
+  [ "${OMARCHY_POMODORO_NO_DAEMON:-0}" = 1 ] && return 0
+  daemon_active && return 0
+  systemd-run --user --unit="$UNIT" --collect \
+    --description="Omarchy pomodoro timer" -- "$0" __run >/dev/null 2>&1 || true
+}
+stop_daemon() {
+  [ "${OMARCHY_POMODORO_NO_DAEMON:-0}" = 1 ] && return 0
+  systemctl --user stop "${UNIT}.service" 2>/dev/null || true
+}
+
+# ── history + stats writers ──────────────────────────────────────────
+record_work_session() {   # $1 = minutes, $2 = completed(true|false)
+  read_history | jq \
+    --argjson minutes "$1" \
+    --argjson completed "$2" \
+    --arg date "$(today)" \
+    --argjson cap "$SESSION_HISTORY_MAX" '
+      .sessions = ((.sessions // []) + [{minutes: $minutes, completed: $completed, date: $date}])
+      | (if (.sessions | length) > $cap then .sessions |= .[-$cap:] else . end)
+    ' | write_json "$HISTORY_FILE"
+}
+
+credit_completed_work() {   # $1 = workDurationMs
+  read_stats | jq \
+    --arg today "$(today)" \
+    --arg yesterday "$(yesterday_of "$(today)")" \
+    --argjson focusedMs "$1" \
+    --argjson keep "$DAILY_HISTORY_DAYS" '
+      .daily = (.daily // {})
+      | (if .daily[$today] == null then .daily[$today] = {completed: 0, focusedMs: 0} else . end)
+      | .daily[$today].completed += 1
+      | .daily[$today].focusedMs  += $focusedMs
+      | .streak = (
+          if   .lastActiveDate == $today     then (.streak // 0)
+          elif .lastActiveDate == $yesterday then ((.streak // 0) + 1)
+          else 1 end)
+      | .lastActiveDate = $today
+      | (.daily | keys | sort) as $ks
+      | (if ($ks | length) > $keep
+         then reduce ($ks[0:(($ks | length) - $keep)][]) as $k (.; del(.daily[$k]))
+         else . end)
+    ' | write_json "$STATS_FILE"
+}
+
+# ── the core transition ──────────────────────────────────────────────
+# $1 = skipped (true|false). Ends the current phase and lands "ready" in the
+# next one. Mirrors Model.completePhase.
+complete_phase() {
+  local skipped="$1" cfg sess phase pre upcoming workMs
+  cfg="$(read_config)"
+  sess="$(read_session)"
+  phase="$(jq -r '.phase' <<<"$sess")"
+  [ "$phase" = "IDLE" ] && return 0
+  pre="$(jq -r '.completedPomodorosThisSession' <<<"$sess")"
+  workMs="$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)"
+
+  if [ "$phase" = "WORK" ]; then
+    if [ "$skipped" = "true" ]; then
+      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" false
+    else
+      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" true
+      credit_completed_work "$workMs"
+    fi
+  fi
+
+  upcoming="$(jq -r \
+    --argjson pre "$pre" \
+    --argjson cycle "$(jq '.longBreakCycle // 4' <<<"$cfg")" \
+    "$PLIB"'next_phase("'"$phase"'"; $pre; $cycle)' <<<null)"
+
+  local credited=0
+  [ "$phase" = "WORK" ] && [ "$skipped" != "true" ] && credited=1
+
+  jq -n \
+    --arg phase "$upcoming" \
+    --argjson dur "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "'"$upcoming"'")' <<<null)" \
+    --argjson pre "$pre" \
+    --argjson credited "$credited" \
+    --argjson now "$(now_ms)" '
+      {version:1, phase:$phase, running:false, ready:true,
+       remainingMs:$dur, elapsedReadyMs:0,
+       completedPomodorosThisSession:($pre + $credited), savedAtMs:$now}
+    ' | put_session
+
+  play_sound "$(transition_key "$upcoming")"
+  send_reminder "$upcoming"
+}
+
+# ── restore: reconcile a persisted session against wall clock ─────────
+do_restore() {
+  local cfg sess phase running ready savedAt rem downtime now
+  cfg="$(read_config)"
+  sess="$(read_session)"
+  phase="$(jq -r '.phase' <<<"$sess")"
+  [ "$phase" = "IDLE" ] && { printf '%s' "$sess" | put_session; return 0; }
+
+  running="$(jq -r '.running' <<<"$sess")"
+  ready="$(jq -r '.ready' <<<"$sess")"
+  savedAt="$(jq -r '.savedAtMs' <<<"$sess")"
+  now="$(now_ms)"
+  downtime=$(( now - savedAt )); (( downtime < 0 )) && downtime=0
+
+  if [ "$running" = "true" ]; then
+    rem="$(jq -r '.remainingMs' <<<"$sess")"
+    local newrem=$(( rem - downtime ))
+    if (( newrem > 0 )); then
+      jq --argjson r "$newrem" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+      return 0
+    fi
+    # ran out while away -> land ready in the next phase, crediting a WORK block
+    local leftover=$(( -newrem )) pre cycle upcoming updur
+    pre="$(jq -r '.completedPomodorosThisSession' <<<"$sess")"
+    cycle="$(jq '.longBreakCycle // 4' <<<"$cfg")"
+    upcoming="$(jq -r --argjson pre "$pre" --argjson cycle "$cycle" "$PLIB"'next_phase("'"$phase"'"; $pre; $cycle)' <<<null)"
+    updur="$(jq -r "$PLIB"'phase_dur('"$cfg"'; "'"$upcoming"'")' <<<null)"
+    local credited=0
+    if [ "$phase" = "WORK" ]; then
+      credited=1
+      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" true
+      credit_completed_work "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)"
+    fi
+    local ready_ms=$leftover
+    (( updur > 0 && leftover > updur )) && ready_ms=$updur
+    jq -n --arg phase "$upcoming" --argjson dur "$updur" --argjson pre "$pre" \
+          --argjson credited "$credited" --argjson er "$ready_ms" --argjson now "$now" '
+      {version:1, phase:$phase, running:false, ready:true, remainingMs:$dur,
+       elapsedReadyMs:$er, completedPomodorosThisSession:($pre + $credited), savedAtMs:$now}
+    ' | put_session
+    if [ "$credited" = 1 ]; then
+      play_sound "$(transition_key "$upcoming")"
+      send_reminder "$upcoming"
+    fi
+    return 0
+  fi
+
+  if [ "$ready" = "true" ]; then
+    jq --argjson d "$downtime" --argjson n "$now" '.elapsedReadyMs += $d | .savedAtMs = $n' <<<"$sess" | put_session
+    return 0
+  fi
+
+  # paused mid-phase: frozen, just re-stamp
+  jq --argjson n "$now" '.savedAtMs = $n' <<<"$sess" | put_session
+}
+
+# After a restore, a phase that is still running (or a ready phase waiting on
+# its reminders) needs the daemon back.
+restore_and_ensure() {
+  do_restore
+  case "$(jq -r 'if .running then "run" elif .ready then "ready" else "idle" end' "$SESSION_FILE" 2>/dev/null)" in
+    run|ready) ensure_daemon ;;
+  esac
+}
+
+# ── verbs ────────────────────────────────────────────────────────────
+cmd_toggle() {
+  local cfg sess phase running ready now
+  cfg="$(read_config)"
+  sess="$(read_session)"
+  phase="$(jq -r '.phase' <<<"$sess")"
+  running="$(jq -r '.running' <<<"$sess")"
+  ready="$(jq -r '.ready' <<<"$sess")"
+  now="$(now_ms)"
+
+  if [ "$phase" = "IDLE" ]; then
+    jq -n --argjson dur "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)" --argjson now "$now" '
+      {version:1, phase:"WORK", running:true, ready:false, remainingMs:$dur,
+       elapsedReadyMs:0, completedPomodorosThisSession:0, savedAtMs:$now}
+    ' | put_session
+    play_sound workStart
+    ensure_daemon
+    return 0
+  fi
+  if [ "$ready" = "true" ]; then
+    jq --argjson n "$now" '.running = true | .ready = false | .savedAtMs = $n' <<<"$sess" | put_session
+    ensure_daemon
+    return 0
+  fi
+  if [ "$running" = "true" ]; then
+    # pause: freeze the live remaining
+    local rem saved live
+    rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
+    live=$(( rem - (now - saved) )); (( live < 0 )) && live=0
+    jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+    return 0
+  fi
+  # paused -> resume
+  jq --argjson n "$now" '.running = true | .savedAtMs = $n' <<<"$sess" | put_session
+  ensure_daemon
+}
+
+cmd_pause() {
+  local sess now rem saved live
+  sess="$(read_session)"; now="$(now_ms)"
+  [ "$(jq -r '.running' <<<"$sess")" = "true" ] || { printf '%s' "$sess" | put_session; return 0; }
+  rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
+  live=$(( rem - (now - saved) )); (( live < 0 )) && live=0
+  jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+}
+
+cmd_resume() {
+  local sess
+  sess="$(read_session)"
+  [ "$(jq -r '.phase' <<<"$sess")" = "IDLE" ] && { cmd_toggle; return; }
+  jq --argjson n "$(now_ms)" '.running = true | .ready = false | .savedAtMs = $n' <<<"$sess" | put_session
+  ensure_daemon
+}
+
+cmd_reset() {
+  local sess phase cfg
+  sess="$(read_session)"; cfg="$(read_config)"
+  phase="$(jq -r '.phase' <<<"$sess")"
+  # resetting out of a live (not ready) WORK phase is itself an interruption
+  if [ "$phase" = "WORK" ] && [ "$(jq -r '.ready' <<<"$sess")" != "true" ]; then
+    record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" false
+  fi
+  printf '%s' "$DEFAULT_SESSION" | put_session
+  stop_daemon
+}
+
+cmd_status() {
+  local sess cfg now phase running ready rem saved er remLive erLive
+  sess="$(read_session)"; cfg="$(read_config)"; now="$(now_ms)"
+  phase="$(jq -r '.phase' <<<"$sess")"
+  running="$(jq -r '.running' <<<"$sess")"
+  ready="$(jq -r '.ready' <<<"$sess")"
+  rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
+  er="$(jq -r '.elapsedReadyMs' <<<"$sess")"
+  remLive="$rem"; [ "$running" = "true" ] && { remLive=$(( rem - (now - saved) )); (( remLive < 0 )) && remLive=0; }
+  erLive="$er";  [ "$ready" = "true" ]   && erLive=$(( er + (now - saved) ))
+  jq -n \
+    --arg phase "$phase" --argjson running "${running}" --argjson ready "${ready}" \
+    --argjson remainingMs "$remLive" --argjson elapsedReadyMs "$erLive" \
+    --argjson session "$sess" \
+    --argjson stats "$(read_stats)" \
+    --arg today "$(today)" '
+      {phase:$phase, running:$running, ready:$ready,
+       remainingMs:$remainingMs, elapsedReadyMs:$elapsedReadyMs,
+       completedPomodorosThisSession:$session.completedPomodorosThisSession,
+       completedToday: (($stats.daily[$today].completed) // 0),
+       streak: ($stats.streak // 0)}
+    '
+}
+
+run_loop() {
+  do_restore
+  local hb=0
+  while :; do
+    local sess phase running ready now
+    sess="$(read_session)"
+    phase="$(jq -r '.phase' <<<"$sess")"
+    [ "$phase" = "IDLE" ] && break
+    running="$(jq -r '.running' <<<"$sess")"
+    ready="$(jq -r '.ready' <<<"$sess")"
+    now="$(now_ms)"
+
+    if [ "$running" = "true" ]; then
+      local rem saved live
+      rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
+      live=$(( rem - (now - saved) ))
+      if (( live <= 0 )); then
+        complete_phase false
+      elif (( now - hb >= 5000 )); then
+        hb="$now"
+        jq --argjson r "$live" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+      fi
+    elif [ "$ready" = "true" ]; then
+      local er saved reminderMs lastRe
+      er="$(jq -r '.elapsedReadyMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
+      reminderMs=$(( $(jq -r '.reminderMinutes // 5' <<<"$(read_config)") * 60000 )); (( reminderMs < 60000 )) && reminderMs=60000
+      lastRe="$(jq -r '.lastReminderMs // .savedAtMs' <<<"$sess")"
+      if (( now - lastRe >= reminderMs )); then
+        send_reminder "$phase"
+        jq --argjson e "$(( er + (now - saved) ))" --argjson n "$now" \
+           '.elapsedReadyMs = $e | .savedAtMs = $n | .lastReminderMs = $n' <<<"$sess" | put_session
+      fi
+    fi
+    sleep 1
+  done
+}
+
+seed_config
+
+case "${1:-get}" in
+  __run)            run_loop ;;
+  get)             read_session | jq . ;;
+  status)          cmd_status ;;
+  toggle|start)    cmd_toggle ;;
+  pause)           cmd_pause ;;
+  resume)          cmd_resume ;;
+  skip)            complete_phase true ;;
+  complete)        complete_phase false ;;
+  reset)           cmd_reset ;;
+  restore)         restore_and_ensure ;;
+  -h|--help|help)  sed -n '2,30p' "$0" ;;
+  *) echo "omarchy-pomodoro: unknown command '${1}' (try --help)" >&2; exit 2 ;;
+esac

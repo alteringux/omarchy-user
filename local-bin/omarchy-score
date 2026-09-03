@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# omarchy-score — the score counter's state engine.
+#
+# Sole writer of ~/.local/state/omarchy/score-state.json. The alteringux.score
+# bar widget is a thin view: it watches that file and calls these verbs.
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-score get                 print score-state.json
+#   omarchy-score status              { score, config, historyCount, canUndo }
+#   omarchy-score increment|inc|+     add config.step, log it
+#   omarchy-score decrement|dec|-     subtract config.step, log it
+#   omarchy-score reset               back to config.initialValue, log from/to
+#   omarchy-score undo                reverse + drop the last history entry
+#   omarchy-score set N               force the score (no history entry)
+#
+# OMARCHY_STATE_DIR overrides the state directory (used by test/cli.test.sh).
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+CONFIG_FILE="$STATE_DIR/score-config.json"
+STATE_FILE="$STATE_DIR/score-state.json"
+HISTORY_CAP=50
+
+DEFAULT_CONFIG='{"initialValue":0,"step":1,"showIcon":true,"icon":""}'
+DEFAULT_STATE='{"score":0,"history":[]}'
+
+mkdir -p "$STATE_DIR"
+
+now_ms() { date +%s%3N; }
+
+# ── seed_config runs on every invocation so there is always a file on disk for
+#    the user to hand-edit (the old Kit.Store seedOnCreate behaviour). ──
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  local tmp="$CONFIG_FILE.tmp.$$"
+  printf '%s\n' "$DEFAULT_CONFIG" | jq . > "$tmp"
+  mv -f "$tmp" "$CONFIG_FILE"
+}
+
+read_config() {
+  seed_config
+  # A hand-mangled config must not take the widget or this CLI down.
+  jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"
+}
+
+read_state() {
+  [ -f "$STATE_FILE" ] || { printf '%s' "$DEFAULT_STATE"; return 0; }
+  # Tolerant like Model.parseState: a half-written / garbage file reads as the
+  # default rather than aborting the verb.
+  jq -e . "$STATE_FILE" 2>/dev/null || printf '%s' "$DEFAULT_STATE"
+}
+
+# stdin: a candidate new-state object. Coerce a non-numeric score to 0, cap the
+# history, write atomically. Mirrors the widget's old Kit.Store.serialize.
+write_state() {
+  local tmp="$STATE_FILE.tmp.$$"
+  jq --argjson cap "$HISTORY_CAP" '
+    .score = ((.score) | if type == "number" then . else 0 end)
+    | .history = ((.history // []) | if length > $cap then .[-$cap:] else . end)
+  ' > "$tmp"
+  mv -f "$tmp" "$STATE_FILE"
+}
+
+# mutate '<jq program>' — program runs with the current state as input and
+# $cfg / $now in scope, and its output is written back through write_state.
+mutate() {
+  read_state | jq \
+    --argjson cfg "$(read_config)" \
+    --argjson now "$(now_ms)" \
+    "$1" | write_state
+}
+
+cmd="${1:-get}"
+shift || true
+
+seed_config
+
+case "$cmd" in
+  get)
+    read_state | jq .
+    ;;
+
+  status)
+    read_state | jq --argjson cfg "$(read_config)" '{
+      score: ((.score) | if type == "number" then . else 0 end),
+      config: $cfg,
+      historyCount: ((.history // []) | length),
+      canUndo: (((.history // []) | length) > 0)
+    }'
+    ;;
+
+  increment | inc | +)
+    mutate '
+      ($cfg.step | if type == "number" then . else 1 end) as $step
+      | .score = ((.score | if type == "number" then . else 0 end) + $step)
+      | .history = ((.history // []) + [{action: "increment", value: $step, timestamp: $now}])
+    '
+    ;;
+
+  decrement | dec | -)
+    mutate '
+      ($cfg.step | if type == "number" then . else 1 end) as $step
+      | .score = ((.score | if type == "number" then . else 0 end) - $step)
+      | .history = ((.history // []) + [{action: "decrement", value: $step, timestamp: $now}])
+    '
+    ;;
+
+  reset)
+    mutate '
+      ($cfg.initialValue | if type == "number" then . else 0 end) as $init
+      | (.score | if type == "number" then . else 0 end) as $old
+      | .score = $init
+      | .history = ((.history // []) + [{action: "reset", from: $old, to: $init, timestamp: $now}])
+    '
+    ;;
+
+  undo)
+    mutate '
+      (.history // []) as $h
+      | if ($h | length) == 0 then .
+        else
+          ($h[-1]) as $last
+          | (.score | if type == "number" then . else 0 end) as $s
+          | .score = (
+              if   $last.action == "increment" then $s - ($last.value // 0)
+              elif $last.action == "decrement" then $s + ($last.value // 0)
+              elif $last.action == "reset"     then ($last.from // $s)
+              else $s end)
+          | .history = $h[0:-1]
+        end
+    '
+    ;;
+
+  set)
+    [ $# -ge 1 ] || { echo "usage: omarchy-score set N" >&2; exit 2; }
+    read_state | jq --argjson val "$1" '.score = $val' | write_state
+    ;;
+
+  -h | --help | help)
+    sed -n '2,20p' "$0"
+    ;;
+
+  *)
+    echo "omarchy-score: unknown command '$cmd' (try --help)" >&2
+    exit 2
+    ;;
+esac

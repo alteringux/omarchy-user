@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# omarchy-countdowns — the days-until countdown list's state engine.
+#
+# Sole writer of ~/.local/state/omarchy/countdowns.json and its rolling
+# add-log countdown-history.json. The alteringux.countdown bar widget is a
+# thin view: it watches both files and calls these verbs.
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+# (Plural on purpose: `omarchy-countdown` is the unrelated spoken days-until
+#  announcer.)
+#
+#   omarchy-countdowns get                    print countdowns.json
+#   omarchy-countdowns status                 { count, soonestDays }
+#   omarchy-countdowns add <days> <label...>  add N whole days from today
+#   omarchy-countdowns add-at <YYYY-MM-DD> <label...>   add for a specific day (must be future)
+#   omarchy-countdowns rename <id> <label...> relabel; blank label is a no-op
+#   omarchy-countdowns remove <id>            drop one countdown
+#   omarchy-countdowns clear                  drop them all
+#   omarchy-countdowns forget <label...>      drop a remembered label from the add-log
+#
+# OMARCHY_STATE_DIR overrides the state directory (used by test/cli.test.sh).
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+STATE_FILE="$STATE_DIR/countdowns.json"
+HISTORY_FILE="$STATE_DIR/countdown-history.json"
+HISTORY_CAP=200
+
+DEFAULT_STATE='{"version":1,"entries":[]}'
+DEFAULT_HISTORY='{"version":1,"added":[]}'
+
+mkdir -p "$STATE_DIR"
+
+now_ms()  { date +%s%3N; }
+new_id()  { printf 'c%s-%s' "$(now_ms)" "$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"; }
+
+# Local midnight `N` whole calendar days from today, in epoch-ms. Two hops so
+# GNU date walks the calendar field (DST-safe) and lands exactly on midnight
+# (matches Model.targetEpochFor).
+target_for_days() {
+  local d
+  d="$(date -d "$(date +%F) + ${1} days" +%F)"
+  echo $(( $(date -d "${d} 00:00" +%s) * 1000 ))
+}
+
+# Local midnight of a YYYY-MM-DD key, epoch-ms. Empty on a bad key.
+target_for_key() {
+  local s
+  s="$(date -d "${1} 00:00" +%s 2>/dev/null)" || return 0
+  echo $(( s * 1000 ))
+}
+
+# Whole calendar days from today to an epoch-ms target (matches Model.daysRemaining).
+days_remaining() {
+  local tsec=$(( ${1} / 1000 ))
+  local tmid nmid diff
+  tmid="$(date -d "@${tsec}" +%F)"
+  nmid="$(date +%F)"
+  diff=$(( $(date -d "${tmid} 00:00" +%s) - $(date -d "${nmid} 00:00" +%s) ))
+  awk -v d="$diff" 'BEGIN { printf "%.0f", d / 86400 }'
+}
+
+today_mid_sec() { date -d "today 00:00" +%s; }
+
+read_state()   { { [ -f "$STATE_FILE" ]   && jq -e . "$STATE_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATE"; }
+read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
+
+write_json() {   # $1 = target file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-countdowns: refusing to write empty/invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+state_jq() {   # [extra jq args...] <program> — input = current state; writes back
+  local prog="${!#}"
+  local args=("${@:1:$#-1}")
+  read_state | jq "${args[@]}" "$prog" | write_json "$STATE_FILE"
+}
+
+# Fold a just-added countdown into the log (newest first, capped).
+record_add() {   # $1 = label, $2 = days
+  read_history | jq \
+    --arg label "$1" \
+    --argjson days "$2" \
+    --argjson now "$(now_ms)" \
+    --argjson cap "$HISTORY_CAP" '
+      .added = ([{label: $label, days: $days, addedAt: $now}] + (.added // []))[0:$cap]
+    ' | write_json "$HISTORY_FILE"
+}
+
+# Prepend one entry and record it. $1 = label (trimmed, non-empty),
+# $2 = targetEpoch ms, $3 = day count for the log.
+add_entry() {
+  local id
+  id="$(new_id)"
+  state_jq --arg id "$id" --arg label "$1" --argjson target "$2" --argjson now "$(now_ms)" '
+    .entries = ([{id: $id, label: $label, targetEpoch: $target, createdAt: $now}] + (.entries // []))
+  '
+  record_add "$1" "$3"
+}
+
+trim() { printf '%s' "$*" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+
+cmd="${1:-get}"
+shift || true
+
+case "$cmd" in
+  get)
+    read_state | jq .
+    ;;
+
+  status)
+    st="$(read_state)"
+    count="$(jq '(.entries // []) | length' <<<"$st")"
+    soonest="$(jq -r '(.entries // []) | sort_by(.targetEpoch, -.createdAt) | (.[0].targetEpoch // empty)' <<<"$st")"
+    if [ -n "$soonest" ]; then
+      jq -n --argjson c "$count" --argjson d "$(days_remaining "$soonest")" '{count: $c, soonestDays: $d}'
+    else
+      jq -n --argjson c "$count" '{count: $c, soonestDays: null}'
+    fi
+    ;;
+
+  add)
+    days="${1-}"
+    shift || true
+    label="$(trim "$@")"
+    case "$days" in
+      ''|*[!0-9-]*) exit 0 ;;
+    esac
+    [ -n "$label" ] || exit 0
+    [ "$days" -ge 1 ] 2>/dev/null || exit 0
+    add_entry "$label" "$(target_for_days "$days")" "$days"
+    ;;
+
+  add-at)
+    key="${1-}"
+    shift || true
+    label="$(trim "$@")"
+    [ -n "$label" ] || exit 0
+    target="$(target_for_key "$key")"
+    [ -n "$target" ] || exit 0
+    # strictly future: the target day must be after today
+    tsec=$(( target / 1000 ))
+    [ "$tsec" -gt "$(today_mid_sec)" ] || exit 0
+    add_entry "$label" "$target" "$(days_remaining "$target")"
+    ;;
+
+  rename)
+    id="${1:?usage: omarchy-countdowns rename <id> <label...>}"
+    shift
+    label="$(trim "$@")"
+    [ -n "$label" ] || exit 0
+    state_jq --arg id "$id" --arg label "$label" '
+      .entries = [ .entries[] | if .id == $id then .label = $label else . end ]
+    '
+    ;;
+
+  remove)
+    id="${1:?usage: omarchy-countdowns remove <id>}"
+    state_jq --arg id "$id" '.entries = [ .entries[] | select(.id != $id) ]'
+    ;;
+
+  clear)
+    state_jq '.entries = []'
+    ;;
+
+  forget)
+    label="$(trim "$@")"
+    [ -n "$label" ] || exit 0
+    lc="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
+    read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
+      .added = ([ .added[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
+    ' | write_json "$HISTORY_FILE"
+    ;;
+
+  -h | --help | help)
+    sed -n '2,25p' "$0"
+    ;;
+
+  *)
+    echo "omarchy-countdowns: unknown command '$cmd' (try --help)" >&2
+    exit 2
+    ;;
+esac

@@ -17,13 +17,15 @@ Panel {
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
 
-  property int score: 0
-  property var config: ({})
-  property var history: []
+  // Bind straight to the host widget's watched stores (docs/adr/0006): when
+  // omarchy-score rewrites score-state.json the watch re-read updates
+  // hostWidget.state and these re-evaluate — no copy-on-click sync.
+  readonly property var config: root.hostWidget ? root.hostWidget.config : ({})
+  readonly property int score: (root.hostWidget && root.hostWidget.state) ? (root.hostWidget.state.score || 0) : 0
+  readonly property var history: (root.hostWidget && root.hostWidget.state) ? (root.hostWidget.state.history || []) : []
 
   function open() {
     root.controller.show()
-    root.syncFromWidget()
   }
 
   function close() {
@@ -33,16 +35,6 @@ Panel {
   function toggle() {
     if (root.opened) root.close()
     else root.open()
-  }
-
-  function syncFromWidget() {
-    guard.run("syncFromWidget", function() {
-      if (root.hostWidget) {
-        root.score = root.hostWidget.state.score
-        root.config = root.hostWidget.config
-        root.history = root.hostWidget.state.history || []
-      }
-    })
   }
 
   function switchPanel(direction) {
@@ -149,7 +141,6 @@ Panel {
                     else if (modelData.key === "reset") root.hostWidget.resetScore()
                     else root.hostWidget.increment()
                   }
-                  root.syncFromWidget()
                 }
               }
             }

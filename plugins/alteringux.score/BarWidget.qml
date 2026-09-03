@@ -26,68 +26,56 @@ BarWidget {
   Kit.Usage { id: usage; pluginId: "alteringux.score" }
   readonly property bool canUndo: stateLoaded && Model.canUndo(root.state)
 
-  // ---- persistence: two JSON files under ~/.local/state/omarchy/, each via
-  // the shared Kit.Store (owns the FileView, atomic write, `mkdir -p`, and the
-  // 200 ms save debounce). We hand it a file name and the matching tolerant
-  // parser from Model.js; `config` / `state` read and write straight through.
+  // ---- persistence: two JSON files under ~/.local/state/omarchy/, both now
+  // written only by ~/.local/bin/omarchy-score (docs/adr/0006-cli-first-plugins.md).
+  // Kit.Store runs in watch mode: it re-reads + re-parses as the CLI rewrites
+  // the file, and the `state` / `config` aliases update straight through. The
+  // idle poll covers FileView's watch-on-create blind spot.
   Kit.Store {
     id: configStore
     fileName: "score-config.json"
+    watch: true
+    pollMs: 2000
     parse: function (raw) { return Model.parseConfig(raw) }
-    // score's icon / step are only settable by hand-editing this file, so
-    // write a default on first run for the user to find.
-    seedOnCreate: true
   }
 
   Kit.Store {
     id: stateStore
     fileName: "score-state.json"
+    watch: true
+    pollMs: 1500
     parse: function (raw) { return Model.parseState(raw) }
-    // History is capped at write time so the file can't grow without bound
-    // (the in-memory copy still holds the full log until restart, as before).
-    serialize: function (v) { return JSON.stringify(Model.trimHistory(v, 50), null, 2) + "\n" }
   }
 
-  function updateConfig(patch) {
-    var next = JSON.parse(JSON.stringify(root.config))
-    for (var key in patch) next[key] = patch[key]
-    root.config = next
-    configStore.save()
+  // ---- the CLI that owns every write to score-state.json
+  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-score"
+
+  Process {
+    id: actionProc
+    running: false
+    onExited: stateStore.reload()   // reflect the write without waiting on the poll
   }
 
-  // ---- Actions
-  function increment() {
-    guard.run("increment", function() {
-      root.state = Model.increment(root.state, root.config)
-      stateStore.save()
-      usage.record("increment")
+  // Run one omarchy-score verb. Serialised through actionProc; a verb fired
+  // while one is already running falls back to execDetached so it isn't lost.
+  function runVerb(verb) {
+    guard.run("runVerb:" + verb, function() {
+      if (actionProc.running) { Quickshell.execDetached([root.scriptPath, verb]); return }
+      actionProc.command = [root.scriptPath, verb]
+      actionProc.running = true
     })
   }
 
-  function decrement() {
-    guard.run("decrement", function() {
-      root.state = Model.decrement(root.state, root.config)
-      stateStore.save()
-      usage.record("decrement")
-    })
-  }
+  // ---- Actions — each runs the matching CLI verb; the watch on stateStore
+  //      reflects the result back into `state`.
+  function increment() { root.runVerb("increment"); usage.record("increment") }
+  function decrement() { root.runVerb("decrement"); usage.record("decrement") }
+  function resetScore() { root.runVerb("reset"); usage.record("reset") }
 
-  function resetScore() {
-    guard.run("resetScore", function() {
-      root.state = Model.reset(root.state, root.config)
-      stateStore.save()
-      usage.record("reset")
-    })
-  }
-
-  // Step back through the history log, reversing one entry at a time.
   function undo() {
-    guard.run("undo", function() {
-      if (!Model.canUndo(root.state)) return
-      root.state = Model.undo(root.state)
-      stateStore.save()
-      usage.record("undo")
-    })
+    if (!root.canUndo) return
+    root.runVerb("undo")
+    usage.record("undo")
   }
 
   // ---- IPC

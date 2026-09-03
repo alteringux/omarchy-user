@@ -32,30 +32,33 @@ BarWidget {
   readonly property bool statsLoaded: statsStore.loaded
   readonly property bool historyLoaded: historyStore.loaded
 
-  // Live-timer persistence: a running pomodoro is written to
-  // pomodoro-session.json so a shell restart or reboot resumes it instead of
-  // dropping back to idle. `_restored` guards the one-shot reconcile, which
-  // waits for every store it touches (session + config for phase maths,
-  // stats + history to credit a block that completed offline).
-  readonly property bool sessionLoaded: sessionStore.loaded
-  readonly property bool restoreReady: sessionLoaded && configLoaded && statsLoaded && historyLoaded
-  property bool _restored: false
-
-  onRestoreReadyChanged: if (restoreReady) restoreFromSession()
-
   // Gentle, non-forced hint: the work length to suggest based on recent
   // completion/interruption patterns at the current duration. Null means
   // "not enough data yet" or "current length looks fine" — the UI only
   // shows a suggestion, it never changes workMinutes on its own.
   readonly property var workSuggestion: root.historyLoaded ? Model.suggestedWorkMinutes(root.history, root.config.workMinutes) : null
 
-  // ---- Timer state
-  property string phase: Model.PHASE_IDLE   // IDLE | WORK | SHORT_BREAK | LONG_BREAK
-  property bool running: false
-  property bool ready: false                // phase decided, waiting for a start press
-  property real remainingMs: 0
-  property real elapsedReadyMs: 0           // counts up while `ready` waits on the user
-  property int completedPomodorosThisSession: 0
+  // ---- Timer state: derived from the watched pomodoro-session.json, which is
+  // written only by ~/.local/bin/omarchy-pomodoro — its `__run` systemd --user
+  // daemon owns the 1s countdown, phase transitions, transition sounds,
+  // ready-reminders and streak/stats bookkeeping (docs/adr/0006-cli-first-plugins.md).
+  // `displayNowMs` ticks once a second while a phase is live so the mm:ss
+  // readout counts down smoothly between the daemon's ~5s heartbeat writes;
+  // the exact remaining is reconstructed from savedAtMs, the same way the
+  // daemon's own restore does.
+  readonly property var session: sessionStore.value || Model.defaultSession()
+  property double displayNowMs: Date.now()
+
+  readonly property string phase: session.phase
+  readonly property bool running: session.running === true
+  readonly property bool ready: session.ready === true
+  readonly property real remainingMs: running
+    ? Math.max(0, session.remainingMs - (displayNowMs - session.savedAtMs))
+    : session.remainingMs
+  readonly property real elapsedReadyMs: ready
+    ? session.elapsedReadyMs + Math.max(0, displayNowMs - session.savedAtMs)
+    : session.elapsedReadyMs
+  readonly property int completedPomodorosThisSession: session.completedPomodorosThisSession || 0
 
   readonly property string displayText: {
     if (phase === Model.PHASE_IDLE) return "  Pomodoro"
@@ -75,102 +78,63 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.pomodoro", function(argv) { Quickshell.execDetached(argv) })
 
-  // ---- persistence: three JSON files under ~/.local/state/omarchy/, each via
-  // the shared Kit.Store (owns the FileView, atomic write, `mkdir -p`, and the
-  // 200 ms save debounce). `config` / `stats` / `history` read and write
-  // straight through the matching store; the tolerant parsers live in Model.js.
+  // ---- persistence -----------------------------------------------------
+  // config stays widget-owned (durations / sounds, edited from the panel AND
+  // by hand). session / stats / history are written only by omarchy-pomodoro,
+  // so those stores run in watch mode and stream their files back in.
   Kit.Store {
     id: configStore
     fileName: "pomodoro-config.json"
     parse: function (raw) { return Model.parseConfig(raw) }
-    // Durations / sounds are edited from the panel AND by hand — seed a default
-    // file on first run so there's something to open.
     seedOnCreate: true
   }
 
-  // The live timer. No seedOnCreate — no file exists until a pomodoro has
-  // actually run, and an all-idle state never writes one.
   Kit.Store {
     id: sessionStore
     fileName: "pomodoro-session.json"
+    watch: true
+    pollMs: 1500
     parse: function (raw) { return Model.parseSession(raw) }
-  }
-
-  // Rebuilds the timer from the persisted session, subtracting the wall-clock
-  // gap the process was gone for. Runs exactly once, when every store it reads
-  // is loaded (see `restoreReady`). A WORK block that ran out while the shell
-  // was down is credited to stats/history here, as a live completion would be.
-  function restoreFromSession() {
-    guard.run("restoreFromSession", function() {
-      if (root._restored || !root.restoreReady) return
-      root._restored = true
-
-      var stored = sessionStore.value
-      if (!stored || stored.phase === Model.PHASE_IDLE) return
-
-      var r = Model.restoreSession(stored, Date.now(), root.config)
-      root.phase = r.phase
-      root.running = r.running
-      root.ready = r.ready
-      root.remainingMs = r.remainingMs
-      root.elapsedReadyMs = r.elapsedReadyMs
-      root.completedPomodorosThisSession = r.completedPomodorosThisSession
-
-      if (r.workCompletedOffline) {
-        if (root.historyLoaded) root.recordWorkSession(true)
-        if (root.statsLoaded) root.creditCompletedWork()
-      }
-      // Re-announce a phase that fell due while we were away, and re-play its
-      // transition sound, so coming back to the desktop isn't silent.
-      if (r.ready && r.workCompletedOffline) {
-        root.playSound(Model.transitionKeyForPhase(r.phase))
-        root.sendReminder()
-      }
-      root.snapshotSession()
-    })
-  }
-
-  // Write the current timer to disk (debounced by Kit.Store). Called on every
-  // transition and on a slow heartbeat while a phase is live or waiting.
-  function snapshotSession() {
-    guard.run("snapshotSession", function() {
-      if (!sessionStore.loaded) return
-      sessionStore.value = {
-        version: 1,
-        phase: root.phase,
-        running: root.running,
-        ready: root.ready,
-        remainingMs: root.remainingMs,
-        elapsedReadyMs: root.elapsedReadyMs,
-        completedPomodorosThisSession: root.completedPomodorosThisSession,
-        savedAtMs: Date.now()
-      }
-      sessionStore.save()
-    })
-  }
-
-  // Heartbeat: the exact remaining time is reconstructed from savedAtMs on
-  // load, so this is just a bound on staleness (and a guard against wall-clock
-  // jumps) rather than something accuracy depends on.
-  Timer {
-    id: sessionPersistTimer
-    interval: 15000
-    repeat: true
-    running: root.running || root.ready
-    onTriggered: root.snapshotSession()
+    onExternallyChanged: root.displayNowMs = Date.now()
   }
 
   Kit.Store {
     id: statsStore
     fileName: "pomodoro-stats.json"
+    watch: true
+    pollMs: 4000
     parse: function (raw) { return Model.parseStats(raw) }
   }
 
   Kit.Store {
     id: historyStore
     fileName: "pomodoro-history.json"
+    watch: true
+    pollMs: 4000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
+
+  // ---- the CLI + daemon that own the timer
+  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-pomodoro"
+
+  Process {
+    id: actionProc
+    running: false
+    onExited: { sessionStore.reload(); statsStore.reload(); historyStore.reload() }
+  }
+
+  function runVerb(verb) {
+    guard.run("runVerb:" + verb, function() {
+      if (actionProc.running) { Quickshell.execDetached([root.scriptPath, verb]); return }
+      actionProc.command = [root.scriptPath, verb]
+      actionProc.running = true
+    })
+  }
+
+  // Once, on load: let the CLI reconcile a session persisted across a restart /
+  // reboot (crediting a WORK block that ran out offline) and respawn the daemon
+  // if a phase is still live.
+  Component.onCompleted: Qt.callLater(function() { Quickshell.execDetached([root.scriptPath, "restore"]) })
 
   function updateConfig(patch) {
     guard.run("updateConfig", function() {
@@ -187,146 +151,27 @@ BarWidget {
     })
   }
 
-  // Records one WORK-phase outcome (finished the full duration or cut
-  // short) for the adaptive workSuggestion above.
-  function recordWorkSession(completed) {
-    guard.run("recordWorkSession", function() {
-      root.history = Model.recordWorkSession(root.history, root.config.workMinutes, completed)
-      historyStore.save()
-    })
-  }
-
-  // ---------------------------------------------------------- timer engine
-
+  // ---- display clock: only advances the mm:ss readout between the daemon's
+  //      heartbeat writes. The daemon owns every real transition.
   Timer {
-    id: tickTimer
     interval: 1000
     repeat: true
-    running: root.running
-    onTriggered: root.tick()
+    running: root.phase !== Model.PHASE_IDLE
+    onTriggered: root.displayNowMs = Date.now()
   }
 
-  function tick() {
-    guard.run("tick", function() {
-      root.remainingMs = Math.max(0, root.remainingMs - 1000)
-      if (root.remainingMs <= 0) root.completePhase(false)
-    })
-  }
+  // ---- actions — each runs the matching omarchy-pomodoro verb; the watch on
+  //      sessionStore / statsStore / historyStore reflects the result back.
+  function togglePause() { root.runVerb("toggle") }
+  function skipPhase() { if (root.phase !== Model.PHASE_IDLE) root.runVerb("skip") }
+  function resetSession() { root.runVerb("reset") }
 
-  // Counts up while a finished phase sits "ready" so the bar visibly
-  // moves instead of looking frozen at the next phase's full duration.
-  Timer {
-    id: readyTickTimer
-    interval: 1000
-    repeat: true
-    running: root.ready
-    onTriggered: root.elapsedReadyMs += 1000
-  }
-
+  // Sound preview for the settings panel's "test" buttons — not part of the
+  // engine (the daemon plays the real transition sounds itself).
   function playSound(transitionKey) {
     guard.run("playSound", function() {
-      var path = Model.soundForTransition(root.config, transitionKey)
-      Quickshell.execDetached(Model.soundPlayCommand(path))
+      Quickshell.execDetached(Model.soundPlayCommand(Model.soundForTransition(root.config, transitionKey)))
     })
-  }
-
-  // Nags the user with a desktop notification on a repeating interval
-  // while a finished phase sits "ready", waiting to be started. Stops as
-  // soon as they resume (running) or reset (idle).
-  Timer {
-    id: reminderTimer
-    interval: Model.reminderIntervalMs(root.config)
-    repeat: true
-    running: root.ready
-    onTriggered: root.sendReminder()
-  }
-
-  function sendReminder() {
-    guard.run("sendReminder", function() {
-      var n = Model.reminderNotification(root.phase)
-      Quickshell.execDetached(["notify-send", "-a", "Pomodoro", n.summary, n.body])
-    })
-  }
-
-  function creditCompletedWork() {
-    guard.run("creditCompletedWork", function() {
-      var today = Model.todayDateString()
-      Model.rollDailyStats(root.stats, today)
-      root.stats.daily[today].completed += 1
-      root.stats.daily[today].focusedMs += Model.phaseDurationMs(Model.PHASE_WORK, root.config)
-      root.stats.streak = Model.updateStreak(root.stats, today)
-      root.stats.lastActiveDate = today
-      statsStore.save()
-    })
-  }
-
-  // Called when a phase's countdown reaches zero (skipped=false) or the
-  // user explicitly skips (skipped=true). A skip never credits stats for
-  // an unfinished WORK phase.
-  function completePhase(skipped) {
-    guard.run("completePhase", function() {
-      var wasWork = root.phase === Model.PHASE_WORK
-      var preCompletedCount = root.completedPomodorosThisSession
-      var upcoming = Model.nextPhase(root.phase, preCompletedCount, root.config.longBreakCycle)
-
-      if (wasWork) {
-        root.recordWorkSession(!skipped)
-        if (!skipped) {
-          root.completedPomodorosThisSession += 1
-          root.creditCompletedWork()
-        }
-      }
-
-      root.phase = upcoming
-      root.remainingMs = Model.phaseDurationMs(upcoming, root.config)
-      root.elapsedReadyMs = 0
-      root.running = false
-      root.ready = true
-      root.playSound(Model.transitionKeyForPhase(upcoming))
-      root.sendReminder()
-    })
-    root.snapshotSession()
-  }
-
-  function togglePause() {
-    guard.run("togglePause", function() {
-      if (root.phase === Model.PHASE_IDLE) {
-        root.phase = Model.PHASE_WORK
-        root.remainingMs = Model.phaseDurationMs(Model.PHASE_WORK, root.config)
-        root.running = true
-        root.ready = false
-        root.playSound("workStart")
-        return
-      }
-      if (root.ready) {
-        root.running = true
-        root.ready = false
-        return
-      }
-      root.running = !root.running
-    })
-    root.snapshotSession()
-  }
-
-  function skipPhase() {
-    guard.run("skipPhase", function() {
-      if (root.phase === Model.PHASE_IDLE) return
-      root.completePhase(true)
-    })
-  }
-
-  function resetSession() {
-    guard.run("resetSession", function() {
-      // Resetting out of a live WORK phase (not yet finished or skipped) is
-      // itself an interruption signal for workSuggestion.
-      if (root.phase === Model.PHASE_WORK) root.recordWorkSession(false)
-      root.phase = Model.PHASE_IDLE
-      root.running = false
-      root.ready = false
-      root.remainingMs = 0
-      root.completedPomodorosThisSession = 0
-    })
-    root.snapshotSession()
   }
 
   IpcHandler {

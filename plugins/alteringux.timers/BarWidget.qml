@@ -63,29 +63,49 @@ BarWidget {
   // tolerant parser from Model.js; it gives back `value` (aliased above to
   // `state` / `history`) and `loaded`. Mutations go: assign a fresh object to
   // `state` / `history`, then call `<store>.save()`.
+  // Both files are now written only by ~/.local/bin/omarchy-timers
+  // (docs/adr/0006-cli-first-plugins.md). Kit.Store runs in watch mode: it
+  // re-reads + re-parses as the CLI rewrites them and the `state` / `history`
+  // aliases update straight through. The idle poll covers FileView's
+  // watch-on-create blind spot.
   Kit.Store {
     id: stateStore
     fileName: "timers.json"
+    watch: true
+    pollMs: 2000
     parse: function (raw) { return Model.parseState(raw) }
     onLoadedChanged: if (loaded) root.nowMs = Date.now()
+    onExternallyChanged: root.nowMs = Date.now()
   }
 
-  // A SEPARATE rolling log of completed timers (capped in Model.js) — feeds
-  // the panel's most-used-label chips and the "running long" flag. The active
-  // list itself stays history-free.
+  // The rolling log of completed timers (capped by the CLI) — feeds the
+  // panel's most-used-label chips and the "running long" flag.
   Kit.Store {
     id: historyStore
     fileName: "timers-history.json"
+    watch: true
+    pollMs: 3000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 
-  // Fold one entry that's about to leave the active list into the rolling
-  // completion log. No-op until the history file has loaded, so a completion
-  // during startup can't clobber real history with an empty log.
-  function recordCompletion(entry) {
-    if (!root.historyLoaded || !entry) return
-    root.history = Model.recordCompletion(root.history, entry, Date.now())
-    historyStore.save()
+  // ---- the CLI that owns every write to timers.json / timers-history.json
+  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-timers"
+
+  Process {
+    id: actionProc
+    running: false
+    onExited: { stateStore.reload(); historyStore.reload() }
+  }
+
+  // Run one omarchy-timers verb (argv after the script path). Serialised
+  // through actionProc; a verb fired mid-run falls back to execDetached.
+  function runVerb(argv) {
+    guard.run("runVerb:" + argv[0], function() {
+      var cmd = [root.scriptPath].concat(argv)
+      if (actionProc.running) { Quickshell.execDetached(cmd); return }
+      actionProc.command = cmd
+      actionProc.running = true
+    })
   }
 
   function entryById(id) {
@@ -94,60 +114,39 @@ BarWidget {
     return null
   }
 
-  // ---- actions ---------------------------------------------------------
+  // ---- actions — each runs the matching omarchy-timers verb; the watch on
+  //      the two stores reflects the result back into `state` / `history`.
+  //      The CLI also owns folding a removed/cleared timer into the log.
   function addEntry(label) {
-    guard.run("addEntry", function() {
-      var before = root.entries.length
-      root.state = Model.addEntry(root.state, label)
-      if (root.entries.length !== before) {
-        root.nowMs = Date.now()
-        stateStore.save()
-        usage.record("add")
-      }
-    })
+    if (!label || label.trim().length === 0) return
+    root.runVerb(["add", label])
+    root.nowMs = Date.now()
+    usage.record("add")
   }
 
   function removeEntry(id) {
-    guard.run("removeEntry", function() {
-      root.recordCompletion(root.entryById(id))
-      root.state = Model.removeEntry(root.state, id)
-      stateStore.save()
-      usage.record("remove")
-    })
+    root.runVerb(["remove", id])
+    usage.record("remove")
   }
 
-  // Edit-in-place: rename one timer from its card. Same persist path as
-  // add/remove; the elapsed clock is untouched. See docs/adr/0003.
+  // Edit-in-place: rename one timer from its card (see docs/adr/0003).
   function renameEntry(id, label) {
-    guard.run("renameEntry", function() {
-      root.state = Model.renameEntry(root.state, id, label)
-      stateStore.save()
-      usage.record("rename")
-    })
+    root.runVerb(["rename", id, label])
+    usage.record("rename")
   }
 
-  // Pause / resume one timer's count-up clock. The card's × still records a
-  // completion; pausing just banks the live span so elapsed stops advancing.
+  // Pause / resume one timer's count-up clock.
   function togglePauseEntry(id) {
-    guard.run("togglePauseEntry", function() {
-      var entry = root.entryById(id)
-      if (!entry) return
-      var wasPaused = Model.isPaused(entry)
-      root.state = Model.togglePause(root.state, id, Date.now())
-      root.nowMs = Date.now()
-      stateStore.save()
-      usage.record(wasPaused ? "resume" : "pause")
-    })
+    var entry = root.entryById(id)
+    var wasPaused = entry ? Model.isPaused(entry) : false
+    root.runVerb(["pause-toggle", id])
+    root.nowMs = Date.now()
+    usage.record(wasPaused ? "resume" : "pause")
   }
 
   function clearEntries() {
-    guard.run("clearEntries", function() {
-      var list = root.entries
-      for (var i = 0; i < list.length; i++) root.recordCompletion(list[i])
-      root.state = Model.defaultState()
-      stateStore.save()
-      usage.record("clear")
-    })
+    root.runVerb(["clear"])
+    usage.record("clear")
   }
 
   // ---- tick ----------------------------------------------------------

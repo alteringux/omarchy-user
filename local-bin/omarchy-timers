@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# omarchy-timers — the activity-timers state engine.
+#
+# Sole writer of ~/.local/state/omarchy/timers.json and its rolling completion
+# log timers-history.json. The alteringux.timers bar widget is a thin view: it
+# watches both files and calls these verbs.
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-timers get                      print timers.json
+#   omarchy-timers status                   { count, paused, longestMs, totalActiveMs }
+#   omarchy-timers add <label>              start a timer (prepended, running now)
+#   omarchy-timers rename <id> <label>      relabel; blank label is a no-op
+#   omarchy-timers pause-toggle <id>        pause a running / resume a paused timer
+#   omarchy-timers remove <id>              stop + fold into the completion log
+#   omarchy-timers clear                    fold every timer into the log, empty the list
+#
+# OMARCHY_STATE_DIR overrides the state directory (used by test/cli.test.sh).
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+STATE_FILE="$STATE_DIR/timers.json"
+HISTORY_FILE="$STATE_DIR/timers-history.json"
+HISTORY_CAP=200
+
+DEFAULT_STATE='{"version":1,"entries":[]}'
+DEFAULT_HISTORY='{"version":1,"completed":[]}'
+
+mkdir -p "$STATE_DIR"
+
+now_ms() { date +%s%3N; }
+new_id() { printf 't%s-%s' "$(now_ms)" "$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"; }
+
+read_state()   { { [ -f "$STATE_FILE" ]   && jq -e . "$STATE_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATE"; }
+read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
+
+write_json() {   # $1 = target file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-timers: refusing to write empty/invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+# jq helpers shared by the verbs: the two-part elapsed clock, with the legacy
+# fallback (no runningSince key -> running since createdAt). Mirrors Model.js
+# runningSinceOf / entryElapsedMs / isPaused.
+JQ_LIB='
+def rs:
+  (if has("runningSince") then .runningSince else .createdAt end)
+  | (if type == "number" and . > 0 then . else 0 end);
+def elapsed($now):
+  ((.accumulatedMs) | if type == "number" and . >= 0 then . else 0 end) as $banked
+  | rs as $r
+  | $banked + (if $r > 0 then (($now - $r) | if . > 0 then . else 0 end) else 0 end);
+def is_paused: rs == 0;
+'
+
+state_jq() {   # [extra jq args...] <program> — $now in scope; input = current state; writes back
+  local prog="${!#}"
+  local args=("${@:1:$#-1}")
+  read_state | jq --argjson now "$(now_ms)" "${args[@]}" "$JQ_LIB $prog" | write_json "$STATE_FILE"
+}
+
+# Fold one entry (JSON on $entry) into the completion log, newest first, capped.
+record_completion() {
+  local entry="$1"
+  read_history | jq \
+    --argjson now "$(now_ms)" \
+    --argjson cap "$HISTORY_CAP" \
+    --argjson entry "$entry" \
+    "$JQ_LIB"'
+      ($entry.createdAt | if type == "number" and . > 0 then . else $now end) as $started
+      | .completed = ([{
+          label: ($entry.label | if type == "string" then (. | gsub("^\\s+|\\s+$";"")) else "" end),
+          startedAt: $started,
+          endedAt: $now,
+          durationMs: ($entry | elapsed($now))
+        }] + (.completed // []))[0:$cap]
+    ' | write_json "$HISTORY_FILE"
+}
+
+cmd="${1:-get}"
+shift || true
+
+case "$cmd" in
+  get)
+    read_state | jq .
+    ;;
+
+  status)
+    read_state | jq --argjson now "$(now_ms)" "$JQ_LIB"'
+      (.entries // []) as $e
+      | {
+          count: ($e | length),
+          paused: ([$e[] | select(is_paused)] | length),
+          longestMs: ([$e[] | elapsed($now)] | max // 0),
+          totalActiveMs: ([$e[] | elapsed($now)] | add // 0)
+        }
+    '
+    ;;
+
+  add)
+    label="${1-}"
+    trimmed="$(printf '%s' "$label" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -n "$trimmed" ] || exit 0
+    id="$(new_id)"
+    state_jq --arg id "$id" --arg label "$trimmed" '
+      .entries = ([{
+        id: $id, label: $label, createdAt: $now, accumulatedMs: 0, runningSince: $now
+      }] + (.entries // []))
+    '
+    ;;
+
+  rename)
+    id="${1:?usage: omarchy-timers rename <id> <label>}"
+    trimmed="$(printf '%s' "${2-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -n "$trimmed" ] || exit 0
+    state_jq --arg id "$id" --arg label "$trimmed" '
+      .entries = [ .entries[] | if .id == $id then .label = $label else . end ]
+    '
+    ;;
+
+  pause-toggle)
+    id="${1:?usage: omarchy-timers pause-toggle <id>}"
+    state_jq --arg id "$id" '
+      .entries = [ .entries[]
+        | if .id != $id then .
+          elif is_paused then
+            .runningSince = $now
+            | .accumulatedMs = ((.accumulatedMs) | if type == "number" and . >= 0 then . else 0 end)
+          else
+            .accumulatedMs = elapsed($now) | .runningSince = 0
+          end ]
+    '
+    ;;
+
+  remove)
+    id="${1:?usage: omarchy-timers remove <id>}"
+    entry="$(read_state | jq -c --arg id "$id" '.entries[]? | select(.id == $id)')"
+    [ -n "$entry" ] && record_completion "$entry"
+    state_jq --arg id "$id" '.entries = [ .entries[] | select(.id != $id) ]'
+    ;;
+
+  clear)
+    while IFS= read -r entry; do
+      [ -n "$entry" ] && record_completion "$entry"
+    done < <(read_state | jq -c '.entries[]?')
+    state_jq '.entries = []'
+    ;;
+
+  -h | --help | help)
+    sed -n '2,18p' "$0"
+    ;;
+
+  *)
+    echo "omarchy-timers: unknown command '$cmd' (try --help)" >&2
+    exit 2
+    ;;
+esac
