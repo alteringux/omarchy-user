@@ -41,12 +41,16 @@ Flickable {
 
   ScrollBar.vertical: ScrollBar {
     id: vbar
+    // AsNeeded already hides the whole bar when the content fits, so the
+    // resting opacity below only ever paints when there's real overflow —
+    // it must be non-zero, or the bar is invisible until you grab it and
+    // there's no hint that the panel scrolls.
     policy: ScrollBar.AsNeeded
     contentItem: Rectangle {
       implicitWidth: Style.space(6)
       radius: width / 2
       color: root.handleColor
-      opacity: vbar.pressed ? 0.9 : (vbar.hovered ? 0.7 : (vbar.active ? 0.45 : 0.0))
+      opacity: vbar.pressed ? 1.0 : (vbar.hovered ? 0.8 : 0.4)
       Behavior on opacity {
         NumberAnimation { duration: 120 }
       }
