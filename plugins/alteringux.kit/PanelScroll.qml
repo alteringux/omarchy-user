@@ -24,8 +24,9 @@ import qs.Commons
 Flickable {
   id: root
 
-  // Forwarded to Kit.WheelBoost. `wheelScale` is the one knob to tune feel.
-  property real wheelScale: 1.9
+  // Forwarded to Kit.WheelBoost. `wheelScale` is the one knob to tune feel —
+  // turn it up if a touchpad drag still covers too little ground.
+  property real wheelScale: 1.5
   // Scrollbar handle colour. Faint grey by default so it reads as chrome,
   // not content; a host can pass its panel foreground for more contrast.
   property color handleColor: Qt.rgba(0.5, 0.5, 0.5, 0.9)
@@ -54,6 +55,6 @@ Flickable {
 
   WheelBoost {
     flick: root
-    scale: root.wheelScale
+    wheelScale: root.wheelScale
   }
 }
