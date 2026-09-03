@@ -188,7 +188,22 @@ def call_featherless(payload: dict, key: str, timeout: float):
         req = urllib.request.Request(FEATHERLESS_URL, data=data, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
-                return 200, json.loads(r.read().decode("utf-8", "replace"))
+                text = r.read().decode("utf-8", "replace")
+            try:
+                return 200, json.loads(text)
+            except ValueError:
+                # Featherless occasionally tacks trailing bytes (or SSE-style
+                # framing) onto a 200 body -- take the first complete JSON
+                # object and move on.
+                stripped = text.lstrip()
+                if stripped.startswith("data:"):
+                    stripped = stripped[5:].lstrip()
+                try:
+                    obj, _ = json.JSONDecoder().raw_decode(stripped)
+                    return 200, obj
+                except ValueError:
+                    last_err = (4, f"unparseable 200 body: {text[:200]}")
+                    continue
         except urllib.error.HTTPError as e:
             raw = e.read().decode("utf-8", "replace")
             try:
