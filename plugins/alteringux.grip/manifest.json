@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.grip",
+  "name": "Grip",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "An intrusive task wall: a bar counter that escalates as things age, a recurring check-in popup, and a fullscreen takeover when a deadline hits or you keep dismissing it. Engine + state owned by ~/.local/bin/omarchy-grip.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Grip",
+    "description": "Open/overdue task count that reddens with age; click for quick triage. A daemon raises check-ins on an adaptive cadence and a fullscreen takeover on escalation.",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}
