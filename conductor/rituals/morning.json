@@ -1,0 +1,15 @@
+{
+  "label": "Morning",
+  "description": "Spin-up: refresh the world (news, stocks), a word for the day, a clean pomodoro + score, standup reminder, and the LLM morning brief.",
+  "steps": [
+    { "when": "start", "cli": "omarchy-newsbar-refresh",          "args": [],                       "optional": true, "speak": "Good morning. Spinning up." },
+    { "when": "start", "cli": "omarchy-stocks-refresh",           "args": [],                       "optional": true },
+    { "when": "start", "cli": "omarchy-dictionary-suggest-daily", "args": [],                       "optional": true },
+    { "when": "start", "cli": "omarchy-countdown",                "args": [],                       "optional": true },
+    { "when": "start", "cli": "omarchy-pomodoro",                 "args": ["reset"] },
+    { "when": "start", "cli": "omarchy-score",                    "args": ["reset"] },
+    { "when": "start", "cli": "omarchy-remind",                   "args": ["--at", "09:30", "Standup"], "optional": true },
+    { "when": "start", "cli": "flow",                             "args": ["run", "morning-brief"], "optional": true },
+    { "when": "start", "cli": "omarchy-dashboard-note",           "args": ["Spun up {{date}}"],     "optional": true, "speak": "The brief is ready." }
+  ]
+}

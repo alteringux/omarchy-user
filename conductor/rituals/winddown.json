@@ -1,0 +1,15 @@
+{
+  "label": "Wind-down",
+  "description": "End of day: stop every timer, reset the pomodoro and score, a last stocks refresh, a plan-the-day reminder for the morning, the LLM daily recap, and drop the VPN.",
+  "steps": [
+    { "when": "start", "cli": "omarchy-pomodoro",       "args": ["reset"],                     "speak": "Winding down." },
+    { "when": "start", "cli": "omarchy-timers",         "args": ["clear"] },
+    { "when": "start", "cli": "omarchy-stopwatch",      "args": ["cancel"] },
+    { "when": "start", "cli": "omarchy-score",          "args": ["reset"] },
+    { "when": "start", "cli": "omarchy-stocks-refresh", "args": [],                            "optional": true },
+    { "when": "start", "cli": "omarchy-remind",         "args": ["--at", "09:00", "Plan the day"], "optional": true },
+    { "when": "start", "cli": "flow",                   "args": ["run", "daily-recap"],        "optional": true },
+    { "when": "start", "cli": "protonvpn-rotate",       "args": ["disconnect"],                "optional": true },
+    { "when": "start", "cli": "omarchy-dashboard-note", "args": ["Wound down {{date}}"],       "optional": true, "speak": "Wound down. Rest well." }
+  ]
+}

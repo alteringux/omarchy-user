@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.conductor",
+  "name": "Conductor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Runs rituals — ordered sequences that conduct every other alteringux plugin CLI as one instrument — and a single-pane cockpit of their combined state",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Conductor",
+    "description": "One click runs a whole ritual (Focus / Morning / Wind-down) across pomodoro, timers, score, stopwatch, reminders, news, stocks, dictionary, VPN and flow; the panel is a live cockpit of all of them",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

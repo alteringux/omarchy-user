@@ -1,0 +1,29 @@
+{
+  "label": "Focus",
+  "description": "A phased deep-work session: pomodoro + an activity timer + a zeroed win counter + spoken check-ins + VPN + distraction hush. Reacts to the pomodoro daemon flipping WORK <-> BREAK, and cleans up on the way out.",
+  "steps": [
+    { "when": "start", "cli": "omarchy-pomodoro",      "args": ["start"],                                 "speak": "Entering deep work." },
+    { "when": "start", "cli": "omarchy-timers",         "args": ["add", "{{label}}"] },
+    { "when": "start", "cli": "omarchy-score",          "args": ["set", "0"] },
+    { "when": "start", "cli": "omarchy-stopwatch",      "args": ["5", "focus check-in"] },
+    { "when": "start", "cli": "omarchy-remind",         "args": ["--every", "25", "Posture and water"] },
+    { "when": "start", "cli": "protonvpn-rotate",       "args": ["connect"],       "optional": true },
+    { "when": "start", "cli": "tts-player-ctl",         "args": ["pause"],         "optional": true },
+    { "when": "start", "cli": "omarchy-dashboard-note", "args": ["Focus: {{label}} @ {{time}}"], "optional": true },
+
+    { "when": "break", "cli": "omarchy-stopwatch",         "args": ["cancel"],   "speak": "Break. Look away from the screen." },
+    { "when": "break", "cli": "omarchy-newsbar-refresh",   "args": [],            "optional": true },
+    { "when": "break", "cli": "omarchy-stocks-commentary", "args": [],            "optional": true },
+    { "when": "break", "cli": "omarchy-dictionary-suggest-daily", "args": [],     "optional": true },
+
+    { "when": "work",  "cli": "omarchy-stopwatch", "args": ["5", "focus check-in"], "speak": "Back to it." },
+
+    { "when": "end",   "cli": "omarchy-timers",         "args": ["clear"],             "speak": "Session complete." },
+    { "when": "end",   "cli": "omarchy-stopwatch",      "args": ["cancel"] },
+    { "when": "end",   "cli": "omarchy-remind",         "args": ["stop", "all"] },
+    { "when": "end",   "cli": "omarchy-pomodoro",       "args": ["reset"] },
+    { "when": "end",   "cli": "protonvpn-rotate",       "args": ["disconnect"],        "optional": true },
+    { "when": "end",   "cli": "flow",                   "args": ["run", "session-journal"], "optional": true },
+    { "when": "end",   "cli": "omarchy-dashboard-note", "args": ["Focus done: {{label}}"], "optional": true }
+  ]
+}
