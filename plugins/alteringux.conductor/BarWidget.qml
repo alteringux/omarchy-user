@@ -30,6 +30,10 @@ BarWidget {
     : ""
 
   readonly property var guard: Kit.BugGuard.create("alteringux.conductor", function (argv) { Quickshell.execDetached(argv) })
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.conductor"
+  }
   Kit.Usage { id: usage; pluginId: "alteringux.conductor" }
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-conductor"
@@ -204,6 +208,14 @@ BarWidget {
       } else {
         root.togglePanel()
       }
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }
