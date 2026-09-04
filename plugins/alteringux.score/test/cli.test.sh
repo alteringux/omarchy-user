@@ -81,6 +81,18 @@ echo '<not json' > "$WORK/score-state.json"
 "$CLI" reset
 [ "$(score)" = "0" ] && ok "a malformed state file degrades to defaults" || bad "malformed" "score=$(score)"
 
+# ── tolerance: a garbled config step falls back to 1 ──────────────────────
+jq '.step = "oops"' "$WORK/score-config.json" > "$WORK/c" && mv "$WORK/c" "$WORK/score-config.json"
+echo '{"score":0,"history":[]}' > "$WORK/score-state.json"
+"$CLI" increment
+[ "$(score)" = "1" ] && ok "a garbled config step falls back to 1" || bad "garbled step" "score=$(score)"
+jq '.step = 1' "$WORK/score-config.json" > "$WORK/c" && mv "$WORK/c" "$WORK/score-config.json"
+
+# ── tolerance: a state file missing .history is treated as empty ──────────
+echo '{"score":0}' > "$WORK/score-state.json"
+"$CLI" increment
+[ "$(hlen)" = "1" ] && ok "a state file missing .history is treated as empty" || bad "missing history" "len=$(hlen)"
+
 # ── history cap ──────────────────────────────────────────────────────────
 echo '{"score":0,"history":[]}' > "$WORK/score-state.json"
 for _ in $(seq 1 60); do "$CLI" increment; done
