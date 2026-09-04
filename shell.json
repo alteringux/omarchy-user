@@ -32,6 +32,9 @@
           "id": "omarchy.tray"
         },
         {
+          "id": "alteringux.pulse"
+        },
+        {
           "id": "omarchy.tailscale"
         },
         {
@@ -91,6 +94,36 @@
     },
     {
       "id": "alteringux.reminders"
+    },
+    {
+      "id": "alteringux.pomodoro"
+    },
+    {
+      "id": "alteringux.stopwatch"
+    },
+    {
+      "id": "alteringux.countdown"
+    },
+    {
+      "id": "alteringux.timers"
+    },
+    {
+      "id": "alteringux.score"
+    },
+    {
+      "id": "alteringux.stocks"
+    },
+    {
+      "id": "alteringux.grip"
+    },
+    {
+      "id": "alteringux.flow"
+    },
+    {
+      "id": "alteringux.conductor"
+    },
+    {
+      "id": "alteringux.cliamp"
     }
   ],
   "version": 1,
