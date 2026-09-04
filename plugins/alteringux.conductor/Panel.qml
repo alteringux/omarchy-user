@@ -114,26 +114,21 @@ Panel {
 
           Repeater {
             model: root.rituals
-            delegate: Rectangle {
+            delegate: Kit.Card {
               id: rcard
               required property var modelData
 
               width: content.width
-              height: rcol.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
               color: rmouse.containsMouse && !root.active
                 ? Util.alpha(root.barForeground, 0.10)
-                : Util.alpha(root.barForeground, 0.05)
-              border.width: 1
-              border.color: Util.alpha(root.barForeground, 0.14)
+                : Kit.Palette.cardBg
               opacity: root.active ? 0.5 : 1.0
+              foreground: root.barForeground
+              body: rcol
 
               Column {
                 id: rcol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Style.space(12)
+                width: rcard.bodyWidth
                 spacing: Style.space(3)
 
                 Text {
