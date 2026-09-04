@@ -196,7 +196,11 @@ Item {
                 if ("bar" in item) item.bar = shim
                 root.noteWidget(modelData.id, true)
               }
-              onLoadingFailed: root.noteWidget(modelData.id, false)
+              // Loader has no dedicated "load failed" signal — Loader.Error
+              // is one of the four Loader.status values, so watch for it via
+              // onStatusChanged instead (an onLoadingFailed handler doesn't
+              // exist on this type and is a hard QML load-time error).
+              onStatusChanged: if (status === Loader.Error) root.noteWidget(modelData.id, false)
             }
           }
 
