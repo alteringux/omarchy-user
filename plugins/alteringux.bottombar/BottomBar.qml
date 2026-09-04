@@ -53,6 +53,15 @@ Item {
   ]
   readonly property var widgetSpecs: root.leftSpecs.concat(root.rightSpecs)
 
+  property var widgetStates: ({})
+
+  function noteWidget(id, loaded) {
+    var next = {}
+    for (var k in root.widgetStates) next[k] = root.widgetStates[k]
+    next[id] = loaded
+    root.widgetStates = next
+  }
+
   readonly property var guard: Kit.BugGuard.create("alteringux.bottombar", function (argv) { Quickshell.execDetached(argv) })
 
   // ---- hide flags ------------------------------------------------------
@@ -120,7 +129,12 @@ Item {
           hidden: root.hidden,
           ownHidden: root.ownHidden,
           topBarHidden: root.topBarHidden,
-          widgets: root.widgetSpecs.map(function (w) { return w.id })
+          widgets: root.widgetSpecs.map(function (w) {
+            var s = root.widgetStates[w.id]
+            if (s === true) return w.id
+            if (s === false) return w.id + " (failed)"
+            return w.id + " (pending)"
+          })
         })
       }, "{}")
     }
@@ -180,7 +194,9 @@ Item {
               onLoaded: {
                 if (!item) return
                 if ("bar" in item) item.bar = shim
+                root.noteWidget(modelData.id, true)
               }
+              onLoadingFailed: root.noteWidget(modelData.id, false)
             }
           }
 
