@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+# omarchy-auto-improve — unattended daily auto-improvement of alteringux.* omarchy plugins.
+#
+# For each plugin under $REPO/plugins/alteringux.* (excluding alteringux.kit):
+#   1. snapshot `git status --porcelain -- plugins/`
+#   2. run headless `opencode run --auto` with the shared prompt + per-plugin target
+#   3. diff the snapshot; commit only the plugin-path delta (pre-existing WIP in
+#      files the agent did not touch is never swept in)
+#   4. append a changelog line to ~/Documents/omarchy-changelog.md
+#
+# Then, once per run, a "rice" phase (run_rice_pass) wires ONE more bar
+# widget's BarWidget.qml into the shared alteringux.pulse attention feed
+# (Kit.PulseTint + Kit.AttentionDot — see docs/auto-rice-prompt.md). Unlike
+# the per-plugin loop above, this phase is smoke-tested before it commits:
+# restart the shell, grep its log for QML load errors. On failure the file is
+# reverted and the shell restarted again to restore a working state — nothing
+# is committed. On success it's committed + changelogged like any other
+# change, and the target is recorded so it isn't retried.
+#
+# Usage: omarchy-auto-improve [--only <plugin-id>] [--dry-run] [--skip-rice] [--only-rice]
+# Env:   OMARCHY_REPO (default ~/.config/omarchy)
+#        OMARCHY_AUTO_IMPROVE_TIMEOUT (per-plugin seconds, default 1800)
+#        OMARCHY_AUTO_RICE_TIMEOUT (rice-phase seconds, default 600)
+
+set -uo pipefail
+
+REPO="${OMARCHY_REPO:-$HOME/.config/omarchy}"
+STATE_DIR="$HOME/.local/state/omarchy-auto-improve"
+LOCK_FILE="$STATE_DIR/lock"
+LOG_FILE="$STATE_DIR/run.log"
+PROMPT_FILE="$REPO/docs/auto-improve-prompt.md"
+RICE_PROMPT_FILE="$REPO/docs/auto-rice-prompt.md"
+RICE_DONE_LIST="$STATE_DIR/rice-done.list"
+RICE_TIMEOUT_SECS="${OMARCHY_AUTO_RICE_TIMEOUT:-600}"
+CHLOG="$HOME/Documents/omarchy-changelog.md"
+TIMEOUT_SECS="${OMARCHY_AUTO_IMPROVE_TIMEOUT:-1800}"
+DRY_RUN=0
+ONLY=""
+SKIP_RICE=0
+ONLY_RICE=0
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
+    --skip-rice) SKIP_RICE=1; shift ;;
+    --only-rice) ONLY_RICE=1; shift ;;
+    --only)
+      [[ $# -ge 2 ]] || { echo "--only requires a value" >&2; exit 2; }
+      ONLY="$2"; shift 2 ;;
+    -h|--help) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) echo "unknown arg: $1" >&2; exit 2 ;;
+  esac
+done
+
+mkdir -p "$STATE_DIR"
+
+if [[ -f "$LOG_FILE" ]] && (( $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) > 5242880 )); then
+  mv -f "$LOG_FILE" "$LOG_FILE.1"
+fi
+log() { printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" | tee -a "$LOG_FILE"; }
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+  log "another run holds the lock; exiting"
+  exit 0
+fi
+
+command -v opencode >/dev/null 2>&1 || { log "opencode not on PATH; aborting"; exit 1; }
+[[ -f "$PROMPT_FILE" ]] || { log "prompt file missing: $PROMPT_FILE; aborting"; exit 1; }
+git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || { log "not a git repo: $REPO; aborting"; exit 1; }
+
+log "=== run start (dry-run=$DRY_RUN only=${ONLY:-all}) ==="
+
+status_snapshot() { git -C "$REPO" status --porcelain -- plugins/ | sort; }
+
+run_plugin() {
+  local id="$1"
+  local summary_file="$STATE_DIR/summary-$id"
+  rm -f "$summary_file"
+
+  local before
+  before="$(status_snapshot)"
+
+  if (( DRY_RUN )); then
+    log "[$id] (dry-run) would run: opencode run --auto --dir $REPO \"<message>\" -f $PROMPT_FILE"
+    return 0
+  fi
+
+  log "[$id] starting opencode run (timeout ${TIMEOUT_SECS}s)"
+  local rc=0
+  timeout "$TIMEOUT_SECS" opencode run --auto \
+    --dir "$REPO" \
+    --title "auto-improve: $id" \
+    "Target plugin: $id (directory: plugins/$id/).
+Apply the attached auto-improve run instructions to this plugin.
+Write your one-line summary to $summary_file as instructed." \
+    -f "$PROMPT_FILE" >>"$STATE_DIR/opencode-$id.log" 2>&1 || rc=$?
+  log "[$id] opencode exited rc=$rc"
+
+  local after delta
+  after="$(status_snapshot)"
+  delta="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
+
+  local summary=""
+  if [[ -f "$summary_file" ]]; then
+    summary="$(head -n1 "$summary_file" | tr -d '\r' | sed 's/^- *//' | cut -c1-120)"
+  fi
+
+  if [[ -z "$delta" ]]; then
+    log "[$id] no file changes; summary: ${summary:-none}"
+    return 0
+  fi
+
+  [[ -n "$summary" ]] || summary="improved (no agent summary)"
+
+  local paths=()
+  local line
+  while IFS= read -r line; do
+    paths+=("${line:3}")
+  done <<<"$delta"
+
+  log "[$id] committing ${#paths[@]} changed path(s): ${paths[*]}"
+  if git -C "$REPO" add -- "${paths[@]}" \
+     && git -C "$REPO" commit -q -m "auto-improve $id: $summary"; then
+    log "[$id] committed"
+    printf -- '- %s — auto-improve %s: %s\n' "$(date '+%Y-%m-%d %H:%M')" "$id" "$summary" >>"$CHLOG"
+    log "[$id] changelog line appended"
+  else
+    log "[$id] COMMIT FAILED; changes left staged for manual review"
+  fi
+}
+
+# ── rice phase ───────────────────────────────────────────────────────────
+
+next_rice_candidate() {
+  # First plugin (alphabetical) with a BarWidget.qml that has neither
+  # Kit.PulseTint nor Kit.AttentionDot yet, and isn't already recorded done.
+  local dir id
+  for dir in "$REPO"/plugins/alteringux.*; do
+    [[ -d "$dir" ]] || continue
+    id="$(basename "$dir")"
+    [[ "$id" == "alteringux.kit" ]] && continue
+    [[ -f "$dir/BarWidget.qml" ]] || continue
+    [[ -f "$RICE_DONE_LIST" ]] && grep -qxF "$id" "$RICE_DONE_LIST" && continue
+    if ! grep -qE 'Kit\.(PulseTint|AttentionDot)' "$dir/BarWidget.qml"; then
+      echo "$id"
+      return 0
+    fi
+  done
+  return 1
+}
+
+revert_paths() {
+  # Undo a set of repo-relative paths regardless of whether git already knows
+  # about them: `git checkout --` only restores tracked content, it is a
+  # no-op on a path git has never seen (e.g. a whole new plugin dir the agent
+  # invented out of scope), which would otherwise leave it stranded on disk.
+  local p
+  for p in "$@"; do
+    if git -C "$REPO" ls-files --error-unmatch -- "$p" >/dev/null 2>&1; then
+      git -C "$REPO" checkout -- "$p"
+    else
+      rm -rf -- "${REPO:?}/$p"
+    fi
+  done
+}
+
+shell_smoke_errors() {
+  # $1 = journalctl --since anchor. Prints any QML load-error lines found
+  # after that point; empty output means the smoke test passed.
+  journalctl --user -t omarchy-shell --since "$1" --no-pager 2>/dev/null \
+    | grep -iE 'cannot assign to non-existent property|is not a type|referenceerror|typeerror|invalid property assignment|is not defined|module .* is not installed' \
+    || true
+}
+
+run_rice_pass() {
+  if (( SKIP_RICE )); then
+    log "[rice] skipped (--skip-rice)"
+    return 0
+  fi
+  [[ -f "$RICE_PROMPT_FILE" ]] || { log "[rice] prompt file missing: $RICE_PROMPT_FILE; skipping"; return 0; }
+
+  local id
+  id="$(next_rice_candidate)" || { log "[rice] no unwired bar widgets left"; return 0; }
+
+  local summary_file="$STATE_DIR/rice-summary-$id"
+  rm -f "$summary_file"
+
+  if (( DRY_RUN )); then
+    log "[rice:$id] (dry-run) would run: opencode run --auto --dir $REPO \"<message>\" -f $RICE_PROMPT_FILE"
+    return 0
+  fi
+
+  local before
+  before="$(status_snapshot)"
+
+  log "[rice:$id] starting opencode run (timeout ${RICE_TIMEOUT_SECS}s)"
+  local rc=0
+  timeout "$RICE_TIMEOUT_SECS" opencode run --auto \
+    --dir "$REPO" \
+    --title "auto-rice: $id" \
+    "Target plugin: $id (directory: plugins/$id/).
+Apply the attached auto-rice run instructions to this plugin's BarWidget.qml.
+Write your one-line summary to $summary_file as instructed." \
+    -f "$RICE_PROMPT_FILE" >>"$STATE_DIR/opencode-rice-$id.log" 2>&1 || rc=$?
+  log "[rice:$id] opencode exited rc=$rc"
+
+  local after delta
+  after="$(status_snapshot)"
+  delta="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
+
+  local summary="no changes"
+  if [[ -f "$summary_file" ]]; then
+    summary="$(head -n1 "$summary_file" | tr -d '\r' | sed 's/^- *//' | cut -c1-120)"
+    [[ -n "$summary" ]] || summary="no changes"
+  fi
+
+  if [[ -z "$delta" ]]; then
+    log "[rice:$id] no file changes; summary: $summary"
+    return 0
+  fi
+
+  local paths=()
+  local line
+  while IFS= read -r line; do
+    paths+=("${line:3}")
+  done <<<"$delta"
+
+  # Scope guard: the rice prompt is only ever supposed to touch this one file.
+  # If it touched anything else, revert everything and bail rather than trust it.
+  local bad=0 p
+  for p in "${paths[@]}"; do
+    [[ "$p" == "plugins/$id/BarWidget.qml" ]] || bad=1
+  done
+  if (( bad )); then
+    log "[rice:$id] touched files outside scope (${paths[*]}); reverting"
+    revert_paths "${paths[@]}"
+    return 0
+  fi
+
+  log "[rice:$id] smoke-testing: restarting shell"
+  local smoke_anchor
+  smoke_anchor="$(date '+%Y-%m-%d %H:%M:%S')"
+  omarchy restart shell >/dev/null 2>&1 || true
+  sleep 5
+
+  local errors
+  errors="$(shell_smoke_errors "$smoke_anchor")"
+
+  if [[ -n "$errors" ]]; then
+    log "[rice:$id] SMOKE TEST FAILED; reverting and restarting shell to restore"
+    log "[rice:$id] error: $(printf '%s' "$errors" | head -n1 | cut -c1-200)"
+    revert_paths "${paths[@]}"
+    omarchy restart shell >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  log "[rice:$id] smoke test passed; committing"
+  if git -C "$REPO" add -- "${paths[@]}" \
+     && git -C "$REPO" commit -q -m "auto-rice $id: $summary"; then
+    log "[rice:$id] committed"
+    printf -- '- %s — auto-rice %s: %s\n' "$(date '+%Y-%m-%d %H:%M')" "$id" "$summary" >>"$CHLOG"
+    echo "$id" >>"$RICE_DONE_LIST"
+    log "[rice:$id] changelog line appended, marked done"
+  else
+    log "[rice:$id] COMMIT FAILED; changes left staged for manual review"
+  fi
+}
+
+if (( ! ONLY_RICE )); then
+  shopt -s nullglob
+  for dir in "$REPO"/plugins/alteringux.*; do
+    [[ -d "$dir" ]] || continue
+    id="$(basename "$dir")"
+    if [[ "$id" == "alteringux.kit" ]]; then
+      log "[$id] skipped (shared library, not a plugin)"
+      continue
+    fi
+    if [[ -n "$ONLY" && "$id" != "$ONLY" ]]; then
+      continue
+    fi
+    run_plugin "$id"
+  done
+fi
+
+run_rice_pass
+
+log "=== run end ==="
