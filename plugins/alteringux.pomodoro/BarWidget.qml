@@ -78,6 +78,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.pomodoro", function(argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.pomodoro"
+  }
+
   // ---- persistence -----------------------------------------------------
   // config stays widget-owned (durations / sounds, edited from the panel AND
   // by hand). session / stats / history are written only by omarchy-pomodoro,
@@ -241,6 +246,14 @@ BarWidget {
 
     onPressed: function(b) {
       root.togglePanel()
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
 
     // ---- phase progress bar ---------------------------------------
