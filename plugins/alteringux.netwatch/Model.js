@@ -273,7 +273,13 @@ function ingest(state, prevSample, cur, config, now) {
           kind: "spike",
           level: "info",
           attention: false,
-          msg: "Sustained " + compactRate(rxRate + txRate) + "/s (over " + cfg.spikeMbps + " Mbps) on " + s.iface
+          msg: "Sustained " + compactRate(rxRate + txRate) + "/s (over " + cfg.spikeMbps + " Mbps) on " + s.iface,
+          data: {
+            rateMbps: Math.round(((rxRate + txRate) / MBPS_TO_BPS) * 10) / 10,
+            thresholdMbps: cfg.spikeMbps,
+            samples: 3,
+            windowSec: Math.round((t - tail[0].ts) / 1000)
+          }
         })
       }
     }
