@@ -1,19 +1,29 @@
 #!/bin/bash
-# Refreshes the stocks bar-widget's state file:
-#   - one Yahoo Finance chart call per watchlist ticker (passed as args) —
-#     gives both a live quote and a same-day intraday series in one request
-#   - day gainers / day losers (Yahoo's unofficial screener endpoint)
+# Refreshes the stocks bar-widget's state file with GLOBAL top-10 gainers
+# and top-10 losers:
+#   - queries Yahoo Finance's unofficial (keyless) screener endpoint once per
+#     major region (US, GB, DE, JP, AU, HK, CA), then merges each side and
+#     re-sorts to a global top 10 by %change
 #   - trending symbols (Yahoo's unofficial trending endpoint, bare tickers)
-# All three are free, keyless, and undocumented — this script only fetches
-# and bundles the raw JSON; Model.js (loaded by the QML side) does all the
+# Both are free, keyless, and undocumented — this script only fetches and
+# bundles the raw JSON; Model.js (loaded by the QML side) does all the
 # shape-specific parsing, so a break in Yahoo's shape is a one-file fix.
 #
-# Usage: omarchy-stocks-refresh [TICKER...]
+# The screener's region-scoped POST form needs a session cookie + crumb
+# (Yahoo's newer anti-scraping gate); see ensure_crumb below. That crumb is
+# cached to disk and reused across refreshes rather than re-fetched every
+# run, to keep this frequent (default 30s) poll light.
+#
+# Usage: omarchy-stocks-refresh   (no args — this is no longer per-ticker)
 
 set -uo pipefail
 
 STATE_DIR="$HOME/.local/state/omarchy"
 STATE_FILE="$STATE_DIR/stocks.json"
+CRUMB_FILE="$STATE_DIR/.stocks-crumb"
+COOKIE_FILE="$STATE_DIR/.stocks-cookiejar"
+CRUMB_MAX_AGE=21600 # 6h — the crumb rides on the cookie, not the clock, but
+                     # refreshing it occasionally is cheap insurance
 mkdir -p "$STATE_DIR"
 
 UA="Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks-refresh"
@@ -23,44 +33,104 @@ fetch() {
   curl -fsS --max-time 8 -A "$UA" "$1" 2>/dev/null
 }
 
-# ------------------------------------------------------------- watchlist
-# Trim each ticker's response down to the two paths Model.parseChartQuote
-# (and omarchy-stocks-commentary) actually read — meta + the intraday close
-# series. Yahoo's raw chart payload also carries full open/high/low/volume
-# arrays and a timestamp array none of the consumers touch; keeping them
-# bloated stocks.json to ~28KB/ticker, re-parsed by a FileView every 2min.
-# An error/malformed response has no .chart.result[0].meta and passes
-# through untouched so Model still sees it as "not ok".
-watchlist_json="{}"
-for ticker in "$@"; do
-  raw=$(fetch "https://query1.finance.yahoo.com/v8/finance/chart/${ticker}?interval=5m&range=1d")
-  [[ -z "$raw" ]] && raw='null'
-  parsed=$(echo "$raw" | jq -c '
-    if (.chart.result[0].meta // null) != null then
-      { chart: { result: [ {
-          meta: .chart.result[0].meta,
-          indicators: { quote: [ { close: (.chart.result[0].indicators.quote[0].close // []) } ] }
-        } ] } }
-    else . end' 2>/dev/null) || parsed='null'
-  watchlist_json=$(echo "$watchlist_json" | jq -c --arg t "$ticker" --argjson v "$parsed" '.[$t] = $v')
-done
+# Regions Yahoo's screener `region` operand actually filters by (confirmed
+# live — the account-scoped `region=` query param on the GET predefined
+# endpoint does NOT scope results despite looking like it should; only the
+# POST screener's query-operand form does).
+REGIONS=(us gb de jp au hk ca)
 
-# ---------------------------------------------------------------- movers
-# Each screener row carries ~87 fields; Model.parseScreenerQuote reads 7.
-# Project to just those so gainers/losers don't dominate stocks.json.
+# Session cookie + crumb, cached to disk. A stale/missing crumb makes every
+# screener POST 401 with "Invalid Crumb"; ensure_crumb refreshes it, and
+# fetch_movers below retries once through it on a 401.
+ensure_crumb() {
+  if [[ -s "$CRUMB_FILE" && -s "$COOKIE_FILE" ]]; then
+    local age
+    age=$(( $(date +%s) - $(stat -c %Y "$CRUMB_FILE" 2>/dev/null || echo 0) ))
+    (( age < CRUMB_MAX_AGE )) && return 0
+  fi
+  curl -fsS --max-time 8 -A "$UA" -c "$COOKIE_FILE" -b "$COOKIE_FILE" "https://fc.yahoo.com" -o /dev/null 2>/dev/null
+  local crumb
+  crumb=$(curl -fsS --max-time 8 -A "$UA" -c "$COOKIE_FILE" -b "$COOKIE_FILE" \
+    "https://query1.finance.yahoo.com/v1/test/getcrumb" 2>/dev/null)
+  [[ -z "$crumb" || "$crumb" == *"<html"* ]] && return 1
+  printf '%s' "$crumb" > "$CRUMB_FILE"
+  return 0
+}
+
+# One region's gainers or losers, tagged with the region so a de-dup pass
+# can drop the same instrument cross-listed on multiple exchanges. Filters
+# (market cap, day volume, min price) mirror Yahoo's own day_gainers/
+# day_losers predefined screener so results stay real movers rather than
+# illiquid penny-stock noise. The upper %-change bound matters more here
+# than on the US-only predefined screener: several regions' `region`
+# operand pulls in thinly-traded cross-listed depositary receipts (Yahoo's
+# "IOB" board) whose stale reference prices otherwise show up as fake
+# 100-900% moves — capping the range keeps those out while still letting
+# real 1-40% single-day moves through.
+fetch_movers() {
+  local direction="$1" region="$2" crumb body cmp bound sort thresh boundVal
+  if [[ "$direction" == "gainers" ]]; then cmp="gt"; bound="lt"; sort="DESC"; thresh=1; boundVal=40
+  else cmp="lt"; bound="gt"; sort="ASC"; thresh=-1; boundVal=-40; fi
+  crumb=$(cat "$CRUMB_FILE" 2>/dev/null)
+  body=$(jq -cn --arg region "$region" --arg sort "$sort" --arg cmp "$cmp" --arg bound "$bound" \
+    --argjson thresh "$thresh" --argjson boundVal "$boundVal" '
+    { size: 8, offset: 0, sortField: "percentchange", sortType: $sort, quoteType: "EQUITY",
+      query: { operator: "and", operands: [
+        { operator: "eq",   operands: ["region", $region] },
+        { operator: "gt",   operands: ["intradaymarketcap", 500000000] },
+        { operator: "gt",   operands: ["dayvolume", 50000] },
+        { operator: "gte",  operands: ["intradayprice", 1] },
+        { operator: $cmp,   operands: ["percentchange", $thresh] },
+        { operator: $bound, operands: ["percentchange", $boundVal] }
+      ] } }')
+  curl -fsS --max-time 8 -A "$UA" -c "$COOKIE_FILE" -b "$COOKIE_FILE" -H "Content-Type: application/json" \
+    -X POST "https://query1.finance.yahoo.com/v1/finance/screener?crumb=${crumb}&formatted=false&lang=en-US&region=US" \
+    -d "$body" 2>/dev/null
+}
+
+# Each screener row carries ~90 fields; only project the ones the panel
+# needs, tagging the region so a later merge can still show "which market".
 SCREENER_PICK='[.finance.result[0].quotes[]? | {
   symbol, shortName, longName,
   regularMarketPrice, regularMarketChangePercent,
-  fiftyTwoWeekHigh, fiftyTwoWeekLow
+  fiftyTwoWeekHigh, fiftyTwoWeekLow, currency, exchange
 }]'
 
-gainers_json="[]"
-raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&scrIds=day_gainers&count=8")
-[[ -n "$raw" ]] && gainers_json=$(echo "$raw" | jq -c "$SCREENER_PICK" 2>/dev/null) || gainers_json="[]"
+fetch_region_side() {
+  local direction="$1" region="$2" raw parsed
+  raw=$(fetch_movers "$direction" "$region")
+  [[ -z "$raw" ]] && { echo "[]"; return; }
+  if [[ "$raw" == *"Invalid Crumb"* ]]; then
+    rm -f "$CRUMB_FILE"
+    ensure_crumb || { echo "[]"; return; }
+    raw=$(fetch_movers "$direction" "$region")
+    [[ -z "$raw" ]] && { echo "[]"; return; }
+  fi
+  parsed=$(echo "$raw" | jq -c "$SCREENER_PICK" 2>/dev/null) || parsed="[]"
+  echo "${parsed:-[]}"
+}
 
+# --------------------------------------------------------------- movers
+ensure_crumb || true # best-effort: fetch_region_side degrades to [] per region on failure
+
+gainers_json="[]"
 losers_json="[]"
-raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&scrIds=day_losers&count=8")
-[[ -n "$raw" ]] && losers_json=$(echo "$raw" | jq -c "$SCREENER_PICK" 2>/dev/null) || losers_json="[]"
+if [[ -s "$CRUMB_FILE" ]]; then
+  gainers_parts=()
+  losers_parts=()
+  for region in "${REGIONS[@]}"; do
+    gainers_parts+=("$(fetch_region_side gainers "$region")")
+    losers_parts+=("$(fetch_region_side losers "$region")")
+  done
+  # Merge all regions, dedup by symbol (cross-listed instruments), re-sort
+  # globally by %change, cap at 10.
+  gainers_json=$(printf '%s\n' "${gainers_parts[@]}" | jq -cs '
+    add | unique_by(.symbol) | sort_by(-.regularMarketChangePercent) | .[:10]' 2>/dev/null) || gainers_json="[]"
+  losers_json=$(printf '%s\n' "${losers_parts[@]}" | jq -cs '
+    add | unique_by(.symbol) | sort_by(.regularMarketChangePercent) | .[:10]' 2>/dev/null) || losers_json="[]"
+fi
+[[ -z "$gainers_json" ]] && gainers_json="[]"
+[[ -z "$losers_json" ]] && losers_json="[]"
 
 # -------------------------------------------------------------- trending
 trending_json="null"
@@ -78,28 +148,21 @@ OMARCHY_PLUGIN_ID="alteringux.stocks"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
 
 jq -cn \
-  --argjson watchlist "$watchlist_json" \
   --argjson gainers "$gainers_json" \
   --argjson losers "$losers_json" \
   --argjson trending "$trending_json" \
   --arg now "$(now_iso)" \
-  '{version: 1, updatedAt: $now, watchlist: $watchlist, gainers: $gainers, losers: $losers, trending: $trending}' \
+  '{version: 1, updatedAt: $now, gainers: $gainers, losers: $losers, trending: $trending}' \
   > "$tmp" && mv "$tmp" "$STATE_FILE"
 
-# ---- alteringux.pulse: flag a notable intraday move, once per ticker/day ----
+# ---- alteringux.pulse: flag the single biggest global mover, once per ticker/day ----
 # Best-effort — a missing or failing omarchy-pulse never affects the refresh.
 if command -v omarchy-pulse >/dev/null 2>&1; then
   mover=$(jq -r '
-    [ to_entries[]
-      | .key as $t
-      | (.value.chart.result[0].meta // {}) as $m
-      | ($m.regularMarketPrice // null) as $p
-      | ($m.chartPreviousClose // $m.previousClose // null) as $c
-      | select($p != null and $c != null and $c != 0)
-      | { t: $t, pct: (($p - $c) / $c * 100) } ]
-    | map(select((.pct | if . < 0 then -. else . end) >= 3))
-    | sort_by(.pct | if . < 0 then -. else . end) | reverse | (.[0] // empty)
-    | "\(.t) \(.pct)"' <<<"$watchlist_json" 2>/dev/null || true)
+    ((.gainers // []) + (.losers // []))
+    | map(select(.regularMarketChangePercent != null))
+    | sort_by(.regularMarketChangePercent | if . < 0 then -. else . end) | reverse | (.[0] // empty)
+    | "\(.symbol) \(.regularMarketChangePercent)"' <<<"$(jq -n --argjson g "$gainers_json" --argjson l "$losers_json" '{gainers:$g, losers:$l}')" 2>/dev/null || true)
   if [[ -n "$mover" ]]; then
     mt=${mover%% *}; mp=${mover#* }
     seen="$STATE_DIR/.stocks-pulse-seen"
@@ -107,8 +170,8 @@ if command -v omarchy-pulse >/dev/null 2>&1; then
     if ! grep -qxF "$key" "$seen" 2>/dev/null; then
       printf -v mpr '%+.1f' "$mp"
       lvl=info
-      awk "BEGIN{m=$mp; if (m<0) m=-m; exit !(m>=5)}" && lvl=warning
-      if omarchy-pulse log alteringux.stocks "${mt} ${mpr}% today" \
+      awk "BEGIN{m=$mp; if (m<0) m=-m; exit !(m>=8)}" && lvl=warning
+      if omarchy-pulse log alteringux.stocks "${mt} ${mpr}% today (global movers)" \
            --action "omarchy-shell alteringux.stocks open" --action-label "Open stocks" \
            --level "$lvl" >/dev/null 2>&1; then
 # `if` (not `[[ ]] &&`) so the group exits 0 when $seen is absent —
@@ -122,8 +185,3 @@ if command -v omarchy-pulse >/dev/null 2>&1; then
     fi
   fi
 fi
-
-# Self-improving step: detached (setsid, own process group) so a slow/no
-# claude call never blocks the price refresh Process this script runs under.
-# See omarchy-stocks-commentary for its own internal rate-limiting.
-setsid bash "$(dirname "$0")/omarchy-stocks-commentary" </dev/null >/dev/null 2>&1 &

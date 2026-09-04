@@ -1,11 +1,13 @@
 // Pure logic for the stocks plugin: parsing Yahoo Finance's unofficial
-// (undocumented, no API key) response shapes into one common quote shape,
-// formatting, 52-week-range filtering, mover selection, sparkline geometry,
-// and watchlist list management. Kept free of QML/Quickshell APIs so it can
-// be reasoned about (and tested) in isolation — see ADR: the refresh script
-// under bin/ only fetches and bundles raw Yahoo JSON; all the shape-specific
-// parsing lives here so a future break in Yahoo's undocumented shape is a
-// one-file fix.
+// (undocumented, no API key) screener response shape into a common quote
+// shape, formatting, 52-week-range filtering, and mover selection. Kept free
+// of QML/Quickshell APIs so it can be reasoned about (and tested) in
+// isolation — see ADR: the refresh script under bin/ only fetches and
+// bundles raw Yahoo JSON; all the shape-specific parsing lives here so a
+// future break in Yahoo's undocumented shape is a one-file fix.
+//
+// The plugin shows global top-10 gainers/losers (bin/omarchy-stocks-refresh
+// merges per-region screener results), not a personal watchlist.
 
 var NEAR_EDGE_FRACTION = 0.1 // "near 52w high/low" = top/bottom 10% of the range
 
@@ -13,27 +15,8 @@ var FILTER_ALL = "all"
 var FILTER_NEAR_HIGH = "nearHigh"
 var FILTER_NEAR_LOW = "nearLow"
 
-function defaultWatchlist() {
-  return { version: 1, tickers: [] }
-}
-
-// Tolerant parse for stocks-watchlist.json (plugin-owned config): a
-// half-written or malformed file degrades to an empty ticker list rather than
-// throwing.
-function parseWatchlist(raw) {
-  var parsed = defaultWatchlist()
-  if (!raw || raw.length === 0) return parsed
-  try {
-    var stored = JSON.parse(raw)
-    if (stored && Array.isArray(stored.tickers)) parsed.tickers = stored.tickers
-  } catch (e) {
-    console.warn("stocks: watchlist parse failed:", e)
-  }
-  return parsed
-}
-
 function defaultState() {
-  return { version: 1, updatedAt: null, watchlist: {}, gainers: [], losers: [], trending: [] }
+  return { version: 1, updatedAt: null, gainers: [], losers: [], trending: [] }
 }
 
 // Tolerant parse: missing/malformed sections fall back to empty defaults
@@ -45,7 +28,6 @@ function parseState(raw) {
   try {
     var parsed = JSON.parse(raw)
     state.updatedAt = parsed.updatedAt || null
-    if (parsed.watchlist && typeof parsed.watchlist === "object") state.watchlist = parsed.watchlist
     if (Array.isArray(parsed.gainers)) state.gainers = parsed.gainers
     if (Array.isArray(parsed.losers)) state.losers = parsed.losers
     if (parsed.trending !== undefined) state.trending = parsed.trending
@@ -56,49 +38,13 @@ function parseState(raw) {
 }
 
 // ---------------------------------------------------------------- parsing
-// Raw shape: query1.finance.yahoo.com/v8/finance/chart/<TICKER>. `chart`
-// bundles a live quote (via `meta`) and same-day intraday closes (via
-// `indicators.quote[0].close`) in a single call, which is why this is the
-// only endpoint the watchlist needs.
-// `fallbackSymbol` covers a failed/malformed fetch, where Yahoo's response
-// carries no `meta.symbol` to identify which watchlist ticker it was for —
-// the caller (BarWidget.qml) knows that from the ticker it requested, so it
-// passes it through here rather than patching the result after the fact.
-function parseChartQuote(raw, fallbackSymbol) {
-  var result = raw && raw.chart && raw.chart.result && raw.chart.result[0]
-  if (!result || !result.meta) {
-    return { symbol: fallbackSymbol || null, name: null, price: null, prevClose: null, changePct: null, week52High: null, week52Low: null, series: [], ok: false }
-  }
-  var meta = result.meta
-  var closes = (result.indicators && result.indicators.quote && result.indicators.quote[0] && result.indicators.quote[0].close) || []
-  var series = closes.filter(function (c) { return c !== null && c !== undefined })
-  var price = meta.regularMarketPrice
-  var prevClose = meta.previousClose !== undefined ? meta.previousClose : meta.chartPreviousClose
-  var changePct = (price !== undefined && prevClose) ? ((price - prevClose) / prevClose) * 100 : null
-
-  return {
-    symbol: meta.symbol || fallbackSymbol || null,
-    name: meta.shortName || meta.longName || meta.symbol || null,
-    price: price !== undefined ? price : null,
-    prevClose: prevClose !== undefined ? prevClose : null,
-    changePct: changePct,
-    week52High: meta.fiftyTwoWeekHigh !== undefined ? meta.fiftyTwoWeekHigh : null,
-    week52Low: meta.fiftyTwoWeekLow !== undefined ? meta.fiftyTwoWeekLow : null,
-    // Yahoo reports the listing's own currency here — "AUD" for .AX symbols,
-    // "GBp" for LSE, etc. Threaded through so the panel can render A$ / £
-    // instead of assuming USD. Absent on a failed fetch.
-    currency: meta.currency || null,
-    series: series,
-    ok: true
-  }
-}
-
-// Raw shape: one row of `finance.result[0].quotes[]` from the
-// day_gainers/day_losers screener endpoint. Field names differ from the
-// chart endpoint's `meta` (regularMarketChangePercent is precomputed here,
-// vs. derived from price/prevClose above) but map onto the same common shape.
+// Raw shape: one row of `finance.result[0].quotes[]` from Yahoo's screener
+// endpoint (bin/omarchy-stocks-refresh queries it once per region — US, GB,
+// DE, JP, AU, HK, CA — and merges/re-sorts the results into global top-10
+// gainers/losers before writing state). `exchange` is threaded through so
+// the panel can show which market a mover trades on.
 function parseScreenerQuote(raw) {
-  if (!raw || !raw.symbol) return { symbol: null, name: null, price: null, changePct: null, week52High: null, week52Low: null, currency: null }
+  if (!raw || !raw.symbol) return { symbol: null, name: null, price: null, changePct: null, week52High: null, week52Low: null, currency: null, exchange: null }
   return {
     symbol: raw.symbol,
     name: raw.shortName || raw.longName || raw.symbol,
@@ -106,41 +52,14 @@ function parseScreenerQuote(raw) {
     changePct: raw.regularMarketChangePercent !== undefined ? raw.regularMarketChangePercent : null,
     week52High: raw.fiftyTwoWeekHigh !== undefined ? raw.fiftyTwoWeekHigh : null,
     week52Low: raw.fiftyTwoWeekLow !== undefined ? raw.fiftyTwoWeekLow : null,
-    currency: raw.currency || null
+    currency: raw.currency || null,
+    exchange: raw.exchange || null
   }
 }
 
 // Raw shape: the trimmed JSON array bin/omarchy-stocks-search prints, itself
-// derived from query1.finance.yahoo.com/v1/finance/search?q=<query>. Powers
-// the Add-ticker autocomplete in Panel.qml. Tolerant of shape: accepts
-// either that trimmed array or Yahoo's raw `{quotes:[...]}` envelope, drops
-// rows with no symbol, de-dups by symbol (Yahoo repeats some listings), and
-// caps the list. Non-US rows keep their suffix (BHP.AX, VOD.L).
-function parseSearchResults(raw, limit) {
-  var rows = Array.isArray(raw) ? raw
-    : (raw && Array.isArray(raw.quotes) ? raw.quotes : null)
-  if (!rows) return []
-  var seen = {}
-  var out = []
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i]
-    if (!r || !r.symbol) continue
-    var symbol = String(r.symbol).toUpperCase()
-    if (seen[symbol]) continue
-    seen[symbol] = true
-    out.push({
-      symbol: symbol,
-      name: r.name || r.longname || r.shortname || r.symbol,
-      exchange: r.exch || r.exchDisp || r.exchange || "",
-      type: String(r.type || r.quoteType || "").toUpperCase()
-    })
-  }
-  return limit ? out.slice(0, limit) : out
-}
-
-// Raw shape: query1.finance.yahoo.com/v1/finance/trending/US. Bare symbols
-// only — no price data, so these are shown as add-to-watchlist pills, not
-// priced cards, to avoid a chart call per trending symbol on every refresh.
+// derived from query1.finance.yahoo.com/v1/finance/trending/US. Bare symbols
+// only — no price data, shown as click-to-open pills in the panel.
 function parseTrendingSymbols(raw, limit) {
   var quotes = raw && raw.finance && raw.finance.result && raw.finance.result[0] && raw.finance.result[0].quotes
   if (!quotes) return []
@@ -151,7 +70,7 @@ function parseTrendingSymbols(raw, limit) {
 // ------------------------------------------------------------- formatting
 // Map a Yahoo currency code onto a short display prefix. Unknown codes fall
 // back to "<CODE> " (e.g. "SEK 142.00") rather than a wrong symbol. Added so
-// .AX (AUD) watchlist cards don't render a misleading "$".
+// .AX (AUD) movers don't render a misleading "$".
 var CURRENCY_PREFIX = {
   USD: "$", AUD: "A$", NZD: "NZ$", CAD: "C$", SGD: "S$", HKD: "HK$",
   GBP: "£", EUR: "€", JPY: "¥", CNY: "¥", INR: "₹", CHF: "CHF ", ZAR: "R "
@@ -165,7 +84,7 @@ function currencyPrefix(code) {
 
 // Price with a currency-aware prefix. "—" for a missing/NaN price so callers
 // don't have to special-case it. GBp (pence) quotes pass through as-is —
-// rare in a personal watchlist and not worth a /100 special case.
+// rare and not worth a /100 special case.
 function formatPrice(price, currency) {
   if (price === null || price === undefined || isNaN(price)) return "—"
   return currencyPrefix(currency) + Number(price).toFixed(2)
@@ -227,92 +146,6 @@ function biggestMoverAbs(quotes) {
   return valid.reduce(function (a, b) { return Math.abs(b.changePct) > Math.abs(a.changePct) ? b : a })
 }
 
-// -------------------------------------------------------------- sparkline
-// SVG path geometry for a card's mini price chart. Purely decorative data
-// in -> path string out; no DOM/QML dependency so it's testable here.
-function sparklinePath(series, width, height) {
-  if (!series || series.length < 2) return ""
-  var min = Math.min.apply(null, series)
-  var max = Math.max.apply(null, series)
-  var span = max - min
-
-  var points = series.map(function (v, i) {
-    var x = (i / (series.length - 1)) * width
-    var y = span === 0 ? height / 2 : height - ((v - min) / span) * height
-    return { x: x, y: y }
-  })
-
-  return points.map(function (p, i) {
-    return (i === 0 ? "M" : "L") + round2(p.x) + "," + round2(p.y)
-  }).join(" ")
-}
-
-function round2(n) {
-  return Math.round(n * 100) / 100
-}
-
-// -------------------------------------------------------------- watchlist
-function normalizeTicker(input) {
-  var t = (input || "").trim().toUpperCase()
-  return t.length > 0 ? t : null
-}
-
-function addTicker(watchlist, symbol) {
-  var normalized = normalizeTicker(symbol)
-  var tickers = (watchlist && watchlist.tickers) ? watchlist.tickers.slice() : []
-  if (!normalized) return { version: 1, tickers: tickers }
-  var exists = tickers.some(function (t) { return t.toUpperCase() === normalized })
-  if (!exists) tickers.push(normalized)
-  return { version: 1, tickers: tickers }
-}
-
-function removeTicker(watchlist, symbol) {
-  var normalized = normalizeTicker(symbol)
-  var tickers = (watchlist && watchlist.tickers) ? watchlist.tickers.slice() : []
-  return { version: 1, tickers: tickers.filter(function (t) { return t.toUpperCase() !== normalized }) }
-}
-
-// ---------------------------------------------------- self-improvement
-// Engagement (which tickers the user actually clicks on, tracked by
-// bin/omarchy-stocks-engage) and AI commentary (bin/omarchy-stocks-commentary,
-// which asks the local `claude` CLI for a one-line take on a notable move in
-// a heavily-engaged ticker). Same tolerant-parse convention as parseState:
-// a missing/malformed file degrades to "no engagement data yet" rather than
-// throwing.
-function parseEngagement(raw) {
-  if (!raw || raw.length === 0) return {}
-  try {
-    var parsed = JSON.parse(raw)
-    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
-  } catch (e) {
-    return {}
-  }
-}
-
-function parseCommentary(raw) {
-  if (!raw || raw.length === 0) return {}
-  try {
-    var parsed = JSON.parse(raw)
-    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
-  } catch (e) {
-    return {}
-  }
-}
-
-// Most-clicked tickers surface first. Stable on ties (and for the
-// zero-engagement default) so the list doesn't jitter on every refresh.
-function sortByEngagement(quotes, engagement) {
-  var eng = engagement || {}
-  var indexed = (quotes || []).map(function (q, i) { return { q: q, i: i } })
-  indexed.sort(function (a, b) {
-    var ca = (eng[a.q.symbol] && eng[a.q.symbol].count) || 0
-    var cb = (eng[b.q.symbol] && eng[b.q.symbol].count) || 0
-    if (cb !== ca) return cb - ca
-    return a.i - b.i
-  })
-  return indexed.map(function (x) { return x.q })
-}
-
 // Exposed only for the Node test harness under test/; QML's JS import
 // mechanism has no `module` global, so this is a no-op there.
 if (typeof module !== "undefined") {
@@ -320,14 +153,10 @@ if (typeof module !== "undefined") {
     FILTER_ALL: FILTER_ALL,
     FILTER_NEAR_HIGH: FILTER_NEAR_HIGH,
     FILTER_NEAR_LOW: FILTER_NEAR_LOW,
-    defaultWatchlist: defaultWatchlist,
-    parseWatchlist: parseWatchlist,
     defaultState: defaultState,
     parseState: parseState,
-    parseChartQuote: parseChartQuote,
     parseScreenerQuote: parseScreenerQuote,
     parseTrendingSymbols: parseTrendingSymbols,
-    parseSearchResults: parseSearchResults,
     currencyPrefix: currencyPrefix,
     formatPrice: formatPrice,
     formatChangePct: formatChangePct,
@@ -336,13 +165,6 @@ if (typeof module !== "undefined") {
     passes52wFilter: passes52wFilter,
     topMover: topMover,
     worstMover: worstMover,
-    biggestMoverAbs: biggestMoverAbs,
-    sparklinePath: sparklinePath,
-    normalizeTicker: normalizeTicker,
-    addTicker: addTicker,
-    removeTicker: removeTicker,
-    parseEngagement: parseEngagement,
-    parseCommentary: parseCommentary,
-    sortByEngagement: sortByEngagement
+    biggestMoverAbs: biggestMoverAbs
   }
 }

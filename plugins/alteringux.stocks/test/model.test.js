@@ -17,87 +17,17 @@ function test(name, fn) {
   }
 }
 
-// ---------------------------------------------------------- parseChartQuote
-// Shape confirmed live against query1.finance.yahoo.com/v8/finance/chart/<T>.
-const RAW_CHART_AAPL = {
-  chart: {
-    result: [{
-      meta: {
-        symbol: "AAPL",
-        shortName: "Apple Inc.",
-        regularMarketPrice: 231.42,
-        previousClose: 227.30,
-        fiftyTwoWeekHigh: 260.10,
-        fiftyTwoWeekLow: 164.08
-      },
-      timestamp: [1, 2, 3, 4, 5],
-      indicators: { quote: [{ close: [225.0, null, 228.5, 230.1, 231.42] }] }
-    }]
-  }
-}
-
-test("parseChartQuote extracts price/prevClose/52w range and drops null closes from the series", () => {
-  const q = Model.parseChartQuote(RAW_CHART_AAPL)
-  assert.strictEqual(q.symbol, "AAPL")
-  assert.strictEqual(q.price, 231.42)
-  assert.strictEqual(q.prevClose, 227.30)
-  assert.strictEqual(q.week52High, 260.10)
-  assert.strictEqual(q.week52Low, 164.08)
-  assert.deepStrictEqual(q.series, [225.0, 228.5, 230.1, 231.42])
-  assert.strictEqual(q.ok, true)
-  assert.ok(Math.abs(q.changePct - ((231.42 - 227.30) / 227.30) * 100) < 1e-9)
-})
-
-test("parseChartQuote reads the trimmed shape omarchy-stocks-refresh writes (meta + close series only)", () => {
-  // The refresh script now projects Yahoo's chart payload down to just these
-  // two paths (dropping the full open/high/low/volume + timestamp arrays) to
-  // keep stocks.json small. This guards that parse still works on that shape.
-  const trimmed = {
-    chart: { result: [{
-      meta: {
-        symbol: "MSFT", shortName: "Microsoft Corp.",
-        regularMarketPrice: 420.5, previousClose: 400.0,
-        fiftyTwoWeekHigh: 460.0, fiftyTwoWeekLow: 300.0
-      },
-      indicators: { quote: [{ close: [410, null, 415, 420.5] }] }
-    }] }
-  }
-  const q = Model.parseChartQuote(trimmed, "MSFT")
-  assert.strictEqual(q.ok, true)
-  assert.strictEqual(q.symbol, "MSFT")
-  assert.strictEqual(q.price, 420.5)
-  assert.strictEqual(q.prevClose, 400.0)
-  assert.strictEqual(q.week52High, 460.0)
-  assert.deepStrictEqual(q.series, [410, 415, 420.5])
-})
-
-test("parseChartQuote marks a malformed/error response as not ok instead of throwing", () => {
-  const q = Model.parseChartQuote({ chart: { result: null, error: { description: "No data found" } } })
-  assert.strictEqual(q.ok, false)
-  assert.strictEqual(q.price, null)
-  assert.deepStrictEqual(q.series, [])
-})
-
-test("parseChartQuote falls back to the requested ticker's symbol when the fetch failed", () => {
-  const q = Model.parseChartQuote(null, "AAPL")
-  assert.strictEqual(q.symbol, "AAPL")
-  assert.strictEqual(q.ok, false)
-})
-
-test("parseChartQuote prefers Yahoo's own symbol over the fallback when the fetch succeeded", () => {
-  const q = Model.parseChartQuote(RAW_CHART_AAPL, "aapl-typed-differently")
-  assert.strictEqual(q.symbol, "AAPL")
-})
-
 // ------------------------------------------------------------- parseScreenerQuote
-// Shape confirmed live against the day_gainers/day_losers screener endpoint.
+// Shape confirmed live against the region-scoped day_gainers/day_losers-style
+// screener query in bin/omarchy-stocks-refresh.
 const RAW_SCREENER_ROW = {
   symbol: "ABCL",
   shortName: "AbCellera Biologics Inc.",
   regularMarketPrice: 12.5,
   regularMarketChangePercent: 17.8134,
   fiftyTwoWeekHigh: 12.5,
-  fiftyTwoWeekLow: 2.745
+  fiftyTwoWeekLow: 2.745,
+  exchange: "NCM"
 }
 
 test("parseScreenerQuote maps the screener's field names onto the common quote shape", () => {
@@ -108,9 +38,21 @@ test("parseScreenerQuote maps the screener's field names onto the common quote s
   assert.strictEqual(q.changePct, 17.8134)
   assert.strictEqual(q.week52High, 12.5)
   assert.strictEqual(q.week52Low, 2.745)
+  assert.strictEqual(q.exchange, "NCM")
 })
 
-// ------------------------------------------------------ parseTrendingSymbols
+test("parseScreenerQuote returns nulls for a malformed row instead of throwing", () => {
+  const q = Model.parseScreenerQuote({})
+  assert.strictEqual(q.symbol, null)
+  assert.strictEqual(q.price, null)
+})
+
+test("parseScreenerQuote threads the listing currency through (AUD for .AX)", () => {
+  const q = Model.parseScreenerQuote({ symbol: "BAP.AX", currency: "AUD", regularMarketPrice: 8.02, regularMarketChangePercent: 8.02, exchange: "ASX" })
+  assert.strictEqual(q.currency, "AUD")
+})
+
+// ------------------------------------------------------------ parseTrendingSymbols
 // Shape confirmed live against query1.finance.yahoo.com/v1/finance/trending/US.
 const RAW_TRENDING = {
   finance: { result: [{ quotes: [{ symbol: "DKS" }, { symbol: "INTU" }, { symbol: "ZM" }, { symbol: "OKLO" }] }] }
@@ -124,63 +66,7 @@ test("parseTrendingSymbols returns an empty list for a malformed response", () =
   assert.deepStrictEqual(Model.parseTrendingSymbols({}, 5), [])
 })
 
-// ----------------------------------------------------------- parseSearchResults
-// Shape confirmed live against bin/omarchy-stocks-search (which trims
-// query1.finance.yahoo.com/v1/finance/search). Non-US listings keep their
-// Yahoo suffix so picking one adds that exact exchange's listing.
-const RAW_SEARCH_BHP = [
-  { symbol: "BHP", name: "BHP Group Limited", exch: "NYSE", type: "EQUITY" },
-  { symbol: "BHP.AX", name: "BHP Group Limited", exch: "Australian", type: "EQUITY" },
-  { symbol: "BHP.L", name: "BHP Group Limited", exch: "London", type: "EQUITY" }
-]
-
-test("parseSearchResults maps the trimmed search rows onto {symbol,name,exchange,type}", () => {
-  const rows = Model.parseSearchResults(RAW_SEARCH_BHP)
-  assert.strictEqual(rows.length, 3)
-  assert.deepStrictEqual(rows[1], { symbol: "BHP.AX", name: "BHP Group Limited", exchange: "Australian", type: "EQUITY" })
-})
-
-test("parseSearchResults keeps the .AX suffix so ASX listings stay distinct from the US line", () => {
-  const rows = Model.parseSearchResults(RAW_SEARCH_BHP)
-  assert.ok(rows.some(r => r.symbol === "BHP.AX"))
-  assert.ok(rows.some(r => r.symbol === "BHP"))
-})
-
-test("parseSearchResults also accepts Yahoo's raw {quotes:[...]} envelope", () => {
-  const raw = { quotes: [{ symbol: "cba.ax", longname: "Commonwealth Bank of Australia", exchDisp: "Australian", quoteType: "EQUITY" }] }
-  assert.deepStrictEqual(Model.parseSearchResults(raw), [
-    { symbol: "CBA.AX", name: "Commonwealth Bank of Australia", exchange: "Australian", type: "EQUITY" }
-  ])
-})
-
-test("parseSearchResults upper-cases the symbol, drops rows with no symbol, and de-dups", () => {
-  const rows = Model.parseSearchResults([
-    { symbol: "vas.ax", name: "Vanguard Australian Shares Index ETF", exch: "Australian", type: "ETF" },
-    { name: "no symbol here", exch: "ASX" },
-    { symbol: "VAS.AX", name: "dup", exch: "CXA", type: "ETF" }
-  ])
-  assert.deepStrictEqual(rows.map(r => r.symbol), ["VAS.AX"])
-})
-
-test("parseSearchResults caps the list at the given limit", () => {
-  assert.strictEqual(Model.parseSearchResults(RAW_SEARCH_BHP, 2).length, 2)
-})
-
-test("parseSearchResults returns an empty list for malformed input instead of throwing", () => {
-  assert.deepStrictEqual(Model.parseSearchResults(null), [])
-  assert.deepStrictEqual(Model.parseSearchResults({}), [])
-  assert.deepStrictEqual(Model.parseSearchResults("nope"), [])
-})
-
 // --------------------------------------------------------------- formatPrice
-test("parseChartQuote threads the listing currency through (AUD for .AX)", () => {
-  const q = Model.parseChartQuote({ chart: { result: [{
-    meta: { symbol: "CBA.AX", currency: "AUD", regularMarketPrice: 159.9, previousClose: 158.0, fiftyTwoWeekHigh: 185.59, fiftyTwoWeekLow: 120 },
-    indicators: { quote: [{ close: [158, 159.9] }] }
-  }] } })
-  assert.strictEqual(q.currency, "AUD")
-})
-
 test("formatPrice prefixes AUD with A$ and USD (or missing) with $", () => {
   assert.strictEqual(Model.formatPrice(159.9, "AUD"), "A$159.90")
   assert.strictEqual(Model.formatPrice(231.4, "USD"), "$231.40")
@@ -211,14 +97,12 @@ test("parseState returns defaults for unparseable JSON instead of throwing", () 
 test("parseState reads a well-formed state file", () => {
   const raw = JSON.stringify({
     updatedAt: "2026-01-01T00:00:00Z",
-    watchlist: { AAPL: RAW_CHART_AAPL },
     gainers: [RAW_SCREENER_ROW],
     losers: [],
     trending: RAW_TRENDING
   })
   const s = Model.parseState(raw)
   assert.strictEqual(s.updatedAt, "2026-01-01T00:00:00Z")
-  assert.deepStrictEqual(s.watchlist, { AAPL: RAW_CHART_AAPL })
   assert.deepStrictEqual(s.gainers, [RAW_SCREENER_ROW])
 })
 
@@ -306,108 +190,4 @@ test("topMover/worstMover/biggestMoverAbs return null for an empty or all-null l
   assert.strictEqual(Model.topMover([]), null)
   assert.strictEqual(Model.worstMover([{ symbol: "X", changePct: null }]), null)
   assert.strictEqual(Model.biggestMoverAbs([]), null)
-})
-
-// -------------------------------------------------------------- sparkline
-test("sparklinePath draws one segment per point, spanning the full width", () => {
-  const path = Model.sparklinePath([1, 2, 3, 2], 100, 20)
-  assert.ok(path.startsWith("M0,"))
-  assert.strictEqual((path.match(/L/g) || []).length, 3)
-  assert.ok(path.includes("L100,"))
-})
-
-test("sparklinePath maps the lowest value to the bottom and highest to the top", () => {
-  const path = Model.sparklinePath([0, 10], 100, 20)
-  assert.strictEqual(path, "M0,20 L100,0")
-})
-
-test("sparklinePath returns an empty string for fewer than two points", () => {
-  assert.strictEqual(Model.sparklinePath([], 100, 20), "")
-  assert.strictEqual(Model.sparklinePath([5], 100, 20), "")
-})
-
-test("sparklinePath draws a flat centered line when every value is identical", () => {
-  const path = Model.sparklinePath([5, 5, 5], 100, 20)
-  assert.strictEqual(path, "M0,10 L50,10 L100,10")
-})
-
-// -------------------------------------------------------------- watchlist
-test("normalizeTicker upper-cases and trims, rejecting blank input", () => {
-  assert.strictEqual(Model.normalizeTicker("  aapl "), "AAPL")
-  assert.strictEqual(Model.normalizeTicker(""), null)
-  assert.strictEqual(Model.normalizeTicker("   "), null)
-})
-
-test("addTicker appends a normalized symbol and de-duplicates case-insensitively", () => {
-  const wl = Model.defaultWatchlist()
-  const wl2 = Model.addTicker(wl, "aapl")
-  const wl3 = Model.addTicker(wl2, "AAPL")
-  assert.deepStrictEqual(wl3.tickers, ["AAPL"])
-})
-
-test("addTicker ignores blank input", () => {
-  const wl = Model.addTicker(Model.defaultWatchlist(), "   ")
-  assert.deepStrictEqual(wl.tickers, [])
-})
-
-test("removeTicker drops a symbol case-insensitively", () => {
-  const wl = Model.addTicker(Model.defaultWatchlist(), "TSLA")
-  const wl2 = Model.removeTicker(wl, "tsla")
-  assert.deepStrictEqual(wl2.tickers, [])
-})
-
-test("addTicker does not mutate the watchlist passed in", () => {
-  const wl = Model.defaultWatchlist()
-  Model.addTicker(wl, "NVDA")
-  assert.deepStrictEqual(wl.tickers, [])
-})
-
-// ------------------------------------------------------- self-improvement
-test("parseEngagement returns an empty map for missing/malformed input", () => {
-  assert.deepStrictEqual(Model.parseEngagement(""), {})
-  assert.deepStrictEqual(Model.parseEngagement("{not json"), {})
-  assert.deepStrictEqual(Model.parseEngagement("[1,2]"), {})
-})
-
-test("parseEngagement reads a well-formed engagement file", () => {
-  const raw = JSON.stringify({ AAPL: { count: 3, lastClickedAt: "2026-01-01T00:00:00Z" } })
-  assert.deepStrictEqual(Model.parseEngagement(raw), { AAPL: { count: 3, lastClickedAt: "2026-01-01T00:00:00Z" } })
-})
-
-test("parseCommentary returns an empty map for missing/malformed input", () => {
-  assert.deepStrictEqual(Model.parseCommentary(""), {})
-  assert.deepStrictEqual(Model.parseCommentary("{not json"), {})
-})
-
-test("parseCommentary reads a well-formed commentary file", () => {
-  const raw = JSON.stringify({ AAPL: { text: "Notable move.", changePct: 3.2, generatedAt: "2026-01-01T00:00:00Z" } })
-  assert.deepStrictEqual(Model.parseCommentary(raw), { AAPL: { text: "Notable move.", changePct: 3.2, generatedAt: "2026-01-01T00:00:00Z" } })
-})
-
-test("sortByEngagement puts the most-clicked ticker first", () => {
-  const quotes = [{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }]
-  const engagement = { B: { count: 5 }, C: { count: 2 } }
-  const sorted = Model.sortByEngagement(quotes, engagement)
-  assert.deepStrictEqual(sorted.map(q => q.symbol), ["B", "C", "A"])
-})
-
-test("sortByEngagement is stable (preserves original order) on ties, including all-zero engagement", () => {
-  const quotes = [{ symbol: "A" }, { symbol: "B" }, { symbol: "C" }]
-  assert.deepStrictEqual(Model.sortByEngagement(quotes, {}).map(q => q.symbol), ["A", "B", "C"])
-  assert.deepStrictEqual(Model.sortByEngagement(quotes, null).map(q => q.symbol), ["A", "B", "C"])
-})
-
-// ----------------------------------------------------------- parseWatchlist
-test("parseWatchlist returns the empty default for empty / missing input", () => {
-  assert.deepStrictEqual(Model.parseWatchlist(""), Model.defaultWatchlist())
-  assert.deepStrictEqual(Model.parseWatchlist(null), Model.defaultWatchlist())
-})
-
-test("parseWatchlist reads a tickers array from a good file", () => {
-  assert.deepStrictEqual(Model.parseWatchlist(JSON.stringify({ tickers: ["AAPL", "TSLA"] })).tickers, ["AAPL", "TSLA"])
-})
-
-test("parseWatchlist ignores a non-array tickers field and degrades on bad JSON", () => {
-  assert.deepStrictEqual(Model.parseWatchlist(JSON.stringify({ tickers: "AAPL" })).tickers, [])
-  assert.deepStrictEqual(Model.parseWatchlist("{not json"), Model.defaultWatchlist())
 })
