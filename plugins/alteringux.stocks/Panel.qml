@@ -192,13 +192,11 @@ Panel {
           }
         }
 
-        Text {
+        Kit.EmptyState {
           visible: root.filteredGainers.length === 0
-          text: root.gainers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet — try Refresh.") : "None match this filter."
-          color: root.barForeground
-          opacity: 0.55
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          text: root.gainers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet") : "None match this filter."
+          hint: root.gainers.length === 0 && !root.refreshing ? "Try Refresh." : ""
+          foreground: root.barForeground
         }
 
         PanelSectionHeader {
@@ -225,13 +223,11 @@ Panel {
           }
         }
 
-        Text {
+        Kit.EmptyState {
           visible: root.filteredLosers.length === 0
-          text: root.losers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet — try Refresh.") : "None match this filter."
-          color: root.barForeground
-          opacity: 0.55
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          text: root.losers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet") : "None match this filter."
+          hint: root.losers.length === 0 && !root.refreshing ? "Try Refresh." : ""
+          foreground: root.barForeground
         }
 
         PanelSeparator {}
