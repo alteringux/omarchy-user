@@ -20,13 +20,20 @@
 #
 # Token figures are an estimate (chars / 4) -- no tokenizer is installed -- but
 # the ratio is close enough to be useful. The requirement text leaves the
-# machine (Featherless). Nothing is spoken and nothing is stored.
+# machine (Featherless).
+#
+# Every run appends one JSON line of telemetry to
+#   ${XDG_STATE_HOME:-~/.local/state}/omarchy-promptopt/runs.jsonl
+# (context, sizes, token estimates, delta%, model, fallback, latency, ok). The
+# prompt text itself is NOT logged unless PROMPTOPT_LOG_TEXT=1. `... stats`
+# reads that file back. Disable logging with PROMPTOPT_LOG=0.
 #
 # Also usable as a plain filter:
 #   omarchy-promptopt "make me a thing that..."      # text as args
 #   pbpaste | omarchy-promptopt                      # text on stdin
 #   omarchy-promptopt --print < req.txt > tight.txt  # no clipboard, no toast
 #   omarchy-promptopt --ctx writing "..."            # force a context
+#   omarchy-promptopt stats [--json]                 # analytics over the log
 #
 # Options:
 #   --ctx NAME       force context: code|debug|research|writing|data|general
@@ -39,8 +46,53 @@
 #   --max-chars N    truncate input to N chars (default 8000)
 #   -h, --help       this help
 #
-# Env: PROMPTOPT_CTX, PROMPTOPT_MODEL, PROMPTOPT_MODELS
+# Env: PROMPTOPT_CTX, PROMPTOPT_MODEL, PROMPTOPT_MODELS,
+#      PROMPTOPT_LOG (0 disables), PROMPTOPT_LOG_TEXT (1 stores prompt text)
 set -uo pipefail
+
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-promptopt"
+LOG_FILE="$STATE_DIR/runs.jsonl"
+
+# --- `stats` subcommand: analytics over the telemetry log -----------------
+if [[ "${1:-}" == stats ]]; then
+  shift
+  [[ -s "$LOG_FILE" ]] || { echo "no runs logged yet -- $LOG_FILE"; exit 0; }
+  command -v jq >/dev/null 2>&1 || { echo "omarchy-promptopt stats: needs jq" >&2; exit 1; }
+  if [[ "${1:-}" == --json ]]; then
+    jq -s '
+      def med(f): (map(f)|sort) as $s | ($s|length) as $n
+        | if $n==0 then null elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
+      { runs: length, ok: (map(select(.ok))|length),
+        from: (min_by(.ts).ts), to: (max_by(.ts).ts),
+        median_delta_pct: med(.delta_pct),
+        mean_delta_pct: ((map(.delta_pct)|add)/length),
+        fallback_rate: ((map(select(.fallback))|length)/length),
+        forced_rate: ((map(select(.forced))|length)/length),
+        mean_ms: ((map(.ms)|add)/length),
+        by_ctx: (group_by(.ctx) | map({ (.[0].ctx): {
+          n: length, median_delta_pct: med(.delta_pct),
+          forced: (map(select(.forced))|length),
+          fail: (map(select(.ok|not))|length) } }) | add) }' "$LOG_FILE"
+    exit 0
+  fi
+  jq -rs '
+    def med(f): (map(f)|sort) as $s | ($s|length) as $n
+      | if $n==0 then 0 elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
+    def pct(x): ((x*100)|floor|tostring)+"%";
+    def pad(s;n): (s|tostring) + (" "*(n - (s|tostring|length)));
+    "omarchy-promptopt  --  \(length) runs (\(map(select(.ok))|length) ok), \(min_by(.ts).ts[0:10]) .. \(max_by(.ts).ts[0:10])",
+    "  median token saving : \(med(.delta_pct))%     mean: \(((map(.delta_pct)|add)/length)|floor)%",
+    "  model fallback rate : \(pct((map(select(.fallback))|length)/length))",
+    "  ctx forced (--ctx)  : \(pct((map(select(.forced))|length)/length))   <- classifier-misfire proxy",
+    "  failures            : \(map(select(.ok|not))|length)",
+    "  mean latency        : \(((map(.ms)|add)/length)|floor) ms",
+    "  by context:",
+    "    ctx       n     median-saving   forced",
+    (group_by(.ctx)[] | "    \(pad(.[0].ctx;10))\(pad(length;6))\(pad((med(.delta_pct)|tostring)+"%";16))\(map(select(.forced))|length)")
+  ' "$LOG_FILE"
+  exit 0
+fi
+# ------------------------------------------------------------------------
 
 # Non-thinking instruct models only (a reasoning model puts its answer in a
 # separate field and llm-blurb sees an empty completion). Chain ends on a
@@ -142,7 +194,7 @@ EOF
     --model)     MODELS=("${2:-}"); shift 2 ;;
     --models)    IFS=$' ,' read -r -a MODELS <<<"${2:-}"; shift 2 ;;
     --max-chars) MAX_INPUT_CHARS="${2:-8000}"; shift 2 ;;
-    -h|--help)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)          shift; break ;;
     -*)          echo "omarchy-promptopt: unknown option $1" >&2; exit 2 ;;
     *)           break ;;
@@ -154,6 +206,41 @@ note() { ((DO_NOTIFY)) && notify-send -a "Prompt Opt" "$@" 2>/dev/null || true; 
 # Rough token estimate: ~4 chars per token for English prose. Good enough for a
 # before/after ratio; not a real tokenizer.
 est_tokens() { local n=${#1}; echo $(( (n + 3) / 4 )); }
+
+# Append one telemetry line. $1 = 1 ok / 0 failed. Best-effort: any problem
+# (no jq, unwritable state dir, logging disabled) is swallowed silently.
+MODEL_USED=""
+FELL_BACK=0
+log_run() {
+  [[ "${PROMPTOPT_LOG:-1}" == 0 ]] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  local ok="$1" ms=0 tlen=0 olen=0 delta=0
+  [[ -n "${START_MS:-}" ]] && ms=$(( $(date +%s%3N) - START_MS ))
+  [[ -n "${TEXT+x}" ]] && tlen=${#TEXT}
+  [[ -n "${OUT+x}"  ]] && olen=${#OUT}
+  (( ${IN_TOK:-0} > 0 )) && delta=$(( (IN_TOK - ${OUT_TOK:-0}) * 100 / IN_TOK ))
+  local a=(
+    --arg     ts        "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    --arg     ctx       "${CTX:-?}"
+    --argjson forced    "$([[ -n "${FORCE_CTX:-}" ]] && echo true || echo false)"
+    --arg     model     "${MODEL_USED:-}"
+    --argjson fallback  "$([[ "${FELL_BACK:-0}" == 1 ]] && echo true || echo false)"
+    --argjson in_chars  "$tlen"
+    --argjson out_chars "$olen"
+    --argjson in_tok    "${IN_TOK:-0}"
+    --argjson out_tok   "${OUT_TOK:-0}"
+    --argjson delta_pct "$delta"
+    --argjson ms        "$ms"
+    --argjson ok        "$ok"
+  )
+  local f='{ts:$ts,ctx:$ctx,forced:$forced,model:$model,fallback:$fallback,in_chars:$in_chars,out_chars:$out_chars,in_tok:$in_tok,out_tok:$out_tok,delta_pct:$delta_pct,ms:$ms,ok:($ok==1)}'
+  if [[ "${PROMPTOPT_LOG_TEXT:-0}" == 1 ]]; then
+    a+=( --arg input "${TEXT:-}" --arg output "${OUT:-}" )
+    f='{ts:$ts,ctx:$ctx,forced:$forced,model:$model,fallback:$fallback,in_chars:$in_chars,out_chars:$out_chars,in_tok:$in_tok,out_tok:$out_tok,delta_pct:$delta_pct,ms:$ms,ok:($ok==1),input:$input,output:$output}'
+  fi
+  jq -cn "${a[@]}" "$f" >> "$LOG_FILE" 2>/dev/null || true
+}
 
 # --- gather input -------------------------------------------------------------
 if (($#)); then
@@ -185,11 +272,16 @@ IN_TOK="$(est_tokens "$TEXT")"
 
 note "Optimising [$CTX]..." "Tightening the requirement into a lean prompt."
 
+START_MS="$(date +%s%3N)"
 OUT=""
 ERR=""
 BEST=""
+tried=0
 for m in "${MODELS[@]}"; do
   [[ -n "$m" ]] || continue
+  MODEL_USED="$m"
+  (( tried > 0 )) && FELL_BACK=1
+  tried=$((tried + 1))
   if OUT="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
              --max-tokens 450 --temp 0.15 --timeout 60 "$TEXT" 2>&1)"; then
     [[ -n "${BEST// }" ]] || BEST="$OUT"
@@ -202,7 +294,7 @@ for m in "${MODELS[@]}"; do
   OUT=""
 done
 [[ -n "${OUT// }" ]] || OUT="$BEST"
-[[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; echo "omarchy-promptopt: ${ERR:-failed}" >&2; exit 1; }
+[[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; OUT=""; log_run 0; echo "omarchy-promptopt: ${ERR:-failed}" >&2; exit 1; }
 
 # --- clean the model output -------------------------------------------------
 # Drop a <think> block from a thinking-variant override.
@@ -220,6 +312,7 @@ OUT="$(printf '%s\n' "$OUT" | sed -E 's/[[:space:]]+$//' | sed -E '/./,$!d' | ta
 
 if [[ -z "${OUT// }" ]]; then
   note "Model returned nothing usable."
+  OUT=""; log_run 0
   echo "omarchy-promptopt: empty result after cleanup" >&2
   exit 1
 fi
@@ -247,3 +340,5 @@ fi
 CLIPNOTE=""
 ((DO_CLIP)) && CLIPNOTE=$'\n\n(copied to clipboard)'
 note "$SUMMARY" "$OUT$CLIPNOTE"
+
+log_run 1
