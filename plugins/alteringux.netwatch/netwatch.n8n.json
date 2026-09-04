@@ -1,0 +1,141 @@
+{
+  "name": "Netwatch — digest + alert fan-out",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "netwatch",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "webhook-in",
+      "name": "Netwatch webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [260, 200],
+      "webhookId": "netwatch"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ ($json.body.alerts || []).length }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "if-alerts",
+      "name": "Has alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [480, 200]
+    },
+    {
+      "parameters": {
+        "fieldToSplitOut": "body.alerts",
+        "options": {}
+      },
+      "id": "split-alerts",
+      "name": "One item per alert",
+      "type": "n8n-nodes-base.itemLists",
+      "typeVersion": 3,
+      "position": [700, 120]
+    },
+    {
+      "parameters": {
+        "command": "=notify-send -a Netwatch -u {{ $json.level === 'critical' ? 'critical' : 'normal' }} \"Netwatch: {{ $json.kind }}\" \"{{ $json.msg }}\""
+      },
+      "id": "exec-notify",
+      "name": "notify-send",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [920, 120],
+      "notesInFlow": true,
+      "notes": "Replace / add channels here: ntfy (HTTP Request to https://ntfy.sh/<topic>), email, Slack, etc. $json is one alert: { kind, level, msg }."
+    },
+    {
+      "parameters": {},
+      "id": "noop-heartbeat",
+      "name": "Heartbeat (archive here)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [700, 300],
+      "notesInFlow": true,
+      "notes": "Every sample lands here with { ts, status, alerts:[] }. Wire a Google Sheets / Postgres / Append-to-file node to keep traffic history beyond the plugin's 90-day ring."
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "cronExpression", "expression": "0 8 * * *" }
+          ]
+        }
+      },
+      "id": "cron-daily",
+      "name": "Daily 08:00",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [260, 480]
+    },
+    {
+      "parameters": {
+        "command": "omarchy-netwatch month --json"
+      },
+      "id": "exec-month",
+      "name": "netwatch month --json",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [480, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "const r = JSON.parse($json.stdout || '{}');\nconst h = (n) => {\n  n = Number(n) || 0;\n  if (n < 1e6) return (n/1e3).toFixed(1) + ' kB';\n  if (n < 1e9) return (n/1e6).toFixed(1) + ' MB';\n  return (n/1e9).toFixed(2) + ' GB';\n};\nconst line = `Month so far: ↓${h(r.total?.rx)}  ↑${h(r.total?.tx)}  (Σ ${h(r.total?.total)}), peak day ${r.peak?.label || '—'} at ${h((r.peak?.rx||0)+(r.peak?.tx||0))}`;\nreturn [{ json: { summary: line, report: r } }];"
+      },
+      "id": "fn-format",
+      "name": "Format digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [700, 480]
+    },
+    {
+      "parameters": {
+        "command": "=notify-send -a Netwatch \"Netwatch — monthly data\" \"{{ $json.summary }}\""
+      },
+      "id": "exec-digest-notify",
+      "name": "Deliver digest",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [920, 480],
+      "notesInFlow": true,
+      "notes": "Swap for email / Slack / a write to ~/Documents/netwatch-log.md as you like. $json.summary is the one-liner; $json.report the full series."
+    }
+  ],
+  "connections": {
+    "Netwatch webhook": {
+      "main": [[{ "node": "Has alerts?", "type": "main", "index": 0 }]]
+    },
+    "Has alerts?": {
+      "main": [
+        [{ "node": "One item per alert", "type": "main", "index": 0 }],
+        [{ "node": "Heartbeat (archive here)", "type": "main", "index": 0 }]
+      ]
+    },
+    "One item per alert": {
+      "main": [[{ "node": "notify-send", "type": "main", "index": 0 }]]
+    },
+    "Daily 08:00": {
+      "main": [[{ "node": "netwatch month --json", "type": "main", "index": 0 }]]
+    },
+    "netwatch month --json": {
+      "main": [[{ "node": "Format digest", "type": "main", "index": 0 }]]
+    },
+    "Format digest": {
+      "main": [[{ "node": "Deliver digest", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

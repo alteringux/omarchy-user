@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.netwatch",
+  "name": "Netwatch",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Native network-traffic tracker: live down/up rate on the bar, hour/day/month rollups, monthly-quota alerts, and a live connection breakdown from `ss`. State engine is ~/.local/bin/omarchy-netwatch; the widget is a thin view.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Netwatch",
+    "description": "Network in/out rate, totals, and analytics",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

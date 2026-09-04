@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# omarchy-netwatch — native network-traffic tracker + analytics engine.
+#
+# Sole writer of three files in ~/.local/state/omarchy/:
+#   netwatch-state.json     the rich state the bar widget / panel watch
+#   netwatch-sample.json    last raw /proc/net/dev counter reading (for deltas)
+#   netwatch-config.json    hand-editable settings (seeded on first run)
+#
+# HOW IT WORKS
+#   /proc/net/dev only exposes cumulative RX/TX byte counters since boot. A
+#   *rate* is (counter_now - counter_prev) / seconds_elapsed. A *total for
+#   today / this month* is not something the kernel tracks — `sample` takes the
+#   delta since the previous reading and accumulates it into hour/day/month
+#   buckets in netwatch-state.json. Run it on a cadence (the shipped
+#   omarchy-netwatch-sample.timer does, every ~20s); the bar widget also calls
+#   it on its own tick for a fresh live rate.
+#
+#   `top` is a separate, instantaneous view: it parses `ss -tunHp` (no root
+#   needed for your own processes) into a by-state / by-process / by-peer
+#   breakdown. Recv-Q/Send-Q are shown as a rough "queued bytes" proxy — they
+#   are not throughput.
+#
+# VERBS
+#   sample [--webhook URL]   read counters, roll buckets, fire alerts, (opt) POST
+#   status                   flat { iface, rxRate, txRate, today, month, quota… }
+#   get                      print netwatch-state.json
+#   today | week | month     analytics rollup (add --json for the raw series)
+#   report RANGE [--json]     same as the three above; RANGE = today|week|month
+#   sparkline [-n N]          last N live rate samples (JSON)
+#   top [--json]              live connection breakdown from `ss`
+#   watch [--interval S]      foreground loop: sample; sleep
+#   config                   print netwatch-config.json (edit it by hand)
+#   reset                    wipe state + sample (keeps config)
+#
+# Reuses the sibling plugin CLIs: alerts go through `omarchy-pulse log
+# alteringux.netwatch …`; VPN tagging reads whatever `protonvpn-rotate status`
+# / the interface name says.
+#
+# Env: OMARCHY_STATE_DIR    override the state dir (tests)
+#      OMARCHY_NETWATCH_DIR  override the plugin dir holding Model.js / the bridge
+#      OMARCHY_NETWATCH_QUIET=1   skip omarchy-pulse / notify-send (tests)
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+NW_DIR="${OMARCHY_NETWATCH_DIR:-$HOME/.config/omarchy/plugins/alteringux.netwatch}"
+STATE_FILE="$STATE_DIR/netwatch-state.json"
+SAMPLE_FILE="$STATE_DIR/netwatch-sample.json"
+CONFIG_FILE="$STATE_DIR/netwatch-config.json"
+CLI="$NW_DIR/netwatch-cli.js"
+QUIET="${OMARCHY_NETWATCH_QUIET:-0}"
+
+DEFAULT_CONFIG='{
+  "iface": "auto",
+  "sampleIntervalSec": 20,
+  "monthlyQuotaGB": 0,
+  "quotaCountsTx": true,
+  "spikeMbps": 50,
+  "ratesRingSize": 180,
+  "hourlyCap": 72,
+  "dailyCap": 90,
+  "monthlyCap": 24,
+  "webhook": ""
+}'
+
+die() { echo "omarchy-netwatch: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now_ms() { date +%s%3N; }
+ensure_dir() { mkdir -p "$STATE_DIR"; }
+read_file() { [ -f "$1" ] && cat "$1" || printf ''; }
+
+have node || die "needs node on PATH"
+have jq || die "needs jq on PATH"
+
+bridge() { node "$CLI" "$1"; }
+
+put_file() { # put_file <path> ; content on stdin, atomic
+  local f="$1" tmp
+  ensure_dir
+  tmp="$(mktemp "${f}.XXXXXX")"
+  cat >"$tmp"
+  mv -f "$tmp" "$f"
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  ensure_dir
+  printf '%s\n' "$DEFAULT_CONFIG" | jq . | put_file "$CONFIG_FILE"
+}
+
+read_config() {
+  seed_config
+  jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"
+}
+
+# ── interface + link facts ────────────────────────────────────────────────
+
+detect_iface() {
+  local want
+  want="$(read_config | jq -r '.iface // "auto"')"
+  if [ "$want" != "auto" ] && [ -n "$want" ]; then
+    printf '%s' "$want"
+    return 0
+  fi
+  # default route wins
+  local dr
+  dr="$(ip -o route show default 2>/dev/null | awk '{print $5; exit}')"
+  if [ -n "$dr" ]; then printf '%s' "$dr"; return 0; fi
+  # else first non-lo interface that is up
+  ip -o link show up 2>/dev/null | awk -F': ' '$2 != "lo" {print $2; exit}'
+}
+
+iface_up() { # -> "true" / "false"
+  local i="$1" st
+  st="$(cat "/sys/class/net/$i/operstate" 2>/dev/null || echo down)"
+  [ "$st" = "up" ] && echo true || echo false
+}
+
+iface_is_vpn() { # -> "true" / "false"
+  local i="$1"
+  case "$i" in
+    tun* | wg* | proton* | nordlynx | tailscale* | zt*) echo true; return 0 ;;
+  esac
+  if ip -d link show "$i" 2>/dev/null | grep -qE '\b(wireguard|tun|openvpn)\b'; then
+    echo true; return 0
+  fi
+  if have protonvpn-rotate && protonvpn-rotate status 2>/dev/null | grep -qiwE 'connected|active'; then
+    echo true; return 0
+  fi
+  echo false
+}
+
+read_dev() { # read_dev <iface> -> "<rxBytes> <txBytes>" (0 0 if missing)
+  local i="$1"
+  awk -v ifc="$i" '
+    $1 ~ "^"ifc":" {
+      # strip the trailing ":" from the interface token
+      sub(/:$/, "", $1)
+      if ($1 == ifc) { print $2, $10; found=1 }
+    }
+    END { if (!found) print 0, 0 }
+  ' /proc/net/dev 2>/dev/null || echo "0 0"
+}
+
+# ── verbs ────────────────────────────────────────────────────────────────
+
+emit_alerts() { # stdin: JSON array of {kind,level,attention,msg}
+  [ "$QUIET" = 1 ] && { cat >/dev/null; return 0; }
+  have omarchy-pulse || { cat >/dev/null; return 0; }
+  local arr; arr="$(cat)"
+  local n; n="$(printf '%s' "$arr" | jq 'length' 2>/dev/null || echo 0)"
+  [ "$n" -gt 0 ] || return 0
+  local i
+  for i in $(seq 0 $((n - 1))); do
+    local kind level att msg
+    kind="$(printf '%s' "$arr" | jq -r ".[$i].kind")"
+    level="$(printf '%s' "$arr" | jq -r ".[$i].level")"
+    att="$(printf '%s' "$arr" | jq -r ".[$i].attention")"
+    msg="$(printf '%s' "$arr" | jq -r ".[$i].msg")"
+    local flags=(--level "$level" --notify)
+    [ "$att" = "true" ] && flags+=(--attention --action "$0 today" --action-label "View traffic")
+    omarchy-pulse log alteringux.netwatch "$msg" "${flags[@]}" || true
+  done
+}
+
+post_webhook() { # post_webhook <url>  ; body from stdin
+  local url="$1"
+  [ -n "$url" ] || { cat >/dev/null; return 0; }
+  have curl || { cat >/dev/null; return 0; }
+  curl -fsS -m 5 -X POST -H 'Content-Type: application/json' --data @- "$url" >/dev/null 2>&1 || true
+}
+
+cmd_sample() {
+  local webhook_override=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --webhook) webhook_override="${2:-}"; shift 2 ;;
+      *) die "sample: unexpected arg '$1'" ;;
+    esac
+  done
+
+  ensure_dir
+  local cfg iface up isvpn dev rx tx ts
+  cfg="$(read_config)"
+  iface="$(detect_iface)"
+  [ -n "$iface" ] || die "no usable network interface found"
+  up="$(iface_up "$iface")"
+  isvpn="$(iface_is_vpn "$iface")"
+  dev="$(read_dev "$iface")"
+  rx="${dev%% *}"
+  tx="${dev##* }"
+  ts="$(now_ms)"
+
+  local cur payload result
+  cur="$(jq -n --arg i "$iface" --argjson rx "${rx:-0}" --argjson tx "${tx:-0}" \
+    --argjson up "$up" --argjson vpn "$isvpn" --argjson ts "$ts" \
+    '{ts:$ts, rxBytes:$rx, txBytes:$tx, iface:$i, up:$up, isVpn:$vpn}')"
+
+  payload="$(jq -n \
+    --arg st "$(read_file "$STATE_FILE")" \
+    --arg sm "$(read_file "$SAMPLE_FILE")" \
+    --argjson cur "$cur" \
+    --argjson cfg "$cfg" \
+    --argjson now "$ts" \
+    '{stateRaw:$st, sampleRaw:$sm, cur:$cur, config:$cfg, now:$now}')"
+
+  result="$(printf '%s' "$payload" | bridge ingest)"
+
+  printf '%s' "$result" | jq '.state' | put_file "$STATE_FILE"
+  printf '%s' "$result" | jq '.sample' | put_file "$SAMPLE_FILE"
+  printf '%s' "$result" | jq -c '.alerts // []' | emit_alerts
+
+  local webhook
+  webhook="${webhook_override:-$(printf '%s' "$cfg" | jq -r '.webhook // ""')}"
+  if [ -n "$webhook" ]; then
+    # Every sample POSTs { ts, status, alerts } — a heartbeat n8n can archive
+    # for long-term history, with alerts[] non-empty only when one just fired.
+    local al
+    al="$(printf '%s' "$result" | jq -c '.alerts // []')"
+    jq -n --argjson status "$(cmd_status)" --argjson alerts "$al" --argjson ts "$ts" \
+      '{ts:$ts, status:$status, alerts:$alerts}' | post_webhook "$webhook"
+  fi
+}
+
+cmd_status() {
+  jq -n \
+    --arg st "$(read_file "$STATE_FILE")" \
+    --argjson cfg "$(read_config)" \
+    --argjson now "$(now_ms)" \
+    '{stateRaw:$st, config:$cfg, now:$now}' | bridge status
+}
+
+cmd_report() {
+  local range="${1:-today}" json=0
+  shift || true
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) die "report: unexpected arg '$1'" ;;
+    esac
+  done
+  local raw
+  raw="$(jq -n \
+    --arg st "$(read_file "$STATE_FILE")" \
+    --arg range "$range" \
+    --argjson now "$(now_ms)" \
+    '{stateRaw:$st, range:$range, now:$now}' | bridge report)"
+  if [ "$json" = 1 ]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+  printf '%s' "$raw" | jq -r '
+    def h(n): if n < 1000 then "\(n|floor) B"
+      elif n < 1e6 then "\(n/1e3*10|round/10) kB"
+      elif n < 1e9 then "\(n/1e6*10|round/10) MB"
+      else "\(n/1e9*100|round/100) GB" end;
+    "── \(.range | ascii_upcase) ──",
+    "  down   \(h(.total.rx))",
+    "  up     \(h(.total.tx))",
+    "  total  \(h(.total.total))",
+    "  peak   \(h(.peak.rx + .peak.tx)) @ \(.peak.label)"
+  '
+}
+
+cmd_sparkline() {
+  local n=40
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-40}"; shift 2 ;;
+      *) die "sparkline: unexpected arg '$1'" ;;
+    esac
+  done
+  jq -n --arg st "$(read_file "$STATE_FILE")" --argjson n "$n" \
+    '{stateRaw:$st, n:$n}' | bridge sparkline
+}
+
+# Live connection breakdown — pure ss + jq, no engine round-trip.
+cmd_top() {
+  local json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      *) die "top: unexpected arg '$1'" ;;
+    esac
+  done
+  have ss || die "needs ss (iproute2) on PATH"
+
+  # Tab-delimited so process names with spaces ("granian wsgi 12") survive.
+  local out
+  out="$(ss -tunHp 2>/dev/null | awk -F'\t' 'BEGIN{OFS="\t"}
+    {
+      n = split($0, f, /[ \t]+/);
+      state = f[2]; rq = f[3]+0; sq = f[4]+0; peer = f[6];
+      sub(/:[^:]*$/, "", peer);   # drop :port
+      sub(/%.*/, "", peer);       # drop %scope
+      pname = "-";
+      if (match($0, /\(\("[^"]+"/)) pname = substr($0, RSTART+3, RLENGTH-4);
+      total++;
+      st[state]++;
+      pr[pname]++; prq[pname]+=rq; psq[pname]+=sq;
+      pe[peer]++;
+    }
+    END {
+      print "TOTAL", total+0, "", "";
+      for (k in st) print "STATE", k, st[k], "";
+      for (k in pr) print "PROC", k, pr[k], prq[k]+0 "/" psq[k]+0;
+      for (k in pe) print "PEER", k, pe[k], "";
+    }
+  ')"
+
+  local jsonout
+  jsonout="$(printf '%s\n' "$out" | jq -Rn '
+    reduce (inputs | split("\t")) as $l (
+      {total:0, byState:{}, byProc:[], byPeer:[]};
+      if   $l[0] == "TOTAL" then .total = ($l[1]|tonumber)
+      elif $l[0] == "STATE" then .byState[$l[1]] = ($l[2]|tonumber)
+      elif $l[0] == "PROC"  then .byProc += [{name:$l[1], conns:($l[2]|tonumber), queued:$l[3]}]
+      elif $l[0] == "PEER"  then .byPeer += [{addr:$l[1], conns:($l[2]|tonumber)}]
+      else . end
+    )
+    | .byProc |= (sort_by(-.conns))
+    | .byPeer |= (sort_by(-.conns))
+  ')"
+
+  if [ "$json" = 1 ]; then
+    printf '%s\n' "$jsonout"
+    return 0
+  fi
+  printf '%s' "$jsonout" | jq -r '
+    "── CONNECTIONS (\(.total)) ──",
+    "  by state:  " + ([.byState | to_entries[] | "\(.key) \(.value)"] | join("  ")),
+    "  by process:",
+    (.byProc[:8][] | "    \(.name)  \(.conns) conn  q:\(.queued)"),
+    "  top peers:",
+    (.byPeer[:8][] | "    \(.addr)  \(.conns)")
+  '
+}
+
+cmd_watch() {
+  local interval
+  interval="$(read_config | jq -r '.sampleIntervalSec // 20')"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="${2:-20}"; shift 2 ;;
+      *) die "watch: unexpected arg '$1'" ;;
+    esac
+  done
+  echo "omarchy-netwatch: sampling every ${interval}s (Ctrl-C to stop)" >&2
+  while :; do
+    cmd_sample || true
+    sleep "$interval"
+  done
+}
+
+cmd_reset() {
+  rm -f "$STATE_FILE" "$SAMPLE_FILE"
+  echo "omarchy-netwatch: state + sample cleared (config kept)"
+}
+
+usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-status}" in
+  sample)              shift; cmd_sample "$@" ;;
+  status)             shift || true; cmd_status ;;
+  get)                shift || true; read_file "$STATE_FILE" | jq . 2>/dev/null || echo '{}' ;;
+  today)              shift || true; cmd_report today "$@" ;;
+  week)               shift || true; cmd_report week "$@" ;;
+  month)              shift || true; cmd_report month "$@" ;;
+  report)             shift; cmd_report "$@" ;;
+  sparkline)          shift; cmd_sparkline "$@" ;;
+  top)                shift; cmd_top "$@" ;;
+  watch)              shift; cmd_watch "$@" ;;
+  config)             shift || true; read_config | jq . ;;
+  reset)              shift || true; cmd_reset ;;
+  -h | --help | help) usage ;;
+  *) die "unknown command '$1' (try --help)" ;;
+esac
