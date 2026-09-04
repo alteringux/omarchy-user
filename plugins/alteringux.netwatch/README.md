@@ -104,6 +104,14 @@ omarchy-netwatch config                   print config (edit the file by hand)
 omarchy-netwatch reset                    wipe state + sample (keeps config)
 ```
 
+## Self-improvement loop
+
+This plugin opts in (`improve.json` + `roadmap.md`). It emits `counter-reset` /
+`iface-change` / `spike-alert` / `no-iface` insights, and you can add
+`omarchy-netwatch flag "<what looked inaccurate>"`. A gated, OFF-by-default
+critic turns the accumulated insights into reviewable diff proposals. See
+`../../docs/self-improvement-loop.md`.
+
 ## Tests
 
 ```bash

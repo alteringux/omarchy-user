@@ -74,6 +74,15 @@ Notes:
   to the command (slower; consider `SessionEnd` framing instead).
 - Remove the hook block to stop.
 
+## Self-improvement loop
+
+This plugin opts in (`improve.json` + `roadmap.md`). `build` emits
+`unknown-tool` / `unpaired-tool` / `heavy-truncation` / `high-redaction`
+insights from `cast.warnings`, and `omarchy-devcast flag <id> "<what was
+wrong>"` records a human one. A gated, OFF-by-default critic turns the
+accumulated insights into reviewable diff proposals. See
+`../../docs/self-improvement-loop.md`.
+
 ## Slash command
 
 `~/.claude/commands/devcast.md` → `/devcast [session-id]` asks Claude to run

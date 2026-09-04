@@ -187,6 +187,13 @@ function ingest(state, prevSample, cur, config, now) {
 
   var sample = { ts: num(cur.ts, t), iface: cur.iface || "", rxBytes: num(cur.rxBytes, 0), txBytes: num(cur.txBytes, 0) }
 
+  var ifaceChanged = !!(prevSample && prevSample.iface && prevSample.iface !== sample.iface)
+  var counterReset = !!(
+    prevSample &&
+    prevSample.iface === sample.iface &&
+    (sample.rxBytes < prevSample.rxBytes || sample.txBytes < prevSample.txBytes)
+  )
+
   var usable =
     prevSample &&
     prevSample.iface === sample.iface &&
@@ -277,7 +284,12 @@ function ingest(state, prevSample, cur, config, now) {
     s.tx.rate = 0
   }
 
-  return { state: s, sample: sample, alerts: alerts }
+  return {
+    state: s,
+    sample: sample,
+    alerts: alerts,
+    meta: { usableDelta: !!usable, counterReset: counterReset, ifaceChanged: ifaceChanged }
+  }
 }
 
 // ── read-side projections ─────────────────────────────────────────────────

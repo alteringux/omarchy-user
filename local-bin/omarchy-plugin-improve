@@ -1,0 +1,476 @@
+#!/usr/bin/env bash
+# omarchy-plugin-improve — a propose-and-approve "self-improvement" loop for the
+# alteringux.* plugins that opt in with an improve.json.
+#
+# Three stages, deliberately decoupled so nothing touches code unattended:
+#
+#   1. INSIGHTS  — the plugin's own CLI (and you, via `flag`) append short
+#      observations about where it fell short, to
+#      ~/.local/state/omarchy/improve/<tool>/insights.jsonl
+#   2. CRITIC    — `critic` feeds the accumulated insights + roadmap + current
+#      source to Featherless (llm-blurb, off the Claude subscription) and asks
+#      for <=3 minimal unified diffs, written to
+#      ~/.local/state/omarchy/improve/<tool>/proposals/<date>.md
+#      GATED by the kill switch (`toggle on` to allow it) — it spends API
+#      concurrency and is what a timer would run.
+#   3. APPLY     — `apply` drops the chosen diffs into a throwaway git worktree
+#      of ~/.config/omarchy, runs the plugin's tests, and hands you the
+#      worktree to review. It never commits, never merges, never edits the live
+#      tree or ~/.local/bin.
+#
+# Verbs:
+#   insight <tool> <kind> [--severity low|med|high] [--detail T] [--data JSON]
+#   flag <tool> <text...>              a human "this was wrong" insight
+#   insights <tool> [-n N] [--json]
+#   digest <tool> [--json]             aggregated view the critic is fed
+#   critic <tool|--all> [--force] [--model M] [--dry-run]
+#   proposals <tool> [--json]          list proposal files
+#   show <tool> [<date>]               print a proposal file (newest if omitted)
+#   apply <tool> <date> [--only N]     stage diffs in a worktree + run tests
+#   revert <tool>                      remove that worktree + its branch
+#   toggle on|off|status              the critic kill switch (default OFF)
+#   status [<tool>]
+#   tools                             list plugins that carry an improve.json
+#
+# Env: OMARCHY_STATE_DIR, OMARCHY_OMARCHY_REPO (default ~/.config/omarchy),
+#      OMARCHY_IMPROVE_QUIET=1
+set -uo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+REPO="${OMARCHY_OMARCHY_REPO:-$HOME/.config/omarchy}"
+IMPROVE_DIR="$STATE_DIR/improve"
+TOGGLE_DIR="$STATE_DIR/toggles"
+ENABLE_MARKER="$TOGGLE_DIR/plugin-improve-on"   # critic runs ONLY when this exists (default: off)
+QUIET="${OMARCHY_IMPROVE_QUIET:-0}"
+
+die() { echo "omarchy-plugin-improve: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now_ms() { date +%s%3N; }
+have jq || die "needs jq"
+
+manifest_for() {  # <tool> -> path to improve.json (or empty)
+  local f="$REPO/plugins/alteringux.$1/improve.json"
+  [ -f "$f" ] && printf '%s' "$f"
+}
+
+all_tools() {
+  find "$REPO/plugins" -maxdepth 2 -name improve.json 2>/dev/null \
+    | sed -E 's#.*/plugins/alteringux\.([^/]+)/improve\.json#\1#' | sort
+}
+
+tool_dir() { printf '%s' "$IMPROVE_DIR/$1"; }
+insights_file() { printf '%s' "$(tool_dir "$1")/insights.jsonl"; }
+proposals_dir() { printf '%s' "$(tool_dir "$1")/proposals"; }
+
+require_tool() {
+  local m; m="$(manifest_for "$1")"
+  [ -n "$m" ] || die "no improve.json for '$1' (expected $REPO/plugins/alteringux.$1/improve.json)"
+  printf '%s' "$m"
+}
+
+# ── insight / flag ─────────────────────────────────────────────────────
+
+cmd_insight() {
+  local tool="${1:-}"; shift || true
+  local kind="${1:-}"; shift || true
+  [ -n "$tool" ] && [ -n "$kind" ] || die "usage: insight <tool> <kind> [--severity S] [--detail T] [--data JSON]"
+  local sev="low" detail="" data="{}" src="auto"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --severity) sev="${2:-low}"; shift 2 ;;
+      --detail)   detail="${2:-}"; shift 2 ;;
+      --data)     data="${2:-}"; shift 2 ;;
+      --source)   src="${2:-auto}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  require_tool "$tool" >/dev/null
+  local d; d="$(tool_dir "$tool")"; mkdir -p "$d"
+  local dataJson='{}'
+  if [ -n "$data" ] && printf '%s' "$data" | jq -e . >/dev/null 2>&1; then
+    dataJson="$(printf '%s' "$data" | jq -c .)"
+  fi
+  jq -cn --argjson ts "$(now_ms)" --arg kind "$kind" --arg sev "$sev" \
+    --arg detail "$detail" --argjson data "$dataJson" --arg src "$src" \
+    '{ts:$ts, kind:$kind, severity:$sev, detail:$detail, source:$src, data:$data}' \
+    >> "$(insights_file "$tool")"
+}
+
+cmd_flag() {
+  local tool="${1:-}"; shift || true
+  [ -n "$tool" ] && [ $# -gt 0 ] || die "usage: flag <tool> <what was wrong...>"
+  cmd_insight "$tool" "flag" --severity med --detail "$*" --source flag
+  echo "flagged for $tool: $*"
+}
+
+cmd_insights() {
+  local tool="${1:-}"; shift || true
+  [ -n "$tool" ] || die "usage: insights <tool> [-n N] [--json]"
+  local n=30 json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in -n) n="${2:-30}"; shift 2 ;; --json) json=1; shift ;; *) shift ;; esac
+  done
+  local f; f="$(insights_file "$tool")"
+  [ -f "$f" ] || { echo "no insights logged for $tool"; return 0; }
+  if [ "$json" = 1 ]; then
+    tail -n "$n" "$f" | jq -s .
+  else
+    tail -n "$n" "$f" | jq -r '"\(.ts|(./1000|strftime("%m-%d %H:%M")))  [\(.severity)] \(.kind)  \(.detail)"'
+  fi
+}
+
+cmd_digest() {
+  local tool="${1:-}"; shift || true
+  [ -n "$tool" ] || die "usage: digest <tool> [--json]"
+  local json=0; [ "${1:-}" = "--json" ] && json=1
+  local f; f="$(insights_file "$tool")"
+  local raw="[]"
+  [ -f "$f" ] && raw="$(jq -s . "$f")"
+  local digest
+  digest="$(jq -n --argjson rows "$raw" --arg tool "$tool" '
+    ($rows | length) as $total |
+    {
+      tool: $tool,
+      total: $total,
+      since: ($rows | map(.ts) | min // 0),
+      until: ($rows | map(.ts) | max // 0),
+      byKind: (
+        $rows | group_by(.kind) | map({
+          key: .[0].kind,
+          value: {
+            count: length,
+            severities: (map(.severity) | group_by(.) | map({(.[0]): length}) | add),
+            samples: (map(.detail) | map(select(. != "")) | unique | .[0:4])
+          }
+        }) | from_entries
+      ),
+      flags: ($rows | map(select(.source == "flag") | .detail) | .[-10:])
+    }
+  ')"
+  if [ "$json" = 1 ]; then printf '%s\n' "$digest"; else
+    printf '%s\n' "$digest" | jq -r '
+      "── \(.tool) insight digest ──",
+      "  \(.total) observations" + (if .total>0 then "  (\((.since/1000)|strftime("%Y-%m-%d")) → \((.until/1000)|strftime("%Y-%m-%d")))" else "" end),
+      (.byKind | to_entries[] | "  \(.key): \(.value.count)  \(.value.samples | join(" | "))"),
+      (if (.flags|length)>0 then "  flags: " + (.flags | join(" ; ")) else empty end)'
+  fi
+}
+
+# ── critic ────────────────────────────────────────────────────────────
+
+critic_enabled() { [ -e "$ENABLE_MARKER" ]; }
+
+read_manifest_field() {  # <manifestPath> <jqpath> <default>
+  jq -r "$2 // \"$3\"" "$1"
+}
+
+CRITIC_TEMPLATE='You are a careful maintenance engineer for a personal Linux (Omarchy / Quickshell) plugin.
+
+Below are: (A) a digest of observed shortcomings collected by the plugin itself
+and by its user, (B) the plugin roadmap, (C) the full current source of the
+files you may change.
+
+Propose AT MOST 3 changes. Each change MUST:
+  - be a minimal, surgical unified diff (git diff format, 3 lines of context)
+  - target one of the exact file paths listed under SOURCES, using
+    "diff --git a/<path> b/<path>" with the path EXACTLY as given (repo-relative)
+  - directly address a specific digest entry or roadmap item (name which)
+  - not reformat, rename, or restructure code that is not part of the fix
+  - keep existing behaviour and public verbs intact
+  - be accompanied by any test additions needed, in the same diff
+
+Prefer accuracy fixes and small new analytics over features. If the digest does
+not justify a change, say so and propose fewer (or zero).
+
+Output format, nothing else:
+
+### Proposal 1: <short title>
+Addresses: <digest kind or roadmap item>
+Rationale: <2-3 sentences>
+```diff
+<unified diff>
+```
+
+(repeat for Proposal 2, 3)
+
+If you propose zero changes, output exactly: NO PROPOSALS — <one line why>.'
+
+cmd_critic() {
+  local target="${1:-}"; shift || true
+  [ -n "$target" ] || die "usage: critic <tool|--all> [--force] [--model M] [--dry-run]"
+  local force=0 model="" dry=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      --model) model="${2:-}"; shift 2 ;;
+      --dry-run) dry=1; shift ;;
+      *) shift ;;
+    esac
+  done
+
+  if ! critic_enabled && [ "$force" != 1 ]; then
+    die "critic is OFF by default. Enable with: omarchy-plugin-improve toggle on   (or pass --force for a one-off)"
+  fi
+  have llm-blurb || { echo "omarchy-plugin-improve: no llm-blurb on PATH — skipping critic" >&2; return 0; }
+
+  local tools
+  if [ "$target" = "--all" ]; then tools="$(all_tools)"; else tools="$target"; fi
+
+  local t
+  for t in $tools; do
+    local m; m="$(require_tool "$t")"
+    local criticModel; criticModel="${model:-$(read_manifest_field "$m" '.criticModel' 'Qwen/Qwen3-30B-A3B-Instruct-2507')}"
+    local promptFile; promptFile="$(mktemp)"
+    {
+      printf '%s\n\n' "$CRITIC_TEMPLATE"
+      local pp="$REPO/plugins/alteringux.$t/improve-prompt.md"
+      [ -f "$pp" ] && { echo "── PLUGIN-SPECIFIC GUIDANCE ──"; cat "$pp"; echo; }
+      echo "── (A) INSIGHT DIGEST ──"
+      cmd_digest "$t" --json
+      echo
+      echo "── (B) ROADMAP ──"
+      local rm="$REPO/plugins/alteringux.$t/roadmap.md"
+      [ -f "$rm" ] && cat "$rm" || echo "(none)"
+      echo
+      echo "── (C) SOURCES ──"
+      local src
+      while IFS= read -r src; do
+        [ -n "$src" ] || continue
+        echo "===== FILE: $src ====="
+        if [ -f "$REPO/$src" ]; then cat "$REPO/$src"; else echo "(missing: $REPO/$src)"; fi
+        echo "===== END $src ====="
+        echo
+      done < <(jq -r '.sources[]?' "$m")
+    } > "$promptFile"
+
+    if [ "$dry" = 1 ]; then
+      echo "── critic prompt for $t ($(wc -l < "$promptFile") lines, model $criticModel) ──"
+      cat "$promptFile"
+      rm -f "$promptFile"
+      continue
+    fi
+
+    echo "omarchy-plugin-improve: running critic for $t via $criticModel …" >&2
+    local out
+    out="$(llm-blurb --model "$criticModel" --max-tokens 4000 --temp 0.3 --timeout 180 \
+      --system "Output only the requested proposals. Diffs must apply cleanly with 'git apply'." \
+      < "$promptFile" 2>/dev/null)"
+    local rc=$?
+    rm -f "$promptFile"
+    if [ $rc -ne 0 ] || [ -z "$out" ]; then
+      echo "omarchy-plugin-improve: critic call failed for $t (llm-blurb rc=$rc)" >&2
+      continue
+    fi
+
+    mkdir -p "$(proposals_dir "$t")"
+    local pf; pf="$(proposals_dir "$t")/$(date +%Y%m%d-%H%M).md"
+    {
+      echo "# $t improvement proposals — $(date '+%Y-%m-%d %H:%M')"
+      echo "_model: ${criticModel}_"
+      echo
+      cmd_digest "$t"
+      echo
+      echo "---"
+      echo
+      printf '%s\n' "$out"
+    } > "$pf"
+
+    local nprop
+    nprop="$(grep -c '^### Proposal ' "$pf" 2>/dev/null || echo 0)"
+    echo "$pf  ($nprop proposal(s))"
+    if [ "$QUIET" != 1 ] && have omarchy-pulse; then
+      omarchy-pulse log "alteringux.$t" "$nprop improvement proposal(s) ready" \
+        --level info --action "omarchy-plugin-improve show $t" --action-label "Review" \
+        >/dev/null 2>&1 || true
+    fi
+  done
+}
+
+# ── proposals / show / apply / revert ─────────────────────────────────
+
+newest_proposal() { ls -1 "$(proposals_dir "$1")"/*.md 2>/dev/null | sort | tail -1; }
+
+cmd_proposals() {
+  local tool="${1:-}"; shift || true
+  [ -n "$tool" ] || die "usage: proposals <tool> [--json]"
+  local json=0; [ "${1:-}" = "--json" ] && json=1
+  local d; d="$(proposals_dir "$tool")"
+  [ -d "$d" ] || { echo "no proposals for $tool yet — run: omarchy-plugin-improve critic $tool"; return 0; }
+  if [ "$json" = 1 ]; then
+    for f in "$d"/*.md; do
+      [ -e "$f" ] || continue
+      jq -n --arg id "$(basename "$f" .md)" --arg path "$f" \
+        --argjson n "$(grep -c '^### Proposal ' "$f" 2>/dev/null || echo 0)" \
+        '{id:$id, path:$path, proposals:$n}'
+    done | jq -s .
+  else
+    for f in "$d"/*.md; do
+      [ -e "$f" ] || continue
+      printf '%s  %s proposal(s)\n' "$(basename "$f" .md)" "$(grep -c '^### Proposal ' "$f" 2>/dev/null || echo 0)"
+    done
+  fi
+}
+
+cmd_show() {
+  local tool="${1:-}"; shift || true
+  [ -n "$tool" ] || die "usage: show <tool> [<date>]"
+  local id="${1:-}"
+  local f
+  if [ -n "$id" ]; then f="$(proposals_dir "$tool")/$id.md"; else f="$(newest_proposal "$tool")"; fi
+  [ -n "$f" ] && [ -f "$f" ] || die "no such proposal (try: omarchy-plugin-improve proposals $tool)"
+  cat "$f"
+}
+
+# Extract fenced ```diff blocks from a proposal file. --only N keeps just the
+# Nth "### Proposal" section's diffs.
+extract_diffs() {  # <file> [onlyN]
+  local file="$1" only="${2:-}"
+  awk -v only="$only" '
+    /^### Proposal / { pnum++; inprop = (only == "" || pnum == only) }
+    /^```diff[ \t]*$/ { if (inprop) { inblock=1; next } }
+    /^```[ \t]*$/ { if (inblock) { inblock=0; print "\x1e"; next } }
+    { if (inblock && inprop) print }
+  ' "$file"
+}
+
+cmd_apply() {
+  local tool="${1:-}"; shift || true
+  local id="${1:-}"; shift || true
+  [ -n "$tool" ] || die "usage: apply <tool> <date> [--only N]"
+  local only=""
+  [ "${1:-}" = "--only" ] && only="${2:-}"
+
+  local m; m="$(require_tool "$tool")"
+  local f
+  if [ -n "$id" ]; then f="$(proposals_dir "$tool")/$id.md"; else f="$(newest_proposal "$tool")"; id="$(basename "$f" .md 2>/dev/null)"; fi
+  [ -n "$f" ] && [ -f "$f" ] || die "no such proposal"
+
+  git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO is not a git repo"
+
+  local wt branch
+  wt="$(tool_dir "$tool")/worktree"
+  branch="improve/$tool-$id"
+  if [ -d "$wt" ]; then
+    echo "omarchy-plugin-improve: reusing worktree $wt (revert first for a clean apply)" >&2
+  else
+    git -C "$REPO" worktree add -B "$branch" "$wt" HEAD >/dev/null 2>&1 \
+      || die "could not create worktree $wt"
+  fi
+
+  # split the extracted diffs into one temp file per block, on the 0x1e
+  # record separator extract_diffs emits between blocks
+  local tmpd; tmpd="$(mktemp -d)"
+  local i=0
+  local buf=""
+  while IFS= read -r line; do
+    if [ "$line" = $'\x1e' ]; then
+      i=$((i+1)); printf '%s\n' "$buf" > "$tmpd/hunk-$i.diff"; buf=""
+    else
+      buf+="$line"$'\n'
+    fi
+  done < <(extract_diffs "$f" "$only")
+  [ -n "$buf" ] && { i=$((i+1)); printf '%s\n' "$buf" > "$tmpd/hunk-$i.diff"; }
+
+  [ "$i" -gt 0 ] || die "no \`\`\`diff blocks found in $(basename "$f")"
+
+  # LLM diffs often have wrong hunk line counts and fake index lines; --recount
+  # + --3way + a GNU patch fallback recovers most of them. Whatever still fails
+  # is reported for hand-application — this is a review queue, not a merge.
+  local applied=0 failed=0 hf
+  for hf in "$tmpd"/hunk-*.diff; do
+    [ -s "$hf" ] || continue
+    if git -C "$wt" apply --recount --3way --whitespace=nowarn "$hf" 2>/dev/null \
+      || git -C "$wt" apply --recount -p0 --3way --whitespace=nowarn "$hf" 2>/dev/null \
+      || ( cd "$wt" && patch -p1 --fuzz=3 --no-backup-if-mismatch -s < "$hf" 2>/dev/null ); then
+      applied=$((applied+1))
+    else
+      failed=$((failed+1))
+      echo "  ✗ could not auto-apply $(basename "$hf") — kept for review:" >&2
+      git -C "$wt" apply --recount --3way --whitespace=nowarn "$hf" 2>&1 | sed 's/^/    /' >&2 || true
+      cp "$hf" "$wt/$(basename "$f" .md).$(basename "$hf")" 2>/dev/null || true
+    fi
+  done
+  rm -rf "$tmpd"
+
+  echo "applied $applied diff block(s), $failed failed  →  worktree: $wt"
+  git -C "$wt" --no-pager diff --stat | sed 's/^/  /'
+
+  # run the plugin's tests against the worktree copy
+  local testCmd; testCmd="$(read_manifest_field "$m" '.testCmd' 'node --test {{dir}}')"
+  local pdir; pdir="$(read_manifest_field "$m" '.pluginDir' "plugins/alteringux.$tool")"
+  testCmd="${testCmd//\{\{dir\}\}/$wt/$pdir}"
+  echo
+  echo "── tests: $testCmd ──"
+  ( eval "$testCmd" 2>&1 | tail -12 ) || echo "  (tests reported failures — review before accepting)"
+
+  echo
+  echo "Review:   cd $wt && git diff"
+  echo "Accept:   copy the files you want back into $REPO / ~/.local/bin, then commit there"
+  echo "Discard:  omarchy-plugin-improve revert $tool"
+}
+
+cmd_revert() {
+  local tool="${1:-}"
+  [ -n "$tool" ] || die "usage: revert <tool>"
+  local wt; wt="$(tool_dir "$tool")/worktree"
+  if [ -d "$wt" ]; then
+    git -C "$REPO" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt"
+    echo "removed worktree $wt"
+  else
+    echo "no worktree for $tool"
+  fi
+  git -C "$REPO" worktree prune 2>/dev/null || true
+  local b
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    git -C "$REPO" branch -D "$b" 2>/dev/null && echo "deleted branch $b"
+  done < <(git -C "$REPO" branch --list "improve/$tool-*" --format='%(refname:short)' 2>/dev/null)
+}
+
+# ── toggle / status / tools ──────────────────────────────────────────
+
+cmd_toggle() {
+  case "${1:-status}" in
+    on)  mkdir -p "$TOGGLE_DIR"; : > "$ENABLE_MARKER"; echo "plugin-improve critic: ON (marker $ENABLE_MARKER)" ;;
+    off) rm -f "$ENABLE_MARKER"; echo "plugin-improve critic: OFF" ;;
+    status)
+      if critic_enabled; then echo "plugin-improve critic: ON"; else echo "plugin-improve critic: OFF (default)"; fi ;;
+    *) die "usage: toggle on|off|status" ;;
+  esac
+}
+
+cmd_status() {
+  local tool="${1:-}"
+  critic_enabled && echo "critic: ON" || echo "critic: OFF (default — toggle on to enable)"
+  local list; list="${tool:-$(all_tools)}"
+  local t
+  for t in $list; do
+    local f; f="$(insights_file "$t")"
+    local n=0; [ -f "$f" ] && n="$(wc -l < "$f")"
+    local p; p="$(proposals_dir "$t")"
+    local np=0; [ -d "$p" ] && np="$(ls -1 "$p"/*.md 2>/dev/null | wc -l)"
+    local wt=""; [ -d "$(tool_dir "$t")/worktree" ] && wt="  [worktree open]"
+    printf '  %-10s  %s insights  %s proposal file(s)%s\n' "$t" "$n" "$np" "$wt"
+  done
+}
+
+cmd_tools() { all_tools | sed 's/^/  alteringux./'; }
+
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-status}" in
+  insight)   shift; cmd_insight "$@" ;;
+  flag)      shift; cmd_flag "$@" ;;
+  insights)  shift; cmd_insights "$@" ;;
+  digest)    shift; cmd_digest "$@" ;;
+  critic)    shift; cmd_critic "$@" ;;
+  proposals) shift; cmd_proposals "$@" ;;
+  show)      shift; cmd_show "$@" ;;
+  apply)     shift; cmd_apply "$@" ;;
+  revert)    shift; cmd_revert "$@" ;;
+  toggle)    shift; cmd_toggle "$@" ;;
+  status)    shift || true; cmd_status "$@" ;;
+  tools)     shift || true; cmd_tools ;;
+  -h|--help|help) usage ;;
+  *) die "unknown verb '$1' (try --help)" ;;
+esac

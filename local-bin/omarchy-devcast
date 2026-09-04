@@ -25,6 +25,8 @@
 #   export <id> [--mp4|--gif] [--fps N] [--width W] [--height H] [--theme dark|light]
 #                                    render frames with headless chromium + ffmpeg
 #   prune [--keep N]                 delete all but the N newest (default 20)
+#   flag <id> <text...>              record "this replay was wrong" for the
+#                                    self-improvement loop (omarchy-plugin-improve)
 #
 # Reuses omarchy-pulse (a "devcast ready" activity event with a Watch action).
 #
@@ -76,6 +78,13 @@ pulse_notify() {  # <html> <title> <summary>
 }
 
 open_html() { setsid xdg-open "$1" >/dev/null 2>&1 || true; }
+
+# Best-effort: feed the self-improvement loop. Never affects this command.
+improve_insight() { # <kind> <severity> <detail> [dataJSON]
+  command -v omarchy-plugin-improve >/dev/null 2>&1 || return 0
+  setsid omarchy-plugin-improve insight devcast "$1" \
+    --severity "$2" --detail "$3" --data "${4:-{}}" >/dev/null 2>&1 &
+}
 
 cast_dirs_newest_first() {
   [ -d "$CASTS_DIR" ] || return 0
@@ -175,12 +184,35 @@ cmd_build() {
 
   write_index
 
+  # ── feed the self-improvement loop from this build's quality warnings ──
+  local warn; warn="$(printf '%s' "$result" | jq -c '.warnings // {}')"
+  local uk; uk="$(jq -r '.unknownTools // [] | length' <<<"$warn")"
+  if [ "${uk:-0}" -gt 0 ]; then
+    improve_insight unknown-tool med \
+      "no renderer for tool(s): $(jq -r '.unknownTools | join(", ")' <<<"$warn")" "$warn"
+  fi
+  local up; up="$(jq -r '.unpairedTools // 0' <<<"$warn")"
+  [ "${up:-0}" -gt 0 ] && improve_insight unpaired-tool low "$up tool call(s) had no captured result" "$warn"
+  local ht; ht="$(jq -r '.heavyTruncations // 0' <<<"$warn")"
+  [ "${ht:-0}" -gt 0 ] && improve_insight heavy-truncation low "$ht step(s) lost >200 lines to truncation" "$warn"
+  local rr; rr="$(jq -r '.redactionRate // 0' <<<"$warn")"
+  awk "BEGIN{exit !($rr > 1.5)}" && improve_insight high-redaction low "redaction rate ${rr}/step — pattern may be too broad" "$warn"
+
   echo "$outDir"
   echo "  $title"
   echo "  $summary"
   echo "  $html"
   pulse_notify "$html" "$title" "$summary"
   if [ "$open" = 1 ]; then open_html "$html"; fi
+}
+
+cmd_flag() {
+  local id="${1:-}"; shift || true
+  [ -n "$id" ] && [ $# -gt 0 ] || die "usage: omarchy-devcast flag <id> <what looked wrong...>"
+  command -v omarchy-plugin-improve >/dev/null 2>&1 || die "needs omarchy-plugin-improve"
+  omarchy-plugin-improve insight devcast flag --severity med \
+    --detail "$*" --source flag --data "$(jq -n --arg id "$id" '{castId:$id}')"
+  echo "flagged devcast $id: $*"
 }
 
 # ── list / open / stats / latest ───────────────────────────────────────
@@ -341,6 +373,7 @@ case "${1:-list}" in
   export)            shift; cmd_export "$@" ;;
   prune)             shift || true; cmd_prune "$@" ;;
   reindex)           shift || true; write_index; echo "$INDEX_FILE" ;;
+  flag)              shift; cmd_flag "$@" ;;
   -h|--help|help)    usage ;;
   *) die "unknown command '$1' (try --help)" ;;
 esac

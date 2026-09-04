@@ -78,6 +78,7 @@ if (op === "build") {
       htmlPath: htmlPath,
       meta: cast.meta,
       stats: cast.stats,
+      warnings: cast.warnings || {},
       summary: Model.summaryLine(cast)
     }) + "\n"
   )

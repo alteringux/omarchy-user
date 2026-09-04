@@ -31,6 +31,8 @@
 #   watch [--interval S]      foreground loop: sample; sleep
 #   config                   print netwatch-config.json (edit it by hand)
 #   reset                    wipe state + sample (keeps config)
+#   flag <text...>           record "this looked inaccurate" for the
+#                            self-improvement loop (omarchy-plugin-improve)
 #
 # Reuses the sibling plugin CLIs: alerts go through `omarchy-pulse log
 # alteringux.netwatch …`; VPN tagging reads whatever `protonvpn-rotate status`
@@ -162,6 +164,12 @@ emit_alerts() { # stdin: JSON array of {kind,level,attention,msg}
   done
 }
 
+improve_insight() { # <kind> <severity> <detail> [dataJSON] — best-effort, never fails sample
+  command -v omarchy-plugin-improve >/dev/null 2>&1 || return 0
+  setsid omarchy-plugin-improve insight netwatch "$1" \
+    --severity "$2" --detail "$3" --data "${4:-{}}" >/dev/null 2>&1 &
+}
+
 post_webhook() { # post_webhook <url>  ; body from stdin
   local url="$1"
   [ -n "$url" ] || { cat >/dev/null; return 0; }
@@ -182,7 +190,10 @@ cmd_sample() {
   local cfg iface up isvpn dev rx tx ts
   cfg="$(read_config)"
   iface="$(detect_iface)"
-  [ -n "$iface" ] || die "no usable network interface found"
+  if [ -z "$iface" ]; then
+    improve_insight no-iface med "sample could not find a usable network interface"
+    die "no usable network interface found"
+  fi
   up="$(iface_up "$iface")"
   isvpn="$(iface_is_vpn "$iface")"
   dev="$(read_dev "$iface")"
@@ -208,6 +219,17 @@ cmd_sample() {
   printf '%s' "$result" | jq '.state' | put_file "$STATE_FILE"
   printf '%s' "$result" | jq '.sample' | put_file "$SAMPLE_FILE"
   printf '%s' "$result" | jq -c '.alerts // []' | emit_alerts
+
+  # ── feed the self-improvement loop ──
+  case "$(printf '%s' "$result" | jq -r '.meta.counterReset // false')" in
+    true) improve_insight counter-reset low "rx/tx counter went backwards on $iface (reboot / iface reset / 32-bit wrap)" ;;
+  esac
+  case "$(printf '%s' "$result" | jq -r '.meta.ifaceChanged // false')" in
+    true) improve_insight iface-change low "active interface changed to $iface between samples (in-flight delta dropped)" ;;
+  esac
+  if printf '%s' "$result" | jq -e '.alerts[]? | select(.kind=="spike")' >/dev/null 2>&1; then
+    improve_insight spike-alert med "sustained-rate alert fired on $iface — check for false positive vs the fixed spikeMbps threshold"
+  fi
 
   local webhook
   webhook="${webhook_override:-$(printf '%s' "$cfg" | jq -r '.webhook // ""')}"
@@ -356,6 +378,13 @@ cmd_reset() {
   echo "omarchy-netwatch: state + sample cleared (config kept)"
 }
 
+cmd_flag() {
+  [ $# -gt 0 ] || die "usage: omarchy-netwatch flag <what looked wrong / inaccurate...>"
+  command -v omarchy-plugin-improve >/dev/null 2>&1 || die "needs omarchy-plugin-improve"
+  omarchy-plugin-improve insight netwatch flag --severity med --detail "$*" --source flag
+  echo "flagged netwatch: $*"
+}
+
 usage() { sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-status}" in
@@ -371,6 +400,7 @@ case "${1:-status}" in
   watch)              shift; cmd_watch "$@" ;;
   config)             shift || true; read_config | jq . ;;
   reset)              shift || true; cmd_reset ;;
+  flag)               shift; cmd_flag "$@" ;;
   -h | --help | help) usage ;;
   *) die "unknown command '$1' (try --help)" ;;
 esac

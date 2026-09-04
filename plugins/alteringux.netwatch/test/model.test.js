@@ -139,6 +139,23 @@ test("sustained spike alert needs 3 consecutive over-threshold samples, then coo
   assert.equal(r.alerts.filter((a) => a.kind === "spike").length, 0)
 })
 
+test("ingest.meta reports counter resets and interface changes for the self-improvement loop", () => {
+  const s1 = Model.ingest(Model.defaultState(), null, sampleAt(T0, 5_000_000, 5_000_000), {}, T0)
+  assert.equal(s1.meta.usableDelta, false) // first sample
+
+  const s2 = Model.ingest(s1.state, s1.sample, sampleAt(T0 + 10_000, 6_000_000, 6_000_000), {}, T0 + 10_000)
+  assert.equal(s2.meta.usableDelta, true)
+  assert.equal(s2.meta.counterReset, false)
+  assert.equal(s2.meta.ifaceChanged, false)
+
+  const reset = Model.ingest(s2.state, s2.sample, sampleAt(T0 + 20_000, 100, 100), {}, T0 + 20_000)
+  assert.equal(reset.meta.counterReset, true)
+  assert.equal(reset.meta.usableDelta, false)
+
+  const flipped = Model.ingest(s2.state, s2.sample, sampleAt(T0 + 20_000, 50, 0, "tun0"), {}, T0 + 20_000)
+  assert.equal(flipped.meta.ifaceChanged, true)
+})
+
 test("status projects today/week/month totals and a compact label", () => {
   let state = Model.defaultState()
   let prev = null

@@ -162,6 +162,21 @@ test("empty / garbage transcript yields zero steps without throwing", () => {
   assert.equal(Model.parseTranscript("not json\n{bad").steps.length, 0)
 })
 
+test("warnings flag an unknown tool, an unpaired call, and heavy truncation", () => {
+  const bigContent = Array.from({ length: 500 }, (_, i) => "line " + i).join("\n")
+  const tx = jsonl([
+    { type: "assistant", timestamp: t(1), message: { role: "assistant", content: [{ type: "tool_use", id: "u1", name: "SomeNewTool", input: { foo: "bar" } }] } },
+    { type: "assistant", timestamp: t(2), message: { role: "assistant", content: [{ type: "tool_use", id: "u2", name: "Bash", input: { command: "echo hi" } }] } },
+    { type: "assistant", timestamp: t(3), message: { role: "assistant", content: [{ type: "tool_use", id: "u3", name: "Write", input: { file_path: "/a/big.txt", content: bigContent } }] } }
+    // no tool_result for any of them
+  ])
+  const cast = Model.parseTranscript(tx)
+  assert.deepEqual(cast.warnings.unknownTools, ["SomeNewTool"])
+  assert.equal(cast.warnings.unpairedTools, 3)
+  assert.ok(cast.warnings.heavyTruncations >= 1)
+  assert.equal(cast.warnings.noSteps, false)
+})
+
 test("summaryLine and formatDuration", () => {
   assert.equal(Model.formatDuration(45000), "45s")
   assert.equal(Model.formatDuration(200000), "3m 20s")

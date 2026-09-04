@@ -190,6 +190,7 @@ function toolStepFrom(block) {
     default:
       step.title = name
       step.lang = "json"
+      step.generic = true // no dedicated renderer — feeds the "unknown-tool" signal
       try {
         step.body = JSON.stringify(input, null, 2)
       } catch (e) {
@@ -413,7 +414,29 @@ function parseTranscript(text, options) {
     steps: raw.length
   }
 
-  return { meta: meta, steps: raw, stats: stats }
+  // warnings — the quality signal the self-improvement loop (improve.json /
+  // omarchy-plugin-improve) turns into "insight" entries.
+  var unknownTools = {}
+  var unpairedTools = 0
+  var heavyTruncations = 0
+  for (var w = 0; w < raw.length; w++) {
+    var y = raw[w]
+    if (y.kind !== "tool") continue
+    if (y.generic) unknownTools[y.tool] = (unknownTools[y.tool] || 0) + 1
+    if (!y.result) unpairedTools++
+    var m1 = /\+(\d+) (?:more )?lines/.exec(y.note || "")
+    if (m1 && Number(m1[1]) > 120) heavyTruncations++
+    if (y.result && Number(y.result.truncatedLines) > 120) heavyTruncations++
+  }
+  var warnings = {
+    unknownTools: Object.keys(unknownTools),
+    unpairedTools: unpairedTools,
+    heavyTruncations: heavyTruncations,
+    redactionRate: raw.length ? Math.round((redactions / raw.length) * 100) / 100 : 0,
+    noSteps: raw.length === 0
+  }
+
+  return { meta: meta, steps: raw, stats: stats, warnings: warnings }
 }
 
 // Human duration: 1h 04m / 3m 20s / 45s
