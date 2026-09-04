@@ -168,7 +168,8 @@ o.bind("SUPER + SHIFT + ALT + D", "TTS dialogue: skip turn", [[sh -c 'd="$XDG_RU
 -- out a scene you set. Each character has a one-line role instruction on the
 -- card; the main input is the scene setter. A = show/hide the card (the scene
 -- keeps running in the background either way), ALT+CTRL+A = its settings panel,
--- SHIFT+A = play/pause, SHIFT+CTRL+A = skip a turn. The flag-file binds need the
+-- SHIFT+A = play/pause, SHIFT+CTRL+A = skip a turn, CTRL+ALT+SHIFT+A =
+-- push-to-talk (speak a line into the scene). The flag-file binds need the
 -- app already running to do anything.
 o.bind("SUPER + ALT + A", "TTS roleplay: show/hide overlay", "tts-roleplay-overlay --visibility")
 -- The flag payload MUST be written in one shot (printf, not `{ echo; date; }`)
@@ -177,6 +178,7 @@ o.bind("SUPER + ALT + A", "TTS roleplay: show/hide overlay", "tts-roleplay-overl
 o.bind("SUPER + ALT + CTRL + A", "TTS roleplay: settings panel", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "toggle\n%s\n" "$(date +%s%N)" > "$d/settings.flag"']])
 o.bind("SUPER + SHIFT + A", "TTS roleplay: play/pause", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "toggle\n%s\n" "$(date +%s%N)" > "$d/control.flag"']])
 o.bind("SUPER + SHIFT + CTRL + A", "TTS roleplay: skip turn", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "skip\n%s\n" "$(date +%s%N)" > "$d/control.flag"']])
+o.bind("SUPER + CTRL + ALT + SHIFT + A", "TTS roleplay: push-to-talk", [[sh -c 'd="$XDG_RUNTIME_DIR/tts-roleplay-overlay"; mkdir -p "$d"; printf "talk\n%s\n" "$(date +%s%N)" > "$d/control.flag"']])
 
 -- Work showcase (~/Work/showcase/index.html): carousel intro of every
 -- project built so far. Single self-contained HTML file, opened app-mode.
