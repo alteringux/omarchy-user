@@ -87,6 +87,45 @@ test("parseBands: junk / non-frame lines -> null", () => {
   assert.equal(M.parseBands(null), null)
 })
 
+test("parseVisFrame: valid frame -> bands + visualizer", () => {
+  const f = M.parseVisFrame('{"ok":true,"visualizer":"Bars","bands":[0.71,0.55,0.5,0.41,0.21,0.05,0,0,0,0]}')
+  assert.equal(f.bands.length, M.BAND_COUNT)
+  assert.equal(f.bands[0], 0.71)
+  assert.equal(f.visualizer, "Bars")
+})
+
+test("parseVisFrame: missing visualizer -> empty string", () => {
+  const f = M.parseVisFrame('{"bands":[0.5,0,0,0,0,0,0,0,0,0]}')
+  assert.equal(f.visualizer, "")
+})
+
+test("parseVisFrame: junk / non-frame lines -> null", () => {
+  assert.equal(M.parseVisFrame(""), null)
+  assert.equal(M.parseVisFrame("cliamp is not running"), null)
+  assert.equal(M.parseVisFrame("{}"), null)
+  assert.equal(M.parseVisFrame('{"bands":[]}'), null)
+  assert.equal(M.parseVisFrame(null), null)
+})
+
+test("parseStatus: carries visualizer from prev when JSON omits it", () => {
+  const raw = JSON.stringify({ ok: true, state: "playing", track: { title: "T" }, position: 1, total: 10 })
+  const prev = { running: true, playing: true, visualizer: "Scope" }
+  assert.equal(M.parseStatus(raw, prev).visualizer, "Scope")
+})
+
+test("parseStatus: JSON-provided visualizer wins over prev", () => {
+  const raw = JSON.stringify({ ok: true, state: "playing", track: { title: "T" }, visualizer: "Bars" })
+  const prev = { running: true, playing: true, visualizer: "Scope" }
+  assert.equal(M.parseStatus(raw, prev).visualizer, "Bars")
+})
+
+test("parseStatus: not-running resets visualizer (no carry from prev)", () => {
+  const prev = { running: true, playing: true, visualizer: "Scope" }
+  const s = M.parseStatus("cliamp is not running (no socket)", prev)
+  assert.equal(s.running, false)
+  assert.equal(s.visualizer, "")
+})
+
 test("idleBands: bounded, 10 wide, moves with phase", () => {
   const a = M.idleBands(0, 0.2)
   const b = M.idleBands(1.5, 0.2)

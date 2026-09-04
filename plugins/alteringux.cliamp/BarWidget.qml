@@ -50,7 +50,7 @@ BarWidget {
 
   function applyStatus(raw) {
     guard.run("applyStatus", function () {
-      root.status = Model.parseStatus(raw)
+      root.status = Model.parseStatus(raw, root.status)
     })
   }
 
@@ -80,8 +80,16 @@ BarWidget {
     running: root.playing && !root.visCooldown
     stdout: SplitParser {
       onRead: function (line) {
-        var frame = Model.parseBands(line)
-        if (frame) root.bands = frame
+        var frame = Model.parseVisFrame(line)
+        if (!frame) return
+        root.bands = frame.bands
+        // The frame's mode is the ground truth for the dropdown; keep it in
+        // status so the 2 s poll can't wipe it out.
+        if (frame.visualizer && root.status && frame.visualizer !== root.status.visualizer) {
+          var s = Object.assign({}, root.status)
+          s.visualizer = frame.visualizer
+          root.status = s
+        }
       }
     }
     onExited: root.visCooldown = true   // don't respawn in a tight loop if cliamp just quit
