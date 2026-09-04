@@ -97,9 +97,9 @@ Panel {
         Text {
           visible: hostWidget && !hostWidget.active && hostWidget.lastSessionSummary.length > 0
           text: hostWidget ? ("Last session: " + hostWidget.lastSessionSummary) : ""
-          color: root.barForeground
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
           width: content.width
           wrapMode: Text.WordWrap
         }
@@ -160,9 +160,9 @@ Panel {
 
         Text {
           text: "Enter: start  ·  X: cancel  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
         }
       }
     }
