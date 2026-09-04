@@ -35,6 +35,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.cliamp", function (argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.cliamp"
+  }
+
   readonly property string playGlyph: root.playing ? "" : ""   // nf-fa-pause / play
   readonly property string headGlyph: ""                              // nf-fa-music
 
@@ -311,6 +316,14 @@ BarWidget {
           if (mouse.button === Qt.MiddleButton) root.next()
           else root.togglePanel()
         }
+      }
+
+      Kit.AttentionDot {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 2
+        active: pulseTint.active
+        level: pulseTint.level
       }
     }
   }
