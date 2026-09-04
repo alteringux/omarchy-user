@@ -86,6 +86,43 @@ jq -cn \
   '{version: 1, updatedAt: $now, watchlist: $watchlist, gainers: $gainers, losers: $losers, trending: $trending}' \
   > "$tmp" && mv "$tmp" "$STATE_FILE"
 
+# ---- alteringux.pulse: flag a notable intraday move, once per ticker/day ----
+# Best-effort — a missing or failing omarchy-pulse never affects the refresh.
+if command -v omarchy-pulse >/dev/null 2>&1; then
+  mover=$(jq -r '
+    [ to_entries[]
+      | .key as $t
+      | (.value.chart.result[0].meta // {}) as $m
+      | ($m.regularMarketPrice // null) as $p
+      | ($m.chartPreviousClose // $m.previousClose // null) as $c
+      | select($p != null and $c != null and $c != 0)
+      | { t: $t, pct: (($p - $c) / $c * 100) } ]
+    | map(select((.pct | if . < 0 then -. else . end) >= 3))
+    | sort_by(.pct | if . < 0 then -. else . end) | reverse | (.[0] // empty)
+    | "\(.t) \(.pct)"' <<<"$watchlist_json" 2>/dev/null || true)
+  if [[ -n "$mover" ]]; then
+    mt=${mover%% *}; mp=${mover#* }
+    seen="$STATE_DIR/.stocks-pulse-seen"
+    key="$(date +%F) $mt"
+    if ! grep -qxF "$key" "$seen" 2>/dev/null; then
+      printf -v mpr '%+.1f' "$mp"
+      lvl=info
+      awk "BEGIN{m=$mp; if (m<0) m=-m; exit !(m>=5)}" && lvl=warning
+      if omarchy-pulse log alteringux.stocks "${mt} ${mpr}% today" \
+           --action "omarchy-shell alteringux.stocks open" --action-label "Open stocks" \
+           --level "$lvl" >/dev/null 2>&1; then
+# `if` (not `[[ ]] &&`) so the group exits 0 when $seen is absent —
+         # under `set -o pipefail` the short-circuited test would otherwise
+         # fail the pipeline and skip the mv, so the file never got created.
+         {
+           echo "$key"
+           if [[ -f "$seen" ]]; then cat "$seen"; fi
+         } | head -n 60 > "${seen}.tmp" 2>/dev/null && mv "${seen}.tmp" "$seen"
+      fi
+    fi
+  fi
+fi
+
 # Self-improving step: detached (setsid, own process group) so a slow/no
 # claude call never blocks the price refresh Process this script runs under.
 # See omarchy-stocks-commentary for its own internal rate-limiting.
