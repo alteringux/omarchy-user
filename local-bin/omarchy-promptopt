@@ -1,44 +1,52 @@
 #!/usr/bin/env bash
 # omarchy-promptopt -- SUPER + ;   (semicolon)
 #
-# Take a rough, rambling requirement and rewrite it into a tight, structured
-# prompt that costs fewer tokens to feed a downstream LLM (Claude Code,
-# opencode, an API call...) and needs no clarifying questions back.
+# Take a rough requirement and rewrite it into a leaner prompt to feed a
+# downstream LLM (Claude Code, opencode, an API call...). Two modes, picked by
+# length:
+#   structure  (>= PROMPTOPT_MIN_WORDS words, default 80): classify the request
+#              (code/debug/research/writing/data/general) and rewrite it with a
+#              context-specific system prompt into a Task/Constraints/Output
+#              [/Context] shape. Best for rambling requirements.
+#   tighten    (shorter than that): compress-only -- strip filler, keep meaning
+#              and every name/number, add no scaffolding. A short request does
+#              not benefit from structure and only grows if you add it.
+# Force a mode with --structure / --tighten.
 #
-# The rewrite prompt is SWITCHED by context: the requirement is first
-# classified (code / debug / research / writing / data / general) and a
-# system prompt specialised for that kind of task is used, on top of a shared
-# core built from Anthropic's prompt-engineering guidance (be clear + direct;
-# keep every load-bearing detail; positive instructions over prohibitions;
-# name the output form; match prose style to the wanted output).
+# After a structure rewrite a cheap faithfulness check (Qwen2.5-7B) lists
+# anything from the original that went missing and warns (⚠N missing in the
+# toast, logged). With --fix / PROMPTOPT_FIX=1 it also retries the rewrite once
+# with those items pinned. Disable the check with --no-check / PROMPTOPT_CHECK=0.
 #
-# Flow (hotkey use): reads the primary selection, else the clipboard; classifies
-# it; sends it to Featherless (llm-blurb, off the Claude subscription) with the
-# matching system prompt; puts the optimised prompt back on the clipboard; and
-# toasts the detected context + a rough before/after token count, e.g.
-# "[debug] ~142 tok -> ~71 tok (-50%)".
+# Flow (hotkey use): reads the primary selection, else the clipboard; rewrites;
+# puts the result on the clipboard; toasts "[ctx.mode] ~IN -> ~OUT tok (dN%)"
+# with 👍/👎 buttons. The requirement text leaves the machine (Featherless).
 #
-# Token figures are an estimate (chars / 4) -- no tokenizer is installed -- but
-# the ratio is close enough to be useful. The requirement text leaves the
-# machine (Featherless).
-#
-# Every run appends one JSON line of telemetry to
+# Telemetry: every run appends one JSON line to
 #   ${XDG_STATE_HOME:-~/.local/state}/omarchy-promptopt/runs.jsonl
-# (context, sizes, token estimates, delta%, model, fallback, latency, ok). The
-# prompt text itself is NOT logged unless PROMPTOPT_LOG_TEXT=1. `... stats`
-# reads that file back. Disable logging with PROMPTOPT_LOG=0.
+# (ctx, mode, words, sizes, token est, delta%, model, fallback, missing,
+# retried, latency, ok). Prompt text is NOT stored unless PROMPTOPT_LOG_TEXT=1.
+# Feedback (kept/edited from clipboard compare, 👍/👎 from the toast) goes to
+#   .../omarchy-promptopt/feedback.jsonl
+# Read them back:
+#   omarchy-promptopt stats [--json]      analytics over the telemetry + feedback
+#   omarchy-promptopt reflect [N]         propose prompt edits from the last N
+#                                         text-logged runs (writes a .md, never
+#                                         applies -- review by hand)
 #
-# Also usable as a plain filter:
+# Filter use:
 #   omarchy-promptopt "make me a thing that..."      # text as args
 #   pbpaste | omarchy-promptopt                      # text on stdin
 #   omarchy-promptopt --print < req.txt > tight.txt  # no clipboard, no toast
 #   omarchy-promptopt --ctx writing "..."            # force a context
-#   omarchy-promptopt stats [--json]                 # analytics over the log
 #
 # Options:
 #   --ctx NAME       force context: code|debug|research|writing|data|general
+#   --structure      force structure mode  |  --tighten  force tighten mode
+#   --fix            on a lossy structure rewrite, retry once with gaps pinned
+#   --no-check       skip the faithfulness check entirely
 #   --list-ctx       print the contexts and what triggers each, then exit
-#   --print          print only; do not touch the clipboard or notify
+#   --print          print only; no clipboard, no toast
 #   --no-clip        do not copy the result to the clipboard
 #   --quiet          do not send a desktop notification
 #   --model NAME     pin to one model (no fallback)
@@ -46,53 +54,27 @@
 #   --max-chars N    truncate input to N chars (default 8000)
 #   -h, --help       this help
 #
-# Env: PROMPTOPT_CTX, PROMPTOPT_MODEL, PROMPTOPT_MODELS,
-#      PROMPTOPT_LOG (0 disables), PROMPTOPT_LOG_TEXT (1 stores prompt text)
+# Env: PROMPTOPT_CTX PROMPTOPT_MODEL PROMPTOPT_MODELS PROMPTOPT_MIN_WORDS
+#      PROMPTOPT_CHECK(=0 off) PROMPTOPT_CHECK_MODEL PROMPTOPT_FIX(=1 retry)
+#      PROMPTOPT_FEEDBACK(=0 off)
+#      PROMPTOPT_LOG(=0 off) PROMPTOPT_LOG_TEXT(=1 store text)
+#      PROMPTOPT_REFLECT_N PROMPTOPT_REFLECT_MODEL
 set -uo pipefail
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-promptopt"
 LOG_FILE="$STATE_DIR/runs.jsonl"
+FB_FILE="$STATE_DIR/feedback.jsonl"
+LAST_FILE="$STATE_DIR/last.json"
 
-# --- `stats` subcommand: analytics over the telemetry log -----------------
-if [[ "${1:-}" == stats ]]; then
-  shift
-  [[ -s "$LOG_FILE" ]] || { echo "no runs logged yet -- $LOG_FILE"; exit 0; }
-  command -v jq >/dev/null 2>&1 || { echo "omarchy-promptopt stats: needs jq" >&2; exit 1; }
-  if [[ "${1:-}" == --json ]]; then
-    jq -s '
-      def med(f): (map(f)|sort) as $s | ($s|length) as $n
-        | if $n==0 then null elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
-      { runs: length, ok: (map(select(.ok))|length),
-        from: (min_by(.ts).ts), to: (max_by(.ts).ts),
-        median_delta_pct: med(.delta_pct),
-        mean_delta_pct: ((map(.delta_pct)|add)/length),
-        fallback_rate: ((map(select(.fallback))|length)/length),
-        forced_rate: ((map(select(.forced))|length)/length),
-        mean_ms: ((map(.ms)|add)/length),
-        by_ctx: (group_by(.ctx) | map({ (.[0].ctx): {
-          n: length, median_delta_pct: med(.delta_pct),
-          forced: (map(select(.forced))|length),
-          fail: (map(select(.ok|not))|length) } }) | add) }' "$LOG_FILE"
-    exit 0
-  fi
-  jq -rs '
-    def med(f): (map(f)|sort) as $s | ($s|length) as $n
-      | if $n==0 then 0 elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
-    def pct(x): ((x*100)|floor|tostring)+"%";
-    def pad(s;n): (s|tostring) + (" "*(n - (s|tostring|length)));
-    "omarchy-promptopt  --  \(length) runs (\(map(select(.ok))|length) ok), \(min_by(.ts).ts[0:10]) .. \(max_by(.ts).ts[0:10])",
-    "  median token saving : \(med(.delta_pct))%     mean: \(((map(.delta_pct)|add)/length)|floor)%",
-    "  model fallback rate : \(pct((map(select(.fallback))|length)/length))",
-    "  ctx forced (--ctx)  : \(pct((map(select(.forced))|length)/length))   <- classifier-misfire proxy",
-    "  failures            : \(map(select(.ok|not))|length)",
-    "  mean latency        : \(((map(.ms)|add)/length)|floor) ms",
-    "  by context:",
-    "    ctx       n     median-saving   forced",
-    (group_by(.ctx)[] | "    \(pad(.[0].ctx;10))\(pad(length;6))\(pad((med(.delta_pct)|tostring)+"%";16))\(map(select(.forced))|length)")
-  ' "$LOG_FILE"
-  exit 0
-fi
-# ------------------------------------------------------------------------
+LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blurb")"
+MAX_INPUT_CHARS=8000
+DO_CLIP=1
+DO_NOTIFY=1
+DO_CHECK=1
+DO_FIX="${PROMPTOPT_FIX:-0}"
+FORCE_CTX="${PROMPTOPT_CTX:-}"
+FORCE_MODE=""
+MIN_WORDS="${PROMPTOPT_MIN_WORDS:-80}"
 
 # Non-thinking instruct models only (a reasoning model puts its answer in a
 # separate field and llm-blurb sees an empty completion). Chain ends on a
@@ -102,19 +84,12 @@ if [[ -n "${PROMPTOPT_MODEL:-}" ]]; then
 elif [[ -n "${PROMPTOPT_MODELS:-}" ]]; then
   IFS=$' ,' read -r -a MODELS <<<"$PROMPTOPT_MODELS"
 else
-  MODELS=(
-    "Qwen/Qwen3-30B-A3B-Instruct-2507"
-    "Qwen/Qwen2.5-7B-Instruct"
-  )
+  MODELS=( "Qwen/Qwen3-30B-A3B-Instruct-2507" "Qwen/Qwen2.5-7B-Instruct" )
 fi
 
-LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blurb")"
-MAX_INPUT_CHARS=8000
-DO_CLIP=1
-DO_NOTIFY=1
-FORCE_CTX="${PROMPTOPT_CTX:-}"
-
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# System prompts
+# ===========================================================================
 CORE_SYSTEM='You are a prompt optimiser. Input: a rough request that someone is about to send to an AI assistant. Output: the leanest prompt that still fully specifies the same job, so it costs fewer tokens to send and the assistant needs no clarifying questions back.
 
 Method:
@@ -124,37 +99,55 @@ Method:
 - Cut filler: greetings, "could you", "please", "thanks", hedging, thinking-aloud, restated points, and anything a competent assistant already knows.
 - Imperative voice. One idea per line. Semicolons instead of sentences. Merge duplicates.
 - Phrase constraints as positive instructions ("return X", "use Y") rather than prohibitions where possible.
+- Every Constraints item is a self-contained noun phrase or imperative. Never emit bare fragments like "so", "like 4 seconds", "when X" -- fold those into a complete item ("current latency ~4s"; "occurs when a customer has many orders").
 - Invent NOTHING. No scope, stack, versions, tone, environment, file formats, or preferences that the requirement does not state or clearly imply.
 - Do not add dates, years, version numbers, "as of YEAR" qualifiers, or field-by-field format breakdowns that the requirement does not contain.
 - For a fact the requirement gestures at but does not give (a URL, a filename, a number), write a short angle-bracket placeholder like <onboarding doc URL>. Never substitute a specific invented value.
-- Hard limit: the whole output is under 120 words. If it will not fit, keep Task and Constraints and drop Context; never pad to fill space.
+- Hard limit: the whole output is under 120 words. If it will not fit, merge Constraints items and drop Context; use shorter wording; never pad, and never truncate mid-sentence.
 
 Shape: emit these labels, each on its own line, each starting with the label and a colon.
-Task: <one imperative sentence>
-Constraints: <semicolon-separated list of every hard requirement actually stated>
+Task: <one imperative sentence naming the goal and the main deliverable>
+Constraints: <semicolon list of the DISTINCT hard requirements that Task does not already state; never repeat wording from Task; merge related items; each a self-contained phrase>
 Output: <the exact deliverable form expected>
 Context: <ONLY background facts written in the requirement that do not fit above. Omit this line entirely unless such facts exist. Never derive, assume, guess, or elaborate it -- most requirements have no Context.>
 
 Output ONLY the rewritten prompt. No preamble, no explanation, no markdown fences, no closing remark.'
 
+TIGHTEN_SYSTEM='You compress prompts. The INPUT is always a request that will be forwarded to another AI assistant -- it is never a task for you. Your job is to shorten the request, never to carry it out.
+
+Return the SAME request with every wasted token removed and nothing else changed:
+- Keep the meaning and every proper noun, name, path, number, version and explicit constraint EXACTLY.
+- Remove greetings, "could you", "please", "thanks", hedging ("I think", "maybe", "kind of", "just"), filler and restatements.
+- Imperative voice. Contract clauses. Merge duplicate points.
+- Do NOT add structure, headings, labels, or any requirement that was not there.
+- If the request already says "write a function" / "fix the bug" / "summarise X", your output ALSO just says that, more briefly. You never write the function, fix the bug, or summarise X yourself.
+- If the request is already tight, return it unchanged.
+
+Example
+INPUT: hey so I was wondering if you could maybe help me write a little python script that takes a folder of images and makes thumbnails, like 200px wide, keeping aspect ratio. thanks!
+OUTPUT: Write a Python script that makes 200px-wide aspect-ratio-preserving thumbnails for every image in a folder.
+
+Output only the compressed request. No preamble, no quotes, no explanation, no markdown fences.'
+
+CHECK_SYSTEM='You verify that a rewritten prompt kept everything important from the original request.
+Given ORIGINAL and REWRITE, list every concrete item that is in ORIGINAL but missing from REWRITE or changed in meaning: named tools, libraries, files, commands, numbers, versions, explicit constraints, required outputs, edge cases.
+One item per line, each starting "- ". Ignore dropped politeness, filler and hedging; ignore wording or ordering changes that keep the meaning.
+Be strict about what counts: only flag something a competent assistant could not recover from the REWRITE alone. Do NOT flag rephrasing, summarised-but-present detail, softened tone, or reordering.
+If nothing substantive is missing or altered, output exactly: OK'
+
 ctx_addendum() {
   case "$1" in
-    code)
-      printf '%s' '
+    code)     printf '%s' '
 This is a CODING task. Pin into Constraints: language + version; exact target file paths; the function/class/API signatures involved; "solve the general case, do not hard-code to the examples"; "no refactors, abstractions, or extra files beyond what is asked". Output must name the deliverable form (unified diff, full file contents, or new file path).' ;;
-    debug)
-      printf '%s' '
+    debug)    printf '%s' '
 This is a DEBUGGING task. Constraints must list, as separate semicolon items: the exact symptom (verbatim error text or the wrong behaviour); expected vs actual; minimal repro steps; suspect file(s)/line(s) or stack frames if named; "find and fix the root cause, not the symptom; state the cause in one line". Output = the fix (diff or file) plus the one-line cause.' ;;
-    research)
-      printf '%s' '
+    research) printf '%s' '
 This is a RESEARCH / open-question task. The Task line is the precise question. Constraints = success criteria (what a complete answer must cover); preferred or authoritative sources; a recency bound ONLY if the user gave one. Output = findings with source citations; prose, no code unless asked.' ;;
-    writing)
-      printf '%s' '
+    writing)  printf '%s' '
 This is a WRITING task. Constraints must pin: audience; tone / register; length (word or paragraph count); structure or format; points that must appear; things to avoid. Context = source material or facts to draw on. Output = the finished piece only, nothing else.' ;;
-    data)
-      printf '%s' '
+    data)     printf '%s' '
 This is an ANALYSIS / EXTRACTION task. Constraints: input location and format; exactly what to extract, compute, or summarise; the output schema (fields, types, order); how to treat missing or ambiguous rows. Output = the structured result form (table, JSON, or list) with its columns/keys named.' ;;
-    *) printf '%s' '' ;;
+    *)        printf '%s' '' ;;
   esac
 }
 
@@ -163,7 +156,7 @@ This is an ANALYSIS / EXTRACTION task. Constraints: input location and format; e
 # that happens to mention "function" or "script" is not miscalled as "code".
 classify_ctx() {
   local t; t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
-  local re_debug='error|traceback|stack ?trace|exception|broken|not working|does ?n.?t work|wo ?n.?t (run|build|compile|start)|fails?|failing|failed|crash|\bbug\b|segfault|hangs?|freezes?|regression|throws?|stack overflow|why (is|does|is ?n.?t|are ?n.?t|wo ?n.?t)'
+  local re_debug='error|traceback|stack ?trace|exception|broken|not working|does ?n.?t work|wo ?n.?t (run|build|compile|start)|fails?|failing|failed|crash|\bbug\b|segfault|hangs?|freezes?|regression|throws?|stack overflow|why (is|does|is ?n.?t|are ?n.?t|wo ?n.?t)|too slow|really slow|so slow|sluggish|\bn\+1\b|latency|bottleneck|memory leak|deadlock|race condition'
   local re_data='analy[sz]e|analysis|summari[sz]e|\bextract\b|\bparse\b|classif|categori[sz]e|data ?set|\.csv|\.json|\.xlsx|\.parquet|spreadsheet|\bjson\b|\bcsv\b|aggregate|group by|dataframe|\bstats\b|statistics|pivot|deduplicate'
   local re_research='\bresearch\b|find out|look up|\bcompare\b|comparison|\bversus\b|\bvs\b|pros and cons|trade-?offs?|how does|how do .* work|which .* should i|best .* (for|to)|investigate|alternatives to|options for|is it (possible|worth)|what is the difference'
   local re_writing='\bwrite \b|\bwriting\b|\bdraft\b|rewrite|reword|paraphrase|proof ?read|blog post|\bessay\b|\bemail\b|cover letter|\breadme\b|documentation|\bdocs\b|\btone\b|headline|tagline|copywriting|marketing copy|press release|social post'
@@ -173,11 +166,162 @@ classify_ctx() {
   done
   printf 'general'
 }
-# ---------------------------------------------------------------------------
 
+est_tokens() { local n=${#1}; echo $(( (n + 3) / 4 )); }
+
+clean_out() {
+  # normalise a raw model completion: drop <think>, fences, preamble, stale
+  # "as of 20XX", and leading/trailing blank lines.
+  local s="$1"
+  s="$(printf '%s' "$s" | perl -0pe 's{<think>.*?</think>}{}gs' 2>/dev/null || printf '%s' "$s")"
+  s="$(printf '%s\n' "$s" | sed -E '1{/^[[:space:]]*```/d}; ${/^[[:space:]]*```[[:space:]]*$/d}')"
+  s="$(printf '%s\n' "$s" | sed -E '1{/^[[:space:]]*(here|sure|below|the (optimi[sz]ed|compressed|rewritten)|optimi[sz]ed prompt|rewritten|compressed)\b.*:[[:space:]]*$/Id}')"
+  s="$(printf '%s\n' "$s" | sed -E 's/,?[[:space:]]*\(?(as of|current as of|valid as of)[[:space:]]+20[0-9]{2}\)?//Ig')"
+  s="$(printf '%s\n' "$s" | sed -E 's/[[:space:]]+$//' | sed -E '/./,$!d' | tac | sed -E '/./,$!d' | tac)"
+  printf '%s' "$s"
+}
+
+# ===========================================================================
+# Subcommands: stats / reflect
+# ===========================================================================
+if [[ "${1:-}" == stats ]]; then
+  shift
+  [[ -s "$LOG_FILE" ]] || { echo "no runs logged yet -- $LOG_FILE"; exit 0; }
+  command -v jq >/dev/null 2>&1 || { echo "omarchy-promptopt stats: needs jq" >&2; exit 1; }
+  FB="$FB_FILE"; [[ -s "$FB" ]] || FB=/dev/null
+  if [[ "${1:-}" == --json ]]; then
+    jq -s --slurpfile fb "$FB" '
+      def med(f): (map(f)|sort) as $s | ($s|length) as $n
+        | if $n==0 then null elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
+      ($fb) as $F |
+      { runs: length, ok: (map(select(.ok))|length),
+        from: (min_by(.ts).ts), to: (max_by(.ts).ts),
+        median_delta_pct: med(.delta_pct),
+        mean_delta_pct: ((map(.delta_pct)|add)/length),
+        by_mode: (group_by(.mode // "structure") | map({ (.[0].mode // "structure"): { n: length, median_delta_pct: med(.delta_pct) } }) | add),
+        fallback_rate: ((map(select(.fallback))|length)/length),
+        forced_rate: ((map(select(.forced))|length)/length),
+        checked: (map(select((.missing // -1) >= 0))|length),
+        with_missing: (map(select((.missing // -1) > 0))|length),
+        retried: (map(select(.retried))|length),
+        mean_ms: ((map(.ms)|add)/length),
+        feedback: { total: ($F|length),
+                    kept: ($F|map(select(.verdict=="keep" or .verdict=="kept"))|length),
+                    edited: ($F|map(select(.verdict=="edited"))|length),
+                    bad: ($F|map(select(.verdict=="bad"))|length) },
+        by_ctx: (group_by(.ctx) | map({ (.[0].ctx): {
+          n: length, median_delta_pct: med(.delta_pct),
+          forced: (map(select(.forced))|length),
+          fail: (map(select(.ok|not))|length) } }) | add) }' "$LOG_FILE"
+    exit 0
+  fi
+  jq -rs --slurpfile fb "$FB" '
+    def med(f): (map(f)|sort) as $s | ($s|length) as $n
+      | if $n==0 then 0 elif $n%2==1 then $s[($n-1)/2] else (($s[$n/2-1]+$s[$n/2])/2) end;
+    def pct(x): ((x*100)|floor|tostring)+"%";
+    def pad(s;n): (s|tostring) + (" "*(if n-(s|tostring|length) > 0 then n-(s|tostring|length) else 0 end));
+    ($fb) as $F |
+    ($F|map(select(.verdict=="keep" or .verdict=="kept"))|length) as $kept |
+    ($F|map(select(.verdict=="edited"))|length) as $edited |
+    ($F|map(select(.verdict=="bad"))|length) as $bad |
+    "omarchy-promptopt  --  \(length) runs (\(map(select(.ok))|length) ok), \(min_by(.ts).ts[0:10]) .. \(max_by(.ts).ts[0:10])",
+    "  median token saving : \(med(.delta_pct))%     mean: \(((map(.delta_pct)|add)/length)|floor)%",
+    "  by mode            : " + (group_by(.mode // "structure") | map("\(.[0].mode // "structure") \(med(.delta_pct))% (n=\(length))") | join("   ")),
+    "  model fallback rate : \(pct((map(select(.fallback))|length)/length))",
+    "  ctx forced (--ctx)  : \(pct((map(select(.forced))|length)/length))   <- classifier-misfire proxy",
+    "  faithfulness        : \(map(select((.missing // -1) > 0))|length) of \(map(select((.missing // -1) >= 0))|length) checked had gaps; \(map(select(.retried))|length) retried",
+    "  failures            : \(map(select(.ok|not))|length)",
+    "  mean latency        : \(((map(.ms)|add)/length)|floor) ms",
+    "  feedback            : \($kept) kept / \($edited) edited / \($bad) bad" + (if ($kept+$edited+$bad) > 0 then "   keep-rate \(pct($kept/($kept+$edited+$bad)))" else "" end),
+    "  by context:",
+    "    ctx       n     median-saving   forced",
+    (group_by(.ctx)[] | "    \(pad(.[0].ctx;10))\(pad(length;6))\(pad((med(.delta_pct)|tostring)+"%";16))\(map(select(.forced))|length)")
+  ' "$LOG_FILE"
+  exit 0
+fi
+
+if [[ "${1:-}" == reflect ]]; then
+  shift
+  N="${PROMPTOPT_REFLECT_N:-40}"
+  [[ "${1:-}" =~ ^[0-9]+$ ]] && { N="$1"; shift; }
+  command -v jq >/dev/null 2>&1 || { echo "reflect: needs jq" >&2; exit 1; }
+  [[ -s "$LOG_FILE" ]] || { echo "reflect: no telemetry yet -- run the tool a while with PROMPTOPT_LOG_TEXT=1"; exit 0; }
+  HAVE="$(jq -s '[.[]|select(.input and .output)]|length' "$LOG_FILE" 2>/dev/null || echo 0)"
+  (( HAVE > 0 )) || { echo "reflect: no runs stored with prompt text. Set PROMPTOPT_LOG_TEXT=1 and use the tool for a bit first."; exit 0; }
+  [[ -x "$LLM_BLURB" ]] || { echo "reflect: llm-blurb not found" >&2; exit 1; }
+  FB="$FB_FILE"; [[ -s "$FB" ]] || FB=/dev/null
+
+  DIGEST="$(jq -rs --slurpfile fb "$FB" --argjson n "$N" '
+    ($fb) as $F
+    | [ .[] | select(.input and .output) ] | .[(-$n):]
+    | to_entries
+    | map( .key as $i | .value as $r
+        | ($F | map(select(.run_ts == $r.ts)) | map(.verdict) | unique | join(",")) as $v
+        | "## run \($i+1)  [ctx=\($r.ctx) mode=\($r.mode // "structure") words=\($r.words // "?") delta=\($r.delta_pct)% missing=\($r.missing // "n/a") retried=\($r.retried // false)]\nfeedback: \(if $v=="" then "none" else $v end)\nORIGINAL:\n\($r.input[0:700])\n\nREWRITE:\n\($r.output[0:700])" )
+    | join("\n\n---\n\n")' "$LOG_FILE")"
+
+  CURRENT="CORE_SYSTEM:
+$CORE_SYSTEM
+
+TIGHTEN_SYSTEM:
+$TIGHTEN_SYSTEM
+
+ctx addendum [code]:$(ctx_addendum code)
+ctx addendum [debug]:$(ctx_addendum debug)
+ctx addendum [research]:$(ctx_addendum research)
+ctx addendum [writing]:$(ctx_addendum writing)
+ctx addendum [data]:$(ctx_addendum data)
+
+classifier:
+$(declare -f classify_ctx)"
+
+  REFLECT_SYS='You tune the system prompts of a prompt-optimiser CLI (omarchy-promptopt). You are given (1) its CURRENT PROMPTS and keyword classifier, and (2) RECENT RUNS: each with the original request, the rewrite produced, the mode used (structure adds Task/Constraints/Output scaffolding; tighten only compresses), token delta% (negative = the rewrite grew), the count of requirements a faithfulness check found missing, and any user feedback (kept = good; edited/bad = not good).
+
+Find the RECURRING problems -- e.g. over-expansion on short inputs, dropped names/numbers, wrong context classification, invented Context, a mode chosen wrongly -- and propose SPECIFIC, MINIMAL edits.
+
+For each proposal:
+1. Target: which prompt (CORE_SYSTEM / TIGHTEN_SYSTEM / the <ctx> addendum / classify_ctx regex).
+2. Change: the exact line(s) to add, remove, or replace -- quote before and after. Do not restate the whole prompt.
+3. Why: one sentence, citing run numbers as evidence.
+
+At most 5 proposals, most impactful first. Plain markdown, no code fences around the whole answer.'
+
+  USED=$(( HAVE < N ? HAVE : N ))
+  echo "reflect: analysing $USED text-logged runs (of $HAVE available)..." >&2
+  REFLECT_MODELS=( "${PROMPTOPT_REFLECT_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}" "Qwen/Qwen2.5-7B-Instruct" )
+  OUT_MD=""
+  for rm in "${REFLECT_MODELS[@]}"; do
+    OUT_MD="$("$LLM_BLURB" --model "$rm" --system "$REFLECT_SYS" \
+               --max-tokens 1300 --temp 0.3 --timeout 60 \
+               "CURRENT PROMPTS:"$'\n'"$CURRENT"$'\n\n'"RECENT RUNS:"$'\n'"$DIGEST" 2>/dev/null)" || OUT_MD=""
+    [[ -n "${OUT_MD// }" ]] && break
+  done
+  [[ -n "${OUT_MD// }" ]] || { echo "reflect: model returned nothing (Featherless down?)" >&2; exit 1; }
+
+  mkdir -p "$STATE_DIR"
+  PROP="$STATE_DIR/reflect-proposal.md"
+  { echo "# omarchy-promptopt reflect -- $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# $USED text-logged runs analysed; feedback records: $([[ $FB == /dev/null ]] && echo 0 || wc -l <"$FB")"
+    echo "# PROPOSAL ONLY -- nothing is applied. Review, then tell Claude which items to take."
+    echo
+    printf '%s\n' "$OUT_MD"
+  } > "$PROP"
+  cat "$PROP"
+  echo
+  echo "saved: $PROP"
+  exit 0
+fi
+
+# ===========================================================================
+# Main: rewrite a requirement
+# ===========================================================================
 while (($#)); do
   case "$1" in
-    --ctx)       FORCE_CTX="${2:-}"; shift 2 ;;
+    --ctx)        FORCE_CTX="${2:-}"; shift 2 ;;
+    --structure)  FORCE_MODE=structure; shift ;;
+    --tighten)    FORCE_MODE=tighten; shift ;;
+    --fix)        DO_FIX=1; shift ;;
+    --no-check)   DO_CHECK=0; shift ;;
     --list-ctx)
       cat <<'EOF'
 code      implement / refactor / build a function, class, script, API, component
@@ -188,41 +332,38 @@ data      analyse / summarise / extract / parse / classify a dataset or document
 general   anything else -- the shared core prompt only
 EOF
       exit 0 ;;
-    --print)     DO_CLIP=0; DO_NOTIFY=0; shift ;;
-    --no-clip)   DO_CLIP=0; shift ;;
-    --quiet)     DO_NOTIFY=0; shift ;;
-    --model)     MODELS=("${2:-}"); shift 2 ;;
-    --models)    IFS=$' ,' read -r -a MODELS <<<"${2:-}"; shift 2 ;;
-    --max-chars) MAX_INPUT_CHARS="${2:-8000}"; shift 2 ;;
-    -h|--help)   sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-    --)          shift; break ;;
-    -*)          echo "omarchy-promptopt: unknown option $1" >&2; exit 2 ;;
-    *)           break ;;
+    --print)      DO_CLIP=0; DO_NOTIFY=0; shift ;;
+    --no-clip)    DO_CLIP=0; shift ;;
+    --quiet)      DO_NOTIFY=0; shift ;;
+    --model)      MODELS=("${2:-}"); shift 2 ;;
+    --models)     IFS=$' ,' read -r -a MODELS <<<"${2:-}"; shift 2 ;;
+    --max-chars)  MAX_INPUT_CHARS="${2:-8000}"; shift 2 ;;
+    -h|--help)    sed -n '2,61p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --)           shift; break ;;
+    -*)           echo "omarchy-promptopt: unknown option $1" >&2; exit 2 ;;
+    *)            break ;;
   esac
 done
 
 note() { ((DO_NOTIFY)) && notify-send -a "Prompt Opt" "$@" 2>/dev/null || true; }
 
-# Rough token estimate: ~4 chars per token for English prose. Good enough for a
-# before/after ratio; not a real tokenizer.
-est_tokens() { local n=${#1}; echo $(( (n + 3) / 4 )); }
-
-# Append one telemetry line. $1 = 1 ok / 0 failed. Best-effort: any problem
-# (no jq, unwritable state dir, logging disabled) is swallowed silently.
-MODEL_USED=""
-FELL_BACK=0
+# --- telemetry -------------------------------------------------------------
+MODEL_USED=""; FELL_BACK=0; MODE=""; WORDS=0; MISSING_COUNT=-1; RETRIED=0; RUN_TS=""
 log_run() {
   [[ "${PROMPTOPT_LOG:-1}" == 0 ]] && return 0
   command -v jq >/dev/null 2>&1 || return 0
   mkdir -p "$STATE_DIR" 2>/dev/null || return 0
   local ok="$1" ms=0 tlen=0 olen=0 delta=0
+  RUN_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [[ -n "${START_MS:-}" ]] && ms=$(( $(date +%s%3N) - START_MS ))
   [[ -n "${TEXT+x}" ]] && tlen=${#TEXT}
   [[ -n "${OUT+x}"  ]] && olen=${#OUT}
   (( ${IN_TOK:-0} > 0 )) && delta=$(( (IN_TOK - ${OUT_TOK:-0}) * 100 / IN_TOK ))
   local a=(
-    --arg     ts        "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    --arg     ts        "$RUN_TS"
     --arg     ctx       "${CTX:-?}"
+    --arg     mode      "${MODE:-?}"
+    --argjson words     "${WORDS:-0}"
     --argjson forced    "$([[ -n "${FORCE_CTX:-}" ]] && echo true || echo false)"
     --arg     model     "${MODEL_USED:-}"
     --argjson fallback  "$([[ "${FELL_BACK:-0}" == 1 ]] && echo true || echo false)"
@@ -231,18 +372,59 @@ log_run() {
     --argjson in_tok    "${IN_TOK:-0}"
     --argjson out_tok   "${OUT_TOK:-0}"
     --argjson delta_pct "$delta"
+    --argjson missing   "${MISSING_COUNT:--1}"
+    --argjson retried   "$([[ "${RETRIED:-0}" == 1 ]] && echo true || echo false)"
     --argjson ms        "$ms"
     --argjson ok        "$ok"
   )
-  local f='{ts:$ts,ctx:$ctx,forced:$forced,model:$model,fallback:$fallback,in_chars:$in_chars,out_chars:$out_chars,in_tok:$in_tok,out_tok:$out_tok,delta_pct:$delta_pct,ms:$ms,ok:($ok==1)}'
+  local f='{ts:$ts,ctx:$ctx,mode:$mode,words:$words,forced:$forced,model:$model,fallback:$fallback,in_chars:$in_chars,out_chars:$out_chars,in_tok:$in_tok,out_tok:$out_tok,delta_pct:$delta_pct,missing:$missing,retried:$retried,ms:$ms,ok:($ok==1)}'
   if [[ "${PROMPTOPT_LOG_TEXT:-0}" == 1 ]]; then
     a+=( --arg input "${TEXT:-}" --arg output "${OUT:-}" )
-    f='{ts:$ts,ctx:$ctx,forced:$forced,model:$model,fallback:$fallback,in_chars:$in_chars,out_chars:$out_chars,in_tok:$in_tok,out_tok:$out_tok,delta_pct:$delta_pct,ms:$ms,ok:($ok==1),input:$input,output:$output}'
+    f="${f%\}},input:\$input,output:\$output}"
   fi
   jq -cn "${a[@]}" "$f" >> "$LOG_FILE" 2>/dev/null || true
+  # remember this run's output so the NEXT run can tell kept-vs-edited
+  if [[ "$ok" == 1 && -n "${OUT:-}" ]]; then
+    jq -cn --arg ts "$RUN_TS" --arg ctx "${CTX:-?}" --arg output "$OUT" \
+      '{ts:$ts,ctx:$ctx,output:$output}' > "$LAST_FILE" 2>/dev/null || true
+  fi
 }
 
-# --- gather input -------------------------------------------------------------
+record_feedback() {  # $1 = keep|bad|kept|edited   $2 = source
+  command -v jq >/dev/null 2>&1 || return 0
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  jq -cn --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg run_ts "${2:-}" \
+         --arg v "$1" --arg src "${3:-}" \
+    '{ts:$ts,run_ts:$run_ts,verdict:$v,source:$src}' >> "$FB_FILE" 2>/dev/null || true
+}
+
+# Passive signal: did the user keep last run's output, or edit it before use?
+detect_prev_feedback() {
+  [[ "${PROMPTOPT_LOG:-1}" == 0 ]] && return 0
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -s "$LAST_FILE" ]] || return 0
+  local pts pout clip
+  pts="$(jq -r '.ts // empty'     "$LAST_FILE" 2>/dev/null)" || return 0
+  pout="$(jq -r '.output // empty' "$LAST_FILE" 2>/dev/null)"
+  [[ -n "$pout" && -n "$pts" ]] || return 0
+  clip="$(wl-paste --no-newline 2>/dev/null)" || return 0
+  [[ -n "$clip" ]] || return 0
+  # only judge if this looks like a fresh invocation on something else, not a
+  # re-run on the very same clipboard we just wrote
+  if [[ "$clip" == "$pout" ]]; then
+    record_feedback kept "$pts" clipboard
+  else
+    local total common
+    total="$(printf '%s\n' "$pout" | grep -c . || true)"
+    common="$(comm -12 <(printf '%s\n' "$pout" | sort -u) <(printf '%s\n' "$clip" | sort -u) 2>/dev/null | grep -c . || true)"
+    if (( total > 0 )) && (( common * 100 / total >= 40 )) && (( common < total )); then
+      record_feedback edited "$pts" clipboard
+    fi
+  fi
+  : > "$LAST_FILE"   # consume it; one judgement per run
+}
+
+# --- gather input --------------------------------------------------------------
 if (($#)); then
   TEXT="$*"
 elif [[ ! -t 0 ]]; then
@@ -257,88 +439,144 @@ if [[ -z "${TEXT// }" ]]; then
   exit 1
 fi
 TEXT="${TEXT:0:MAX_INPUT_CHARS}"
-
 [[ -x "$LLM_BLURB" ]] || { note "llm-blurb helper not found."; echo "omarchy-promptopt: llm-blurb not found" >&2; exit 1; }
 
-# --- pick the context + build the system prompt ---------------------------
+detect_prev_feedback
+
+# --- pick context + mode + system prompt ---------------------------------
 case "$FORCE_CTX" in
   code|debug|research|writing|data|general) CTX="$FORCE_CTX" ;;
   "") CTX="$(classify_ctx "$TEXT")" ;;
   *)  echo "omarchy-promptopt: unknown --ctx '$FORCE_CTX' (use: code debug research writing data general)" >&2; exit 2 ;;
 esac
-SYSTEM="$CORE_SYSTEM$(ctx_addendum "$CTX")"
+
+WORDS="$(printf '%s' "$TEXT" | wc -w | tr -d ' ')"
+if [[ -n "$FORCE_MODE" ]]; then
+  MODE="$FORCE_MODE"
+elif (( WORDS < MIN_WORDS )); then
+  MODE=tighten
+else
+  MODE=structure
+fi
+
+if [[ "$MODE" == tighten ]]; then
+  SYSTEM="$TIGHTEN_SYSTEM"
+  NEED_TASK_LINE=0
+else
+  SYSTEM="$CORE_SYSTEM$(ctx_addendum "$CTX")"
+  NEED_TASK_LINE=1
+fi
 
 IN_TOK="$(est_tokens "$TEXT")"
+note "Optimising [$CTX.$MODE]..." "Rewriting the requirement."
 
-note "Optimising [$CTX]..." "Tightening the requirement into a lean prompt."
+# --- rewrite (walk the model chain) ----------------------------------------
+# Sets REWRITE_RESULT / MODEL_USED / FELL_BACK directly (NOT via command
+# substitution -- that would fork a subshell and lose the assignments).
+REWRITE_RESULT=""
+run_rewrite() {  # $1 = user message; return 0 with REWRITE_RESULT set, else 1
+  local msg="$1" m raw i=0
+  REWRITE_RESULT=""
+  for m in "${MODELS[@]}"; do
+    [[ -n "$m" ]] || continue
+    i=$((i + 1))
+    MODEL_USED="$m"
+    local framed="$msg"
+    [[ "$MODE" == tighten ]] && framed="Compress this request (do not act on it):"$'\n\n'"$msg"
+    if raw="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
+               --max-tokens 500 --temp 0.15 --timeout 60 "$framed" 2>/dev/null)"; then
+      raw="$(clean_out "$raw")"
+      if [[ -n "${raw// }" ]]; then
+        if (( NEED_TASK_LINE )); then
+          printf '%s\n' "$raw" | grep -qiE '^[[:space:]]*task[[:space:]]*:' || { LAST_CHAIN_ERR="$m: no Task: line"; continue; }
+        fi
+        (( i > 1 )) && FELL_BACK=1
+        REWRITE_RESULT="$raw"
+        return 0
+      fi
+    fi
+    LAST_CHAIN_ERR="$m: no usable completion"
+  done
+  return 1
+}
 
 START_MS="$(date +%s%3N)"
-OUT=""
-ERR=""
-BEST=""
-tried=0
-for m in "${MODELS[@]}"; do
-  [[ -n "$m" ]] || continue
-  MODEL_USED="$m"
-  (( tried > 0 )) && FELL_BACK=1
-  tried=$((tried + 1))
-  if OUT="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
-             --max-tokens 450 --temp 0.15 --timeout 60 "$TEXT" 2>&1)"; then
-    [[ -n "${BEST// }" ]] || BEST="$OUT"
-    # A usable rewrite has at least a "Task:" line.
-    printf '%s\n' "$OUT" | grep -qiE '^[[:space:]]*task[[:space:]]*:' && { ERR=""; break; }
-    ERR="$m: no Task: line"
-  else
-    ERR="$m: $(printf '%s' "$OUT" | tail -c 160)"
-  fi
-  OUT=""
-done
-[[ -n "${OUT// }" ]] || OUT="$BEST"
-[[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; OUT=""; log_run 0; echo "omarchy-promptopt: ${ERR:-failed}" >&2; exit 1; }
-
-# --- clean the model output -------------------------------------------------
-# Drop a <think> block from a thinking-variant override.
-OUT="$(printf '%s' "$OUT" | perl -0pe 's{<think>.*?</think>}{}gs' 2>/dev/null || printf '%s' "$OUT")"
-# Strip a wrapping code fence if the model added one.
-OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*```/d}; ${/^[[:space:]]*```[[:space:]]*$/d}')"
-# Drop a leading "Here is the optimised prompt:" style line.
-OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*(here|sure|below|the optimi[sz]ed|optimi[sz]ed prompt|rewritten)\b.*:[[:space:]]*$/Id}')"
-# The 30B model is stubborn about stamping a stale "as of 20XX" onto research
-# prompts even when told not to -- strip that phrase (any bare year the user
-# actually supplied stays, it would be phrased differently).
-OUT="$(printf '%s\n' "$OUT" | sed -E 's/,?[[:space:]]*\(?(as of|current as of|valid as of)[[:space:]]+20[0-9]{2}\)?//Ig')"
-# Trim trailing whitespace and leading/trailing blank lines.
-OUT="$(printf '%s\n' "$OUT" | sed -E 's/[[:space:]]+$//' | sed -E '/./,$!d' | tac | sed -E '/./,$!d' | tac)"
-
+LAST_CHAIN_ERR=""
+run_rewrite "$TEXT" && OUT="$REWRITE_RESULT" || OUT=""
 if [[ -z "${OUT// }" ]]; then
-  note "Model returned nothing usable."
+  note "Featherless request failed." "${LAST_CHAIN_ERR:-all models unavailable}"
   OUT=""; log_run 0
-  echo "omarchy-promptopt: empty result after cleanup" >&2
+  echo "omarchy-promptopt: ${LAST_CHAIN_ERR:-failed}" >&2
   exit 1
+fi
+
+# --- faithfulness check + one retry ----------------------------------------
+CHECK_MODEL="${PROMPTOPT_CHECK_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
+faith_missing() {  # echoes the "- ..." lines, or empty if OK / unavailable
+  local r
+  r="$("$LLM_BLURB" --model "$CHECK_MODEL" --system "$CHECK_SYSTEM" \
+        --max-tokens 220 --temp 0 --timeout 40 \
+        "ORIGINAL:"$'\n'"$TEXT"$'\n\n'"REWRITE:"$'\n'"$1" 2>/dev/null)" || return 0
+  r="$(printf '%s' "$r" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+  [[ -z "$r" || "$r" =~ ^[Oo][Kk][.!]?$ ]] && return 0
+  printf '%s\n' "$r" | grep -E '^[[:space:]]*[-*]' || printf '%s\n' "$r"
+}
+
+# Only in structure mode -- tighten keeps everything by construction, so a
+# check there is wasted latency. Retry only when >=2 items are flagged; a lone
+# flag from the 7B judge is usually noise.
+if (( DO_CHECK )) && [[ "${PROMPTOPT_CHECK:-1}" != 0 && "$MODE" == structure ]] && (( WORDS >= 12 )); then
+  MISS="$(faith_missing "$OUT")"
+  if [[ -n "${MISS// }" ]]; then
+    MISSING_COUNT="$(printf '%s\n' "$MISS" | grep -c . || true)"
+  else
+    MISSING_COUNT=0
+  fi
+  # Default: warn only (the ⚠N marker on the toast + logged `missing`). With
+  # --fix, retry once when >=2 items are flagged (a lone flag from the 7B judge
+  # is usually noise). The retry re-expands, so it is opt-in. `missing` in
+  # telemetry stays the pre-retry count either way.
+  if (( DO_FIX )) && (( MISSING_COUNT >= 2 )); then
+    note "Faithfulness: retrying" "Rewrite dropped $MISSING_COUNT item(s); pinning them."
+    if run_rewrite "$TEXT"$'\n\n'"A previous rewrite dropped the following; every one MUST appear verbatim in your output:"$'\n'"$MISS"; then
+      OUT="$REWRITE_RESULT"; RETRIED=1
+    fi
+  fi
 fi
 
 OUT_TOK="$(est_tokens "$OUT")"
 
-# --- deliver ---------------------------------------------------------------
+# --- deliver -------------------------------------------------------------
 printf '%s\n' "$OUT"
-
 if ((DO_CLIP)) && command -v wl-copy >/dev/null 2>&1; then
   printf '%s' "$OUT" | wl-copy 2>/dev/null || true
 fi
 
 if (( IN_TOK > 0 )); then
   DELTA=$(( (IN_TOK - OUT_TOK) * 100 / IN_TOK ))
-  if (( DELTA >= 0 )); then
-    SUMMARY="[$CTX] ~${IN_TOK} tok -> ~${OUT_TOK} tok (-${DELTA}%)"
-  else
-    SUMMARY="[$CTX] ~${IN_TOK} tok -> ~${OUT_TOK} tok (+$(( -DELTA ))%)"
-  fi
+  (( DELTA >= 0 )) && SIGN="-" || { SIGN="+"; DELTA=$(( -DELTA )); }
+  SUMMARY="[$CTX.$MODE] ~${IN_TOK} -> ~${OUT_TOK} tok (${SIGN}${DELTA}%)"
 else
-  SUMMARY="[$CTX] ~${OUT_TOK} tok"
+  SUMMARY="[$CTX.$MODE] ~${OUT_TOK} tok"
 fi
+(( MISSING_COUNT > 0 )) && SUMMARY="$SUMMARY  ⚠${MISSING_COUNT} missing"
+
+log_run 1
 
 CLIPNOTE=""
 ((DO_CLIP)) && CLIPNOTE=$'\n\n(copied to clipboard)'
-note "$SUMMARY" "$OUT$CLIPNOTE"
-
-log_run 1
+if (( DO_NOTIFY )); then
+  if [[ "${PROMPTOPT_FEEDBACK:-1}" != 0 ]] && command -v notify-send >/dev/null 2>&1; then
+    { trap '' HUP
+      resp="$(notify-send --wait -a "Prompt Opt" -A "keep=👍 good" -A "bad=👎 poor" \
+               "$SUMMARY" "$OUT$CLIPNOTE" 2>/dev/null)" || resp=""
+      case "$resp" in
+        keep) record_feedback keep "$RUN_TS" button ;;
+        bad)  record_feedback bad  "$RUN_TS" button ;;
+      esac
+    } &
+    disown 2>/dev/null || true
+  else
+    note "$SUMMARY" "$OUT$CLIPNOTE"
+  fi
+fi
