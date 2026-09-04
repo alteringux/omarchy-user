@@ -153,13 +153,9 @@ Panel {
         // Speed. Streaming audio can't be re-timed mid-flight, so this sets
         // the rate for the next reading (and for Loop); "Restart now" applies
         // it to the current one by re-speaking from the top.
-        Text {
-          width: content.width
-          text: "Speed"
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+        PanelSectionHeader {
+          text: "SPEED"
+          foreground: root.barForeground
         }
 
         Row {
@@ -191,13 +187,9 @@ Panel {
         // model mid-utterance — so choosing here re-speaks the current reading
         // from the top, and pins the voice for Loop / replays. With nothing
         // speaking it just records the choice.
-        Text {
-          width: content.width
-          text: "Voice"
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+        PanelSectionHeader {
+          text: "VOICE"
+          foreground: root.barForeground
         }
 
         Dropdown {
@@ -218,9 +210,9 @@ Panel {
           visible: root.speaking
           width: content.width
           text: "Changing voice restarts the current reading."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
         }
 
@@ -253,9 +245,9 @@ Panel {
 
         Text {
           text: "Space: pause  ·  X: stop  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
         }
       }
     }
