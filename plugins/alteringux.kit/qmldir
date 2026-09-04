@@ -22,4 +22,6 @@ SectionHeading 1.0 SectionHeading.qml
 Bullet 1.0 Bullet.qml
 PanelHead 1.0 PanelHead.qml
 MetaText 1.0 MetaText.qml
+AttentionDot 1.0 AttentionDot.qml
+PulseTint 1.0 PulseTint.qml
 singleton Palette 1.0 Palette.qml

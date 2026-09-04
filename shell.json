@@ -29,34 +29,37 @@
       ],
       "right": [
         {
-          "id": "omarchy.tray"
-        },
-        {
           "id": "alteringux.pulse"
-        },
-        {
-          "id": "omarchy.tailscale"
-        },
-        {
-          "id": "omarchy.agents"
-        },
-        {
-          "id": "omarchy.bluetooth"
-        },
-        {
-          "id": "omarchy.network"
         },
         {
           "id": "alteringux.netwatch"
         },
         {
-          "id": "alteringux.devcast"
-        },
-        {
           "id": "alteringux.vpnrotate"
         },
         {
+          "id": "omarchy.tailscale"
+        },
+        {
+          "id": "omarchy.network"
+        },
+        {
+          "id": "omarchy.bluetooth"
+        },
+        {
+          "id": "alteringux.devcast"
+        },
+        {
+          "id": "alteringux.crochet"
+        },
+        {
+          "id": "omarchy.agents"
+        },
+        {
           "id": "alteringux.ttsplayer"
+        },
+        {
+          "id": "omarchy.tray"
         },
         {
           "id": "omarchy.audio"

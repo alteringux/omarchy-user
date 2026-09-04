@@ -62,6 +62,14 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.vpnrotate", function (argv) { Quickshell.execDetached(argv) })
 
+  // Cross-plugin signal: protonvpn-rotate pushes connection errors onto the
+  // shared alteringux.pulse attention feed; this widget lights up from that
+  // shared state rather than re-deriving the condition itself.
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.vpnrotate"
+  }
+
   // ── persistence ─────────────────────────────────────────────────────────
   // Status file: the script owns every write (create on first connect, rewrite
   // on each state change, never deleted). watch + a 2 s idle poll covers
@@ -271,5 +279,13 @@ BarWidget {
     horizontalMargin: 8.75
     verticalPadding: 8.75
     onPressed: function (b) { root.togglePanel() }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
+    }
   }
 }
