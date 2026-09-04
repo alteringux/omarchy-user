@@ -1,0 +1,346 @@
+#!/usr/bin/env bash
+# omarchy-devcast — turn a Claude Code session into an interactive replay
+# ("devcast"): a self-contained replay.html you can scrub / play, optionally
+# rendered to MP4 or GIF.
+#
+# Source material: Claude Code writes one JSONL transcript per session under
+#   ~/.claude/projects/<project-slug>/<session-id>.jsonl
+# every prompt, assistant turn, Bash/Edit/Write tool call + result, timestamped.
+# `build` parses one into ordered steps (with a secret-redaction pass) and
+# renders the player. See the plugin's Model.js for the parse rules.
+#
+# VERBS
+#   build [latest|<session-id>|<path>] [flags]   render a devcast
+#       --project DIR   only search this project's transcript dir
+#       --title STR     override the title
+#       --no-redact     keep secrets verbatim (default: mask them)
+#       --thinking      include Claude's thinking blocks (default: omit)
+#       --no-reads      drop Read tool steps
+#       --max-gap MS    clamp idle gaps for pacing (default 6000)
+#       --open          xdg-open the replay.html when done
+#   list [--json]                    recent devcasts, newest first
+#   latest                           print the newest replay.html path
+#   open [<id>]                       xdg-open a devcast (newest if omitted)
+#   stats <id>                        print its stats
+#   export <id> [--mp4|--gif] [--fps N] [--width W] [--height H] [--theme dark|light]
+#                                    render frames with headless chromium + ffmpeg
+#   prune [--keep N]                 delete all but the N newest (default 20)
+#
+# Reuses omarchy-pulse (a "devcast ready" activity event with a Watch action).
+#
+# Env: OMARCHY_STATE_DIR      override the state dir (tests)
+#      OMARCHY_DEVCAST_DIR     override the plugin dir (Model.js / template)
+#      CLAUDE_PROJECTS_DIR     override ~/.claude/projects
+#      OMARCHY_DEVCAST_QUIET=1 skip omarchy-pulse / notify-send
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+DC_DIR="${OMARCHY_DEVCAST_DIR:-$HOME/.config/omarchy/plugins/alteringux.devcast}"
+PROJECTS_DIR="${CLAUDE_PROJECTS_DIR:-$HOME/.claude/projects}"
+CASTS_DIR="$STATE_DIR/devcasts"
+CLI="$DC_DIR/devcast-cli.js"
+QUIET="${OMARCHY_DEVCAST_QUIET:-0}"
+
+die() { echo "omarchy-devcast: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+have node || die "needs node on PATH"
+have jq || die "needs jq on PATH"
+
+slugify() {
+  printf '%s' "$1" | tr '\n\r\t' '   ' | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-48
+}
+
+resolve_transcript() {  # <selector> [projectDir] -> path on stdout
+  local sel="${1:-latest}" proj="${2:-}"
+  if [ -f "$sel" ]; then printf '%s' "$sel"; return 0; fi
+  local search="$PROJECTS_DIR"
+  [ -n "$proj" ] && search="$proj"
+  if [ "$sel" = "latest" ]; then
+    find "$search" -name '*.jsonl' -type f -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | awk 'NR==1{ $1=""; sub(/^ /,""); print }'
+    return 0
+  fi
+  # treat as a session id (with or without .jsonl)
+  local id="${sel%.jsonl}"
+  find "$search" -name "${id}.jsonl" -type f 2>/dev/null | head -1
+}
+
+pulse_notify() {  # <html> <title> <summary>
+  [ "$QUIET" = 1 ] && return 0
+  have omarchy-pulse || return 0
+  omarchy-pulse log alteringux.devcast "Devcast ready — $2" \
+    --level info --notify \
+    --action "xdg-open '$1'" --action-label "Watch" \
+    >/dev/null 2>&1 || true
+}
+
+open_html() { setsid xdg-open "$1" >/dev/null 2>&1 || true; }
+
+cast_dirs_newest_first() {
+  [ -d "$CASTS_DIR" ] || return 0
+  find "$CASTS_DIR" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null \
+    | sort -rn | awk '{ $1=""; sub(/^ /,""); print }'
+}
+
+INDEX_FILE="$STATE_DIR/devcast-index.json"
+
+# Rebuild devcast-index.json — the single file the bar widget watches
+# (docs/adr/0006-cli-first-plugins.md). Cheap; called after build / prune.
+write_index() {
+  local rows="[]" d
+  while IFS= read -r d; do
+    [ -n "$d" ] && [ -f "$d/cast.json" ] || continue
+    local meta
+    meta="$(node "$CLI" stats "$d/cast.json" 2>/dev/null || echo '{}')"
+    rows="$(jq -c --argjson m "$meta" --arg id "$(basename "$d")" \
+      --arg html "$d/replay.html" --arg mp4 "$(ls -t "$d"/*.mp4 2>/dev/null | head -1)" \
+      --arg gif "$(ls -t "$d"/*.gif 2>/dev/null | head -1)" \
+      '. + [{
+        id:$id, title:($m.meta.title // "session"), summary:($m.summary // ""),
+        duration:($m.duration // ""), html:$html,
+        video:(if $mp4 != "" then $mp4 elif $gif != "" then $gif else "" end),
+        stats:($m.stats // {})
+      }]' <<<"$rows")"
+  done < <(cast_dirs_newest_first)
+
+  mkdir -p "$STATE_DIR"
+  local tmp="$INDEX_FILE.tmp.$$"
+  jq -n --argjson casts "$rows" --argjson now "$(date +%s%3N)" '{
+    version: 1, updatedAt: $now, count: ($casts | length),
+    latest: ($casts[0] // null), casts: $casts
+  }' > "$tmp" && mv -f "$tmp" "$INDEX_FILE"
+}
+
+resolve_cast_dir() {  # <id-or-empty> -> dir
+  local want="${1:-}"
+  if [ -z "$want" ]; then cast_dirs_newest_first | head -1; return 0; fi
+  if [ -d "$CASTS_DIR/$want" ]; then printf '%s' "$CASTS_DIR/$want"; return 0; fi
+  cast_dirs_newest_first | grep -m1 -F "$want" || true
+}
+
+# ── build ───────────────────────────────────────────────────────────────
+
+cmd_build() {
+  local selector="latest" project="" open=0
+  local passthru=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --project)   project="${2:-}"; shift 2 ;;
+      --open)      open=1; shift ;;
+      --title)     passthru+=(--title "${2:-}"); shift 2 ;;
+      --no-redact) passthru+=(--no-redact); shift ;;
+      --thinking)  passthru+=(--thinking); shift ;;
+      --no-reads)  passthru+=(--no-reads); shift ;;
+      --max-gap)   passthru+=(--max-gap "${2:-6000}"); shift 2 ;;
+      -*)          die "build: unknown flag '$1'" ;;
+      *)           selector="$1"; shift ;;
+    esac
+  done
+
+  local transcript
+  transcript="$(resolve_transcript "$selector" "$project")"
+  [ -n "$transcript" ] && [ -f "$transcript" ] || die "no transcript for '$selector' under $PROJECTS_DIR"
+
+  # Build into a stamp-only dir first, then rename it to include the slug of the
+  # title the parser actually settled on (ai-title, else first real prompt).
+  local stamp outDir
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  outDir="$CASTS_DIR/${stamp}-building.$$"
+
+  mkdir -p "$CASTS_DIR"
+  local result
+  result="$(node "$CLI" build "$transcript" "$outDir" "${passthru[@]}")" || { rm -rf "$outDir"; die "build failed: $result"; }
+
+  local err; err="$(printf '%s' "$result" | jq -r '.error // empty')"
+  [ -z "$err" ] || { rm -rf "$outDir" 2>/dev/null || true; die "$err"; }
+
+  local summary title slug finalDir
+  summary="$(printf '%s' "$result" | jq -r '.summary')"
+  title="$(printf '%s' "$result" | jq -r '.meta.title // "session"')"
+  slug="$(slugify "$title")"
+  [ -n "$slug" ] || slug="session"
+  finalDir="$CASTS_DIR/${stamp}-${slug}"
+  [ -e "$finalDir" ] && finalDir="$CASTS_DIR/${stamp}-${slug}.$$"
+  mv "$outDir" "$finalDir"
+  outDir="$finalDir"
+
+  local html
+  html="$outDir/replay.html"
+
+  # record the source + a friendly id
+  printf '%s' "$result" | jq --arg src "$transcript" --arg dir "$outDir" \
+    '. + {sourceTranscript:$src, outDir:$dir, htmlPath:($dir + "/replay.html"), castPath:($dir + "/cast.json")}' \
+    > "$outDir/build.json"
+
+  write_index
+
+  echo "$outDir"
+  echo "  $title"
+  echo "  $summary"
+  echo "  $html"
+  pulse_notify "$html" "$title" "$summary"
+  if [ "$open" = 1 ]; then open_html "$html"; fi
+}
+
+# ── list / open / stats / latest ───────────────────────────────────────
+
+cmd_list() {
+  local json=0
+  [ "${1:-}" = "--json" ] && json=1
+  local rows="[]"
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    local cj="$d/cast.json"
+    [ -f "$cj" ] || continue
+    local row
+    row="$(node "$CLI" stats "$cj" 2>/dev/null || echo '{}')"
+    row="$(printf '%s' "$row" | jq --arg id "$(basename "$d")" --arg html "$d/replay.html" \
+      '{id:$id, html:$html, title:(.meta.title // "session"), summary:.summary, duration:.duration, stats:.stats}')"
+    rows="$(jq -c --argjson r "$row" '. + [$r]' <<<"$rows")"
+  done < <(cast_dirs_newest_first)
+
+  if [ "$json" = 1 ]; then
+    printf '%s\n' "$rows" | jq .
+    return 0
+  fi
+  local n; n="$(jq 'length' <<<"$rows")"
+  [ "$n" -gt 0 ] || { echo "no devcasts yet — run: omarchy-devcast build latest"; return 0; }
+  printf '%s\n' "$rows" | jq -r '.[] | "\(.id)\n  \(.title)\n  \(.summary)\n"'
+}
+
+cmd_latest() {
+  local d; d="$(resolve_cast_dir "")"
+  [ -n "$d" ] || die "no devcasts yet"
+  printf '%s\n' "$d/replay.html"
+}
+
+cmd_open() {
+  local d; d="$(resolve_cast_dir "${1:-}")"
+  [ -n "$d" ] && [ -f "$d/replay.html" ] || die "no such devcast"
+  open_html "$d/replay.html"
+  echo "$d/replay.html"
+}
+
+cmd_stats() {
+  local d; d="$(resolve_cast_dir "${1:-}")"
+  [ -n "$d" ] && [ -f "$d/cast.json" ] || die "no such devcast"
+  node "$CLI" stats "$d/cast.json" | jq .
+}
+
+cmd_prune() {
+  local keep=20
+  [ "${1:-}" = "--keep" ] && keep="${2:-20}"
+  local i=0
+  while IFS= read -r d; do
+    i=$((i + 1))
+    [ "$i" -le "$keep" ] && continue
+    rm -rf "$d" && echo "pruned $(basename "$d")"
+  done < <(cast_dirs_newest_first)
+  write_index
+}
+
+# ── export (headless chromium frames -> ffmpeg) ────────────────────────
+
+cmd_export() {
+  local id="" kind="mp4" fps=8 width=1280 height=720 theme="dark" maxFrames=360
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --mp4)        kind="mp4"; shift ;;
+      --gif)        kind="gif"; shift ;;
+      --fps)        fps="${2:-8}"; shift 2 ;;
+      --width)      width="${2:-1280}"; shift 2 ;;
+      --height)     height="${2:-720}"; shift 2 ;;
+      --theme)      theme="${2:-dark}"; shift 2 ;;
+      --max-frames) maxFrames="${2:-360}"; shift 2 ;;
+      -*)           die "export: unknown flag '$1'" ;;
+      *)            id="$1"; shift ;;
+    esac
+  done
+
+  local chromium=""
+  for c in chromium chromium-browser google-chrome-stable google-chrome chrome; do
+    have "$c" && { chromium="$c"; break; }
+  done
+  [ -n "$chromium" ] || die "export needs a chromium/chrome binary"
+  have ffmpeg || die "export needs ffmpeg"
+
+  local d; d="$(resolve_cast_dir "$id")"
+  [ -n "$d" ] && [ -f "$d/replay.html" ] || die "no such devcast"
+  local totalMs
+  totalMs="$(jq -r '.stats.playDurationMs // 10000' "$d/cast.json")"
+
+  # If the full-rate frame count would blow past --max-frames, drop the fps to
+  # fit rather than render for ages. Playback still spans the whole cast.
+  local wantFrames
+  wantFrames="$(awk -v t="$totalMs" -v f="$fps" 'BEGIN{ printf "%d", (t/1000.0)*f + 1 }')"
+  if [ "$wantFrames" -gt "$maxFrames" ]; then
+    fps="$(awk -v t="$totalMs" -v m="$maxFrames" 'BEGIN{ r=(m-1)/(t/1000.0); printf "%.2f", (r<0.5?0.5:r) }')"
+    echo "omarchy-devcast: capped to $maxFrames frames → ${fps}fps" >&2
+  fi
+
+  local tmp; tmp="$(mktemp -d "${TMPDIR:-/tmp}/devcast-export.XXXXXX")"
+  trap 'rm -rf "$tmp"' RETURN
+  echo "omarchy-devcast: rendering frames with headless $chromium (${width}x${height} @ ${fps}fps)…" >&2
+
+  # Fast path: one persistent chromium driven over the DevTools protocol.
+  local fr_json fr_ok=0
+  if fr_json="$(node "$CLI" export-frames "$chromium" "$d/replay.html" "$tmp" "$fps" "$width" "$height" "$theme" "$totalMs" "$maxFrames" 2>"$tmp/err.log")"; then
+    [ "$(printf '%s' "$fr_json" | jq -r '.ok // false')" = "true" ] && fr_ok=1
+  fi
+  if [ "$fr_ok" != 1 ]; then
+    echo "omarchy-devcast: CDP renderer failed ($(head -1 "$tmp/err.log" 2>/dev/null)); falling back to per-frame screenshots" >&2
+    local nframes
+    nframes="$(awk -v t="$totalMs" -v f="$fps" -v m="$maxFrames" 'BEGIN{ n=(t/1000.0)*f+1; if(n>m)n=m; printf "%d", n }')"
+    seq 0 $((nframes - 1)) | xargs -P "$(nproc 2>/dev/null || echo 4)" -I{} sh -c '
+      n="$1"; tmp="$2"; d="$3"; w="$4"; h="$5"; fps="$6"; bin="$7"; theme="$8"
+      ms=$(awk -v n="$n" -v f="$fps" "BEGIN{ printf \"%d\", (n/f)*1000 }")
+      out="$tmp/$(printf "f_%05d.png" "$n")"
+      "$bin" --headless=new --hide-scrollbars --disable-gpu --disable-dev-shm-usage \
+        --no-sandbox --force-device-scale-factor=1 --window-size="${w},${h}" \
+        --screenshot="$out" "file://$d/replay.html?chrome=hidden&theme=${theme}&frame=${ms}" >/dev/null 2>&1
+    ' _ {} "$tmp" "$d" "$width" "$height" "$fps" "$chromium" "$theme"
+  fi
+
+  local made
+  made="$(find "$tmp" -name 'f_*.png' | wc -l)"
+  [ "$made" -ge 2 ] || die "no frames rendered (tried $chromium); see $tmp/err.log"
+
+  local stamp out
+  stamp="$(date +%Y%m%d-%H%M%S)"
+  # Normalise to a ~TARGET-second clip regardless of how many frames we
+  # captured: hold the N captured frames across TARGET seconds, upsample to a
+  # smooth outFps.
+  local target=45 outFps=15 inRate
+  inRate="$(awk -v n="$made" -v t="$target" 'BEGIN{ r=n/t; if(r<0.2)r=0.2; printf "%.4f", r }')"
+  local scale2="scale=trunc(iw/2)*2:trunc(ih/2)*2"
+  if [ "$kind" = "gif" ]; then
+    out="$d/devcast-$stamp.gif"
+    ffmpeg -y -loglevel error -framerate "$inRate" -i "$tmp/f_%05d.png" \
+      -vf "${scale2}:flags=lanczos,fps=$outFps,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse" \
+      "$out"
+  else
+    out="$d/devcast-$stamp.mp4"
+    ffmpeg -y -loglevel error -framerate "$inRate" -i "$tmp/f_%05d.png" \
+      -vf "${scale2},fps=$outFps" \
+      -c:v libx264 -pix_fmt yuv420p -movflags +faststart "$out"
+  fi
+  [ -s "$out" ] || die "ffmpeg produced no output"
+  echo "$out"
+  [ "$QUIET" = 1 ] || { have omarchy-pulse && omarchy-pulse log alteringux.devcast "Exported $(basename "$out")" --level info --action "xdg-open '$out'" --action-label "Open" >/dev/null 2>&1 || true; }
+}
+
+usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-list}" in
+  build)             shift; cmd_build "$@" ;;
+  list|ls)           shift || true; cmd_list "$@" ;;
+  latest)            shift || true; cmd_latest ;;
+  open)              shift || true; cmd_open "$@" ;;
+  stats)             shift || true; cmd_stats "$@" ;;
+  export)            shift; cmd_export "$@" ;;
+  prune)             shift || true; cmd_prune "$@" ;;
+  reindex)           shift || true; write_index; echo "$INDEX_FILE" ;;
+  -h|--help|help)    usage ;;
+  *) die "unknown command '$1' (try --help)" ;;
+esac

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.devcast",
+  "name": "Devcast",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Turn a Claude Code session transcript into an interactive replay (scrub/play replay.html, optional MP4/GIF) showing how something was built. Engine is ~/.local/bin/omarchy-devcast; the widget watches devcast-index.json.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Devcast",
+    "description": "Interactive replays of Claude Code build sessions",
+    "category": "Development",
+    "allowMultiple": false
+  }
+}

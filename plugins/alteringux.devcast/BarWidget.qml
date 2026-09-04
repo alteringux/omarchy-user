@@ -1,0 +1,134 @@
+import QtQuick
+import Quickshell
+import Quickshell.Io
+import qs.Commons
+import qs.Ui
+import "Model.js" as Model
+import "../alteringux.kit" as Kit
+
+BarWidget {
+  id: root
+  moduleName: "alteringux.devcast"
+
+  property alias index: indexStore.value
+  readonly property bool indexLoaded: indexStore.loaded
+
+  readonly property var guard: Kit.BugGuard.create("alteringux.devcast", function(argv) { Quickshell.execDetached(argv) })
+
+  readonly property int castCount: (indexLoaded && root.index) ? (root.index.count || 0) : 0
+  readonly property var latest: (indexLoaded && root.index) ? root.index.latest : null
+
+  readonly property string glyph: "" // nf-fa-film
+  readonly property string displayText: castCount > 0 ? (glyph + "  " + castCount) : glyph
+
+  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
+
+  // devcast-index.json is written only by omarchy-devcast (docs/adr/0006).
+  Kit.Store {
+    id: indexStore
+    fileName: "devcast-index.json"
+    watch: true
+    pollMs: 4000
+    parse: function (raw) { return Model.parseIndex(raw) }
+  }
+
+  // ---- building state (also surfaced to the panel)
+  property bool building: false
+
+  Process {
+    id: buildProc
+    running: false
+    onExited: { root.building = false; indexStore.reload() }
+  }
+
+  function buildLatest(open) {
+    guard.run("buildLatest", function () {
+      if (buildProc.running) return
+      root.building = true
+      buildProc.command = open
+        ? [root.scriptPath, "build", "latest", "--open"]
+        : [root.scriptPath, "build", "latest"]
+      buildProc.running = true
+    })
+  }
+
+  function openLatest() {
+    guard.run("openLatest", function () {
+      Quickshell.execDetached([root.scriptPath, "open"])
+    })
+  }
+
+  // ---- IPC
+  IpcHandler {
+    target: "alteringux.devcast"
+
+    function status(): string {
+      return guard.call("ipc.status", function () {
+        return JSON.stringify({
+          count: root.castCount,
+          building: root.building,
+          latest: root.latest
+        })
+      }, "{}")
+    }
+    function build(): void { root.buildLatest(false) }
+    function buildOpen(): void { root.buildLatest(true) }
+    function open(): void { root.openLatest() }
+    function panel(): void { root.togglePanel() }
+    function close(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+  }
+
+  // ---- popup panel
+  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function close() { if (panelLoader.item) panelLoader.item.close() }
+  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+
+  function injectPanel() {
+    var target = panelLoader.item
+    if (!target) return
+    if ("bar" in target) target.bar = root.bar
+    if ("anchorItem" in target) target.anchorItem = button
+    if ("hostWidget" in target) target.hostWidget = root
+  }
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  onBarChanged: injectPanel()
+
+  Loader {
+    id: panelLoader
+    active: true
+    source: Qt.resolvedUrl("Panel.qml")
+    visible: false
+    onLoaded: {
+      root.injectPanel()
+      Qt.callLater(root.injectPanel)
+    }
+  }
+
+  WidgetButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    text: root.displayText
+    horizontalMargin: 8.75
+    verticalPadding: 8.75
+
+    onPressed: function (b) {
+      if (b === Qt.MiddleButton) root.buildLatest(true)
+      else root.togglePanel()
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: root.building
+      level: "info"
+    }
+  }
+}
