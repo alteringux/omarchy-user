@@ -51,6 +51,11 @@ o.bind("SUPER + ALT + N", "Narrate selection", "omarchy-narrate")
 -- selection, spoken via Piper TTS. Offline; press again to stop.
 o.bind("SUPER + SHIFT + ALT + N", "Reframe selection (gist + other perspectives, TTS)", "omarchy-reframe")
 
+-- Prompt Opt: rewrite the selected/copied rough requirement into a lean,
+-- structured prompt (Task/Constraints/Context/Output) via Featherless, copy it
+-- to the clipboard, and toast the before/after token estimate.
+o.bind("SUPER + SHIFT + ALT + P", "Optimize selection into a lean prompt (clipboard)", "omarchy-promptopt")
+
 -- Spoken notifications: toggle reading incoming notifications aloud (Piper TTS)
 o.bind("SUPER + ALT + V", "Spoken notifications: toggle", "omarchy-speak-notifications-toggle")
 

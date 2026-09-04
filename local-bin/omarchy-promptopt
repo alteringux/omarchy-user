@@ -1,0 +1,174 @@
+#!/usr/bin/env bash
+# omarchy-promptopt -- SUPER+SHIFT+ALT+P
+#
+# Take a rough, rambling requirement and rewrite it into a tight, structured
+# prompt that costs fewer tokens to feed a downstream LLM (Claude Code,
+# opencode, an API call...). Strips filler / hedging / politeness / repetition,
+# converts to imperative, pulls explicit constraints out into a list, and names
+# the output format -- WITHOUT dropping any substantive requirement, name,
+# number or edge case, and without answering the request.
+#
+# Flow (keybind use): reads the primary selection, else the clipboard; sends it
+# to Featherless (llm-blurb, off the Claude subscription) for the rewrite; puts
+# the optimized prompt back on the clipboard; and shows a notification with a
+# rough before/after token count, e.g. "142 tok -> 58 tok (-59%)".
+#
+# The token figures are an estimate only (chars / 4) -- no tokenizer is
+# installed -- but the ratio is close enough to be useful.
+#
+# The requirement text leaves the machine (Featherless). Nothing is spoken and
+# nothing is stored.
+#
+# Also usable as a plain filter:
+#   omarchy-promptopt "make me a thing that..."      # text as args
+#   pbpaste | omarchy-promptopt                      # text on stdin
+#   omarchy-promptopt --print < req.txt > tight.txt  # no clipboard, no toast
+#
+# Options:
+#   --print          print only; do not touch the clipboard or notify
+#   --no-clip        do not copy the result to the clipboard
+#   --quiet          do not send a desktop notification
+#   --model NAME     pin to one model (no fallback)
+#   --models "a b"   replace the fallback chain (space/comma separated)
+#   --max-chars N    truncate input to N chars (default 8000)
+#   -h, --help       this help
+set -uo pipefail
+
+# Non-thinking instruct models only (a reasoning model puts its answer in a
+# separate field and llm-blurb sees an empty completion). Chain ends on a
+# Feather-owned Qwen that is always warm so a rewrite never hard-fails.
+if [[ -n "${PROMPTOPT_MODEL:-}" ]]; then
+  MODELS=("$PROMPTOPT_MODEL")
+elif [[ -n "${PROMPTOPT_MODELS:-}" ]]; then
+  IFS=$' ,' read -r -a MODELS <<<"$PROMPTOPT_MODELS"
+else
+  MODELS=(
+    "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    "Qwen/Qwen2.5-7B-Instruct"
+  )
+fi
+
+LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blurb")"
+MAX_INPUT_CHARS=8000
+DO_CLIP=1
+DO_NOTIFY=1
+
+while (($#)); do
+  case "$1" in
+    --print)     DO_CLIP=0; DO_NOTIFY=0; shift ;;
+    --no-clip)   DO_CLIP=0; shift ;;
+    --quiet)     DO_NOTIFY=0; shift ;;
+    --model)     MODELS=("${2:-}"); shift 2 ;;
+    --models)    IFS=$' ,' read -r -a MODELS <<<"${2:-}"; shift 2 ;;
+    --max-chars) MAX_INPUT_CHARS="${2:-8000}"; shift 2 ;;
+    -h|--help)   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --)          shift; break ;;
+    -*)          echo "omarchy-promptopt: unknown option $1" >&2; exit 2 ;;
+    *)           break ;;
+  esac
+done
+
+note() { ((DO_NOTIFY)) && notify-send -a "Prompt Opt" "$@" 2>/dev/null || true; }
+
+# Rough token estimate: ~4 chars per token for English prose. Good enough for a
+# before/after ratio; not a real tokenizer.
+est_tokens() { local n=${#1}; echo $(( (n + 3) / 4 )); }
+
+# --- gather input -------------------------------------------------------------
+if (($#)); then
+  TEXT="$*"
+elif [[ ! -t 0 ]]; then
+  TEXT="$(cat)"
+else
+  TEXT="$(wl-paste --primary --no-newline 2>/dev/null)"
+  [[ -z "${TEXT// }" ]] && TEXT="$(wl-paste --no-newline 2>/dev/null)"
+fi
+if [[ -z "${TEXT// }" ]]; then
+  note "Nothing selected or copied to optimize."
+  echo "omarchy-promptopt: no input (selection, clipboard, args and stdin all empty)" >&2
+  exit 1
+fi
+TEXT="${TEXT:0:MAX_INPUT_CHARS}"
+
+[[ -x "$LLM_BLURB" ]] || { note "llm-blurb helper not found."; echo "omarchy-promptopt: llm-blurb not found" >&2; exit 1; }
+
+IN_TOK="$(est_tokens "$TEXT")"
+
+SYSTEM='You are a prompt compressor. You are given a rough, possibly rambling REQUIREMENT that someone wants to send to an AI coding/writing assistant. Rewrite it as the shortest prompt that still fully specifies the job, so it costs fewer tokens to send.
+
+Rules:
+- Do NOT do the task or answer the requirement. Only rewrite the request itself.
+- Keep every substantive detail: goals, named files/tools/APIs, numbers, formats, explicit "must"/"must not", edge cases, examples. Losing a requirement is a failure.
+- Cut filler: greetings, "I was wondering if you could", "please", "thanks", hedging, restatements, thinking-out-loud, anything the assistant already knows.
+- Use imperative voice. Merge duplicate points. Prefer short lines and semicolons over paragraphs.
+- Invent nothing. Do not add constraints, scope, or preferences that are not in the original.
+- The result MUST be shorter than the input unless the input is already minimal.
+
+Output ONLY the rewritten prompt, using exactly this shape (drop a line if it has no content):
+Task: <one sentence, imperative>
+Constraints: <semicolon-separated list of every hard requirement>
+Context: <only facts the assistant needs and cannot infer; omit if none>
+Output: <the deliverable form the requester expects>
+
+No preamble, no explanation, no markdown fences, no closing remark.'
+
+note "Optimizing..." "Tightening the requirement into a lean prompt."
+
+OUT=""
+ERR=""
+BEST=""
+for m in "${MODELS[@]}"; do
+  [[ -n "$m" ]] || continue
+  if OUT="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
+             --max-tokens 700 --temp 0.2 --timeout 60 "$TEXT" 2>&1)"; then
+    [[ -n "${BEST// }" ]] || BEST="$OUT"
+    # A usable rewrite has at least a "Task:" line.
+    printf '%s\n' "$OUT" | grep -qiE '^[[:space:]]*task[[:space:]]*:' && { ERR=""; break; }
+    ERR="$m: no Task: line"
+  else
+    ERR="$m: $(printf '%s' "$OUT" | tail -c 160)"
+  fi
+  OUT=""
+done
+[[ -n "${OUT// }" ]] || OUT="$BEST"
+[[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; echo "omarchy-promptopt: ${ERR:-failed}" >&2; exit 1; }
+
+# --- clean the model output -------------------------------------------------
+# Drop a <think> block from a thinking-variant override.
+OUT="$(printf '%s' "$OUT" | perl -0pe 's{<think>.*?</think>}{}gs' 2>/dev/null || printf '%s' "$OUT")"
+# Strip a wrapping code fence if the model added one.
+OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*```/d}; ${/^[[:space:]]*```[[:space:]]*$/d}')"
+# Drop a leading "Here is the optimized prompt:" style line.
+OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*(here|sure|below|the optimized|optimized prompt|rewritten)\b.*:[[:space:]]*$/Id}')"
+# Trim trailing whitespace and leading/trailing blank lines.
+OUT="$(printf '%s\n' "$OUT" | sed -E 's/[[:space:]]+$//' | sed -E '/./,$!d' | tac | sed -E '/./,$!d' | tac)"
+
+if [[ -z "${OUT// }" ]]; then
+  note "Model returned nothing usable."
+  echo "omarchy-promptopt: empty result after cleanup" >&2
+  exit 1
+fi
+
+OUT_TOK="$(est_tokens "$OUT")"
+
+# --- deliver ---------------------------------------------------------------
+printf '%s\n' "$OUT"
+
+if ((DO_CLIP)) && command -v wl-copy >/dev/null 2>&1; then
+  printf '%s' "$OUT" | wl-copy 2>/dev/null || true
+fi
+
+if (( IN_TOK > 0 )); then
+  DELTA=$(( (IN_TOK - OUT_TOK) * 100 / IN_TOK ))
+  if (( DELTA >= 0 )); then
+    SUMMARY="~${IN_TOK} tok -> ~${OUT_TOK} tok (-${DELTA}%)"
+  else
+    SUMMARY="~${IN_TOK} tok -> ~${OUT_TOK} tok (+$(( -DELTA ))%)"
+  fi
+else
+  SUMMARY="~${OUT_TOK} tok"
+fi
+
+CLIPNOTE=""
+((DO_CLIP)) && CLIPNOTE=$'\n\n(copied to clipboard)'
+note "$SUMMARY" "$OUT$CLIPNOTE"
