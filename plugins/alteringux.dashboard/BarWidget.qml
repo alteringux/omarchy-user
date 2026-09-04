@@ -62,6 +62,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.dashboard", function(argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.dashboard"
+  }
+
   Component.onCompleted: root.runRefresh()
 
   // ---- Popup panel. Shape contract for shell.summon/hide/toggle routing:
@@ -126,6 +131,14 @@ BarWidget {
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
       anchors.rightMargin: Style.space(3)
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }
