@@ -1,30 +1,36 @@
 #!/usr/bin/env bash
-# omarchy-promptopt -- SUPER+SHIFT+ALT+P
+# omarchy-promptopt -- SUPER + ;   (semicolon)
 #
 # Take a rough, rambling requirement and rewrite it into a tight, structured
 # prompt that costs fewer tokens to feed a downstream LLM (Claude Code,
-# opencode, an API call...). Strips filler / hedging / politeness / repetition,
-# converts to imperative, pulls explicit constraints out into a list, and names
-# the output format -- WITHOUT dropping any substantive requirement, name,
-# number or edge case, and without answering the request.
+# opencode, an API call...) and needs no clarifying questions back.
 #
-# Flow (keybind use): reads the primary selection, else the clipboard; sends it
-# to Featherless (llm-blurb, off the Claude subscription) for the rewrite; puts
-# the optimized prompt back on the clipboard; and shows a notification with a
-# rough before/after token count, e.g. "142 tok -> 58 tok (-59%)".
+# The rewrite prompt is SWITCHED by context: the requirement is first
+# classified (code / debug / research / writing / data / general) and a
+# system prompt specialised for that kind of task is used, on top of a shared
+# core built from Anthropic's prompt-engineering guidance (be clear + direct;
+# keep every load-bearing detail; positive instructions over prohibitions;
+# name the output form; match prose style to the wanted output).
 #
-# The token figures are an estimate only (chars / 4) -- no tokenizer is
-# installed -- but the ratio is close enough to be useful.
+# Flow (hotkey use): reads the primary selection, else the clipboard; classifies
+# it; sends it to Featherless (llm-blurb, off the Claude subscription) with the
+# matching system prompt; puts the optimised prompt back on the clipboard; and
+# toasts the detected context + a rough before/after token count, e.g.
+# "[debug] ~142 tok -> ~71 tok (-50%)".
 #
-# The requirement text leaves the machine (Featherless). Nothing is spoken and
-# nothing is stored.
+# Token figures are an estimate (chars / 4) -- no tokenizer is installed -- but
+# the ratio is close enough to be useful. The requirement text leaves the
+# machine (Featherless). Nothing is spoken and nothing is stored.
 #
 # Also usable as a plain filter:
 #   omarchy-promptopt "make me a thing that..."      # text as args
 #   pbpaste | omarchy-promptopt                      # text on stdin
 #   omarchy-promptopt --print < req.txt > tight.txt  # no clipboard, no toast
+#   omarchy-promptopt --ctx writing "..."            # force a context
 #
 # Options:
+#   --ctx NAME       force context: code|debug|research|writing|data|general
+#   --list-ctx       print the contexts and what triggers each, then exit
 #   --print          print only; do not touch the clipboard or notify
 #   --no-clip        do not copy the result to the clipboard
 #   --quiet          do not send a desktop notification
@@ -32,6 +38,8 @@
 #   --models "a b"   replace the fallback chain (space/comma separated)
 #   --max-chars N    truncate input to N chars (default 8000)
 #   -h, --help       this help
+#
+# Env: PROMPTOPT_CTX, PROMPTOPT_MODEL, PROMPTOPT_MODELS
 set -uo pipefail
 
 # Non-thinking instruct models only (a reasoning model puts its answer in a
@@ -52,16 +60,89 @@ LLM_BLURB="$(command -v llm-blurb 2>/dev/null || echo "$HOME/.local/bin/llm-blur
 MAX_INPUT_CHARS=8000
 DO_CLIP=1
 DO_NOTIFY=1
+FORCE_CTX="${PROMPTOPT_CTX:-}"
+
+# ---------------------------------------------------------------------------
+CORE_SYSTEM='You are a prompt optimiser. Input: a rough request that someone is about to send to an AI assistant. Output: the leanest prompt that still fully specifies the same job, so it costs fewer tokens to send and the assistant needs no clarifying questions back.
+
+Method:
+- Do NOT perform the task or answer it. Rewrite the request only.
+- Keep every load-bearing detail: goals, named files, paths, tools, APIs, libraries, numbers, versions, formats, explicit must and must-not, edge cases, examples. Dropping one is a failure.
+- Copy every proper noun, product name, library, API, command, file path and identifier EXACTLY as written. Never fix, expand, translate, or swap one for a similar-looking name, even if it looks misspelled. "pgbackrest" stays "pgbackrest".
+- Cut filler: greetings, "could you", "please", "thanks", hedging, thinking-aloud, restated points, and anything a competent assistant already knows.
+- Imperative voice. One idea per line. Semicolons instead of sentences. Merge duplicates.
+- Phrase constraints as positive instructions ("return X", "use Y") rather than prohibitions where possible.
+- Invent NOTHING. No scope, stack, versions, tone, environment, file formats, or preferences that the requirement does not state or clearly imply.
+- Do not add dates, years, version numbers, "as of YEAR" qualifiers, or field-by-field format breakdowns that the requirement does not contain.
+- For a fact the requirement gestures at but does not give (a URL, a filename, a number), write a short angle-bracket placeholder like <onboarding doc URL>. Never substitute a specific invented value.
+- Hard limit: the whole output is under 120 words. If it will not fit, keep Task and Constraints and drop Context; never pad to fill space.
+
+Shape: emit these labels, each on its own line, each starting with the label and a colon.
+Task: <one imperative sentence>
+Constraints: <semicolon-separated list of every hard requirement actually stated>
+Output: <the exact deliverable form expected>
+Context: <ONLY background facts written in the requirement that do not fit above. Omit this line entirely unless such facts exist. Never derive, assume, guess, or elaborate it -- most requirements have no Context.>
+
+Output ONLY the rewritten prompt. No preamble, no explanation, no markdown fences, no closing remark.'
+
+ctx_addendum() {
+  case "$1" in
+    code)
+      printf '%s' '
+This is a CODING task. Pin into Constraints: language + version; exact target file paths; the function/class/API signatures involved; "solve the general case, do not hard-code to the examples"; "no refactors, abstractions, or extra files beyond what is asked". Output must name the deliverable form (unified diff, full file contents, or new file path).' ;;
+    debug)
+      printf '%s' '
+This is a DEBUGGING task. Constraints must list, as separate semicolon items: the exact symptom (verbatim error text or the wrong behaviour); expected vs actual; minimal repro steps; suspect file(s)/line(s) or stack frames if named; "find and fix the root cause, not the symptom; state the cause in one line". Output = the fix (diff or file) plus the one-line cause.' ;;
+    research)
+      printf '%s' '
+This is a RESEARCH / open-question task. The Task line is the precise question. Constraints = success criteria (what a complete answer must cover); preferred or authoritative sources; a recency bound ONLY if the user gave one. Output = findings with source citations; prose, no code unless asked.' ;;
+    writing)
+      printf '%s' '
+This is a WRITING task. Constraints must pin: audience; tone / register; length (word or paragraph count); structure or format; points that must appear; things to avoid. Context = source material or facts to draw on. Output = the finished piece only, nothing else.' ;;
+    data)
+      printf '%s' '
+This is an ANALYSIS / EXTRACTION task. Constraints: input location and format; exactly what to extract, compute, or summarise; the output schema (fields, types, order); how to treat missing or ambiguous rows. Output = the structured result form (table, JSON, or list) with its columns/keys named.' ;;
+    *) printf '%s' '' ;;
+  esac
+}
+
+# Priority-ordered keyword classifier. First bucket that matches wins; broad
+# coding vocabulary is checked last so a debug/data/research/writing request
+# that happens to mention "function" or "script" is not miscalled as "code".
+classify_ctx() {
+  local t; t="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  local re_debug='error|traceback|stack ?trace|exception|broken|not working|does ?n.?t work|wo ?n.?t (run|build|compile|start)|fails?|failing|failed|crash|\bbug\b|segfault|hangs?|freezes?|regression|throws?|stack overflow|why (is|does|is ?n.?t|are ?n.?t|wo ?n.?t)'
+  local re_data='analy[sz]e|analysis|summari[sz]e|\bextract\b|\bparse\b|classif|categori[sz]e|data ?set|\.csv|\.json|\.xlsx|\.parquet|spreadsheet|\bjson\b|\bcsv\b|aggregate|group by|dataframe|\bstats\b|statistics|pivot|deduplicate'
+  local re_research='\bresearch\b|find out|look up|\bcompare\b|comparison|\bversus\b|\bvs\b|pros and cons|trade-?offs?|how does|how do .* work|which .* should i|best .* (for|to)|investigate|alternatives to|options for|is it (possible|worth)|what is the difference'
+  local re_writing='\bwrite \b|\bwriting\b|\bdraft\b|rewrite|reword|paraphrase|proof ?read|blog post|\bessay\b|\bemail\b|cover letter|\breadme\b|documentation|\bdocs\b|\btone\b|headline|tagline|copywriting|marketing copy|press release|social post'
+  local re_code='implement|refactor|\badd a\b|\bbuild a\b|\bcreate a\b|\bwrite a (function|script|class|method|program|cli|api|endpoint|component|test|module)|\bfunction\b|\bclass \b|\bmethod\b|\bmodule\b|\bscript\b|\bapi\b|endpoint|component|\blibrary\b|\bpackage\b|typescript|python|\brust\b|golang|javascript|\breact\b|unit test|integration test|migrat|\bregex\b|compile|dockerfile|\bsql\b|query'
+  for pair in "debug|$re_debug" "data|$re_data" "research|$re_research" "writing|$re_writing" "code|$re_code"; do
+    if printf '%s' "$t" | grep -qE "${pair#*|}"; then printf '%s' "${pair%%|*}"; return; fi
+  done
+  printf 'general'
+}
+# ---------------------------------------------------------------------------
 
 while (($#)); do
   case "$1" in
+    --ctx)       FORCE_CTX="${2:-}"; shift 2 ;;
+    --list-ctx)
+      cat <<'EOF'
+code      implement / refactor / build a function, class, script, API, component
+debug     an error / traceback / crash / "doesn't work" / "why is X failing"
+research  compare / find out / "how does X work" / pros and cons / alternatives
+writing   write / draft / rewrite prose, an email, blog post, README, docs
+data      analyse / summarise / extract / parse / classify a dataset or document
+general   anything else -- the shared core prompt only
+EOF
+      exit 0 ;;
     --print)     DO_CLIP=0; DO_NOTIFY=0; shift ;;
     --no-clip)   DO_CLIP=0; shift ;;
     --quiet)     DO_NOTIFY=0; shift ;;
     --model)     MODELS=("${2:-}"); shift 2 ;;
     --models)    IFS=$' ,' read -r -a MODELS <<<"${2:-}"; shift 2 ;;
     --max-chars) MAX_INPUT_CHARS="${2:-8000}"; shift 2 ;;
-    -h|--help)   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     --)          shift; break ;;
     -*)          echo "omarchy-promptopt: unknown option $1" >&2; exit 2 ;;
     *)           break ;;
@@ -84,7 +165,7 @@ else
   [[ -z "${TEXT// }" ]] && TEXT="$(wl-paste --no-newline 2>/dev/null)"
 fi
 if [[ -z "${TEXT// }" ]]; then
-  note "Nothing selected or copied to optimize."
+  note "Nothing selected or copied to optimise."
   echo "omarchy-promptopt: no input (selection, clipboard, args and stdin all empty)" >&2
   exit 1
 fi
@@ -92,27 +173,17 @@ TEXT="${TEXT:0:MAX_INPUT_CHARS}"
 
 [[ -x "$LLM_BLURB" ]] || { note "llm-blurb helper not found."; echo "omarchy-promptopt: llm-blurb not found" >&2; exit 1; }
 
+# --- pick the context + build the system prompt ---------------------------
+case "$FORCE_CTX" in
+  code|debug|research|writing|data|general) CTX="$FORCE_CTX" ;;
+  "") CTX="$(classify_ctx "$TEXT")" ;;
+  *)  echo "omarchy-promptopt: unknown --ctx '$FORCE_CTX' (use: code debug research writing data general)" >&2; exit 2 ;;
+esac
+SYSTEM="$CORE_SYSTEM$(ctx_addendum "$CTX")"
+
 IN_TOK="$(est_tokens "$TEXT")"
 
-SYSTEM='You are a prompt compressor. You are given a rough, possibly rambling REQUIREMENT that someone wants to send to an AI coding/writing assistant. Rewrite it as the shortest prompt that still fully specifies the job, so it costs fewer tokens to send.
-
-Rules:
-- Do NOT do the task or answer the requirement. Only rewrite the request itself.
-- Keep every substantive detail: goals, named files/tools/APIs, numbers, formats, explicit "must"/"must not", edge cases, examples. Losing a requirement is a failure.
-- Cut filler: greetings, "I was wondering if you could", "please", "thanks", hedging, restatements, thinking-out-loud, anything the assistant already knows.
-- Use imperative voice. Merge duplicate points. Prefer short lines and semicolons over paragraphs.
-- Invent nothing. Do not add constraints, scope, or preferences that are not in the original.
-- The result MUST be shorter than the input unless the input is already minimal.
-
-Output ONLY the rewritten prompt, using exactly this shape (drop a line if it has no content):
-Task: <one sentence, imperative>
-Constraints: <semicolon-separated list of every hard requirement>
-Context: <only facts the assistant needs and cannot infer; omit if none>
-Output: <the deliverable form the requester expects>
-
-No preamble, no explanation, no markdown fences, no closing remark.'
-
-note "Optimizing..." "Tightening the requirement into a lean prompt."
+note "Optimising [$CTX]..." "Tightening the requirement into a lean prompt."
 
 OUT=""
 ERR=""
@@ -120,7 +191,7 @@ BEST=""
 for m in "${MODELS[@]}"; do
   [[ -n "$m" ]] || continue
   if OUT="$("$LLM_BLURB" --model "$m" --system "$SYSTEM" \
-             --max-tokens 700 --temp 0.2 --timeout 60 "$TEXT" 2>&1)"; then
+             --max-tokens 450 --temp 0.15 --timeout 60 "$TEXT" 2>&1)"; then
     [[ -n "${BEST// }" ]] || BEST="$OUT"
     # A usable rewrite has at least a "Task:" line.
     printf '%s\n' "$OUT" | grep -qiE '^[[:space:]]*task[[:space:]]*:' && { ERR=""; break; }
@@ -138,8 +209,12 @@ done
 OUT="$(printf '%s' "$OUT" | perl -0pe 's{<think>.*?</think>}{}gs' 2>/dev/null || printf '%s' "$OUT")"
 # Strip a wrapping code fence if the model added one.
 OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*```/d}; ${/^[[:space:]]*```[[:space:]]*$/d}')"
-# Drop a leading "Here is the optimized prompt:" style line.
-OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*(here|sure|below|the optimized|optimized prompt|rewritten)\b.*:[[:space:]]*$/Id}')"
+# Drop a leading "Here is the optimised prompt:" style line.
+OUT="$(printf '%s\n' "$OUT" | sed -E '1{/^[[:space:]]*(here|sure|below|the optimi[sz]ed|optimi[sz]ed prompt|rewritten)\b.*:[[:space:]]*$/Id}')"
+# The 30B model is stubborn about stamping a stale "as of 20XX" onto research
+# prompts even when told not to -- strip that phrase (any bare year the user
+# actually supplied stays, it would be phrased differently).
+OUT="$(printf '%s\n' "$OUT" | sed -E 's/,?[[:space:]]*\(?(as of|current as of|valid as of)[[:space:]]+20[0-9]{2}\)?//Ig')"
 # Trim trailing whitespace and leading/trailing blank lines.
 OUT="$(printf '%s\n' "$OUT" | sed -E 's/[[:space:]]+$//' | sed -E '/./,$!d' | tac | sed -E '/./,$!d' | tac)"
 
@@ -161,12 +236,12 @@ fi
 if (( IN_TOK > 0 )); then
   DELTA=$(( (IN_TOK - OUT_TOK) * 100 / IN_TOK ))
   if (( DELTA >= 0 )); then
-    SUMMARY="~${IN_TOK} tok -> ~${OUT_TOK} tok (-${DELTA}%)"
+    SUMMARY="[$CTX] ~${IN_TOK} tok -> ~${OUT_TOK} tok (-${DELTA}%)"
   else
-    SUMMARY="~${IN_TOK} tok -> ~${OUT_TOK} tok (+$(( -DELTA ))%)"
+    SUMMARY="[$CTX] ~${IN_TOK} tok -> ~${OUT_TOK} tok (+$(( -DELTA ))%)"
   fi
 else
-  SUMMARY="~${OUT_TOK} tok"
+  SUMMARY="[$CTX] ~${OUT_TOK} tok"
 fi
 
 CLIPNOTE=""
