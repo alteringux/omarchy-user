@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.crochet",
+  "name": "Croche-Loom",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Quick access to the Croche-Loom crochet-machine project (~/Work/crochet-machine): run/compile a stitch pattern, see the sim test status, and jump to the design docs or the published visual preview. Engine is ~/.local/bin/omarchy-crochet; the widget watches crochet-index.json.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Croche-Loom",
+    "description": "Crochet-machine design project: run patterns, check tests, open docs",
+    "category": "Development",
+    "allowMultiple": false
+  }
+}
