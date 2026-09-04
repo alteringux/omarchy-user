@@ -280,9 +280,9 @@ Panel {
 
           Text {
             text: "Enter: add  ·  ⏸ pause/resume  ·  click a time for its start date  ·  Esc: close"
-            color: Qt.darker(root.barForeground, 1.4)
+            color: Kit.Palette.faint
             font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.caption
           }
         }
       }
