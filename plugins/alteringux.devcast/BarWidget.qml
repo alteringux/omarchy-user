@@ -58,6 +58,51 @@ BarWidget {
     })
   }
 
+  // ---- session catalogue ("all sessions + history")
+  readonly property var catalog: (indexLoaded && root.index && root.index.catalog) ? root.index.catalog : null
+  property bool scanning: false
+  property bool importing: false
+
+  Process {
+    id: catalogProc
+    running: false
+    onExited: { root.scanning = false; indexStore.reload() }
+  }
+  Process {
+    id: importProc
+    running: false
+    onExited: { root.importing = false; indexStore.reload() }
+  }
+
+  function refreshCatalog() {
+    guard.run("refreshCatalog", function () {
+      if (catalogProc.running) return
+      root.scanning = true
+      catalogProc.command = [root.scriptPath, "catalog"]
+      catalogProc.running = true
+    })
+  }
+
+  function importRecent() {
+    guard.run("importRecent", function () {
+      if (importProc.running) return
+      root.importing = true
+      importProc.command = [root.scriptPath, "import"]
+      importProc.running = true
+    })
+  }
+
+  function buildSession(sourcePath, open) {
+    guard.run("buildSession", function () {
+      if (buildProc.running || !sourcePath) return
+      root.building = true
+      buildProc.command = open
+        ? [root.scriptPath, "build", sourcePath, "--open"]
+        : [root.scriptPath, "build", sourcePath]
+      buildProc.running = true
+    })
+  }
+
   // ---- IPC
   IpcHandler {
     target: "alteringux.devcast"
@@ -67,13 +112,18 @@ BarWidget {
         return JSON.stringify({
           count: root.castCount,
           building: root.building,
-          latest: root.latest
+          scanning: root.scanning,
+          importing: root.importing,
+          latest: root.latest,
+          catalog: root.catalog
         })
       }, "{}")
     }
     function build(): void { root.buildLatest(false) }
     function buildOpen(): void { root.buildLatest(true) }
     function open(): void { root.openLatest() }
+    function catalog(): void { root.refreshCatalog() }
+    function importSessions(): void { root.importRecent() }
     function panel(): void { root.togglePanel() }
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }

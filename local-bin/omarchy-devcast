@@ -27,6 +27,13 @@
 #   prune [--keep N]                 delete all but the N newest (default 20)
 #   flag <id> <text...>              record "this replay was wrong" for the
 #                                    self-improvement loop (omarchy-plugin-improve)
+#   catalog [--rebuild]              scan EVERY ~/.claude/projects/*/*.jsonl into
+#                                    devcast-catalog.json (streamed, incremental)
+#   library [--json]                 list every known session, ▶ = replay built,
+#                                    ~ = replay stale (transcript grew since)
+#   import [--all] [--since D] [--project SUBSTR] [--min-tools N] [--limit N]
+#                                    bulk-build replays from the catalogue
+#                                    (default: unbuilt/stale, >=3 tool calls, 25 newest)
 #
 # Reuses omarchy-pulse (a "devcast ready" activity event with a Watch action).
 #
@@ -93,9 +100,23 @@ cast_dirs_newest_first() {
 }
 
 INDEX_FILE="$STATE_DIR/devcast-index.json"
+CATALOG_FILE="$STATE_DIR/devcast-catalog.json"
+
+# sessionId \t castDirName \t buildMtimeMs  — one line per built devcast
+built_map() {
+  local d sid mt
+  while IFS= read -r d; do
+    [ -f "$d/build.json" ] || continue
+    sid="$(jq -r '.meta.sessionId // empty' "$d/build.json" 2>/dev/null)"
+    [ -n "$sid" ] || continue
+    mt="$(stat -c %Y "$d/cast.json" 2>/dev/null || echo 0)"
+    printf '%s\t%s\t%s000\n' "$sid" "$(basename "$d")" "$mt"
+  done < <(cast_dirs_newest_first)
+}
 
 # Rebuild devcast-index.json — the single file the bar widget watches
-# (docs/adr/0006-cli-first-plugins.md). Cheap; called after build / prune.
+# (docs/adr/0006-cli-first-plugins.md). Cheap; called after build / prune /
+# catalog. Also folds in a capped view of the session catalogue.
 write_index() {
   local rows="[]" d
   while IFS= read -r d; do
@@ -113,12 +134,115 @@ write_index() {
       }]' <<<"$rows")"
   done < <(cast_dirs_newest_first)
 
+  local cat='null'
+  if [ -f "$CATALOG_FILE" ]; then
+    cat="$(jq -c '{
+      totalSessions: (.sessions | length),
+      built: ([.sessions[] | select(.built)] | length),
+      stale: ([.sessions[] | select(.stale)] | length),
+      unbuilt: ([.sessions[] | select((.built | not))] | length),
+      updatedAt: .updatedAt,
+      recent: (.sessions[:60] | map({
+        id: .sessionId, title, project, endedAt: .lastTs,
+        toolUses, lines, built, stale, sourcePath
+      }))
+    }' "$CATALOG_FILE" 2>/dev/null || echo 'null')"
+  fi
+
   mkdir -p "$STATE_DIR"
   local tmp="$INDEX_FILE.tmp.$$"
-  jq -n --argjson casts "$rows" --argjson now "$(date +%s%3N)" '{
+  jq -n --argjson casts "$rows" --argjson cat "$cat" --argjson now "$(date +%s%3N)" '{
     version: 1, updatedAt: $now, count: ($casts | length),
-    latest: ($casts[0] // null), casts: $casts
+    latest: ($casts[0] // null), casts: $casts, catalog: $cat
   }' > "$tmp" && mv -f "$tmp" "$INDEX_FILE"
+}
+
+# Walk every ~/.claude/projects/*/*.jsonl into devcast-catalog.json (streamed,
+# incremental by mtime). This is the "track all sessions + history" view.
+cmd_catalog() {
+  local rebuild=""
+  [ "${1:-}" = "--rebuild" ] && rebuild="--rebuild"
+  mkdir -p "$STATE_DIR"
+  local btsv; btsv="$(mktemp)"
+  built_map > "$btsv" 2>/dev/null || true
+  local tmp="$CATALOG_FILE.tmp.$$"
+  if node "$CLI" catalog "$PROJECTS_DIR" --prev "$CATALOG_FILE" --built "$btsv" $rebuild > "$tmp" 2>/dev/null \
+     && jq -e . "$tmp" >/dev/null 2>&1; then
+    mv -f "$tmp" "$CATALOG_FILE"
+  else
+    rm -f "$tmp" "$btsv"; die "catalog scan failed"
+  fi
+  rm -f "$btsv"
+  write_index
+  echo "$CATALOG_FILE"
+  jq -r '"  \(.count) sessions · \([.sessions[]|select(.built)]|length) with replays · \([.sessions[]|select(.stale)]|length) stale"' "$CATALOG_FILE"
+}
+
+cmd_library() {
+  local json=0
+  [ "${1:-}" = "--json" ] && json=1
+  [ -f "$CATALOG_FILE" ] || cmd_catalog >/dev/null
+  if [ "$json" = 1 ]; then jq . "$CATALOG_FILE"; return 0; fi
+  jq -r '
+    .sessions[] |
+    (if .built then "▶" elif .stale then "~" else "·" end) as $m |
+    "\($m) \((.lastTs // 0) / 1000 | strftime("%Y-%m-%d %H:%M"))  \(.title[:56])" +
+    "   [\(.toolUses) tools · \(.project | sub("^/home/[^/]+"; "~"))]" +
+    (if .stale then "  (replay stale)" elif .built then "  (replay built)" else "" end)
+  ' "$CATALOG_FILE"
+}
+
+# Bulk-build replays from the catalogue. Default: unbuilt/stale sessions with
+# >= 3 tool calls, newest 25.
+cmd_import() {
+  local all=0 since="" projFilter="" minTools=3 limit=25
+  local passthru=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all)        all=1; shift ;;
+      --since)      since="${2:-}"; shift 2 ;;
+      --project)    projFilter="${2:-}"; shift 2 ;;
+      --min-tools)  minTools="${2:-3}"; shift 2 ;;
+      --limit)      limit="${2:-25}"; shift 2 ;;
+      --no-redact|--thinking|--no-reads) passthru+=("$1"); shift ;;
+      *) die "import: unknown flag '$1'" ;;
+    esac
+  done
+  cmd_catalog >/dev/null
+
+  local sinceMs=0
+  [ -n "$since" ] && sinceMs="$(date -d "$since" +%s%3N 2>/dev/null || echo 0)"
+
+  local targets=()
+  while IFS= read -r p; do
+    [ -n "$p" ] && targets+=("$p")
+  done < <(jq -r --argjson all "$all" --argjson mt "$minTools" --argjson since "$sinceMs" \
+    --arg pf "$projFilter" --argjson lim "$limit" '
+    .sessions
+    | map(select( ($all == 1) or ((.built | not)) or .stale ))
+    | map(select(.toolUses >= $mt))
+    | map(select($since == 0 or ((.lastTs // 0) >= $since)))
+    | map(select($pf == "" or (.project | test($pf; "i"))))
+    | .[:$lim] | .[].sourcePath' "$CATALOG_FILE")
+
+  if [ ${#targets[@]} -eq 0 ]; then
+    echo "nothing to import — all matching sessions already have current replays (try --all)"
+    return 0
+  fi
+
+  echo "importing ${#targets[@]} session(s)…"
+  local p ok=0 fail=0
+  export DEVCAST_BATCH=1 OMARCHY_DEVCAST_QUIET=1
+  for p in "${targets[@]}"; do
+    if cmd_build "$p" "${passthru[@]}" >/dev/null 2>&1; then
+      ok=$((ok + 1)); echo "  ✓ $(basename "$p" .jsonl)"
+    else
+      fail=$((fail + 1)); echo "  ✗ $(basename "$p" .jsonl)"
+    fi
+  done
+  unset DEVCAST_BATCH OMARCHY_DEVCAST_QUIET
+  cmd_catalog >/dev/null
+  echo "built $ok, failed $fail  →  $INDEX_FILE updated"
 }
 
 resolve_cast_dir() {  # <id-or-empty> -> dir
@@ -151,6 +275,16 @@ cmd_build() {
   transcript="$(resolve_transcript "$selector" "$project")"
   [ -n "$transcript" ] && [ -f "$transcript" ] || die "no transcript for '$selector' under $PROJECTS_DIR"
 
+  # One replay per session: if this transcript's session already has a built
+  # dir, drop it so a re-import after the session grew updates in place.
+  local sid
+  sid="$(grep -m1 -o '"sessionId":"[^"]*"' "$transcript" 2>/dev/null | head -1 | cut -d'"' -f4)"
+  if [ -n "$sid" ]; then
+    local prevdir
+    prevdir="$(built_map 2>/dev/null | awk -F'\t' -v s="$sid" '$1==s{print $2; exit}')"
+    [ -n "$prevdir" ] && [ -d "$CASTS_DIR/$prevdir" ] && rm -rf "$CASTS_DIR/$prevdir"
+  fi
+
   # Build into a stamp-only dir first, then rename it to include the slug of the
   # title the parser actually settled on (ai-title, else first real prompt).
   local stamp outDir
@@ -182,7 +316,7 @@ cmd_build() {
     '. + {sourceTranscript:$src, outDir:$dir, htmlPath:($dir + "/replay.html"), castPath:($dir + "/cast.json")}' \
     > "$outDir/build.json"
 
-  write_index
+  [ "${DEVCAST_BATCH:-0}" = 1 ] || write_index
 
   # ── feed the self-improvement loop from this build's quality warnings ──
   local warn; warn="$(printf '%s' "$result" | jq -c '.warnings // {}')"
@@ -362,7 +496,7 @@ cmd_export() {
   [ "$QUIET" = 1 ] || { have omarchy-pulse && omarchy-pulse log alteringux.devcast "Exported $(basename "$out")" --level info --action "xdg-open '$out'" --action-label "Open" >/dev/null 2>&1 || true; }
 }
 
-usage() { sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; }
 
 case "${1:-list}" in
   build)             shift; cmd_build "$@" ;;
@@ -374,6 +508,9 @@ case "${1:-list}" in
   prune)             shift || true; cmd_prune "$@" ;;
   reindex)           shift || true; write_index; echo "$INDEX_FILE" ;;
   flag)              shift; cmd_flag "$@" ;;
+  catalog|scan)      shift || true; cmd_catalog "$@" ;;
+  library|history)   shift || true; cmd_library "$@" ;;
+  import)            shift; cmd_import "$@" ;;
   -h|--help|help)    usage ;;
   *) die "unknown command '$1' (try --help)" ;;
 esac

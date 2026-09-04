@@ -453,17 +453,29 @@ function formatDuration(ms) {
 // Tolerant parse for devcast-index.json (written by ~/.local/bin/omarchy-devcast,
 // watched by the bar widget). A malformed / missing file degrades to empty.
 function parseIndex(raw) {
-  var empty = { version: 1, updatedAt: 0, count: 0, latest: null, casts: [] }
+  var empty = { version: 1, updatedAt: 0, count: 0, latest: null, casts: [], catalog: null }
   if (!raw || raw.length === 0) return empty
   try {
     var o = typeof raw === "string" ? JSON.parse(raw) : raw
     if (!o || typeof o !== "object") return empty
+    var cat = null
+    if (o.catalog && typeof o.catalog === "object") {
+      cat = {
+        totalSessions: Number(o.catalog.totalSessions) || 0,
+        built: Number(o.catalog.built) || 0,
+        stale: Number(o.catalog.stale) || 0,
+        unbuilt: Number(o.catalog.unbuilt) || 0,
+        updatedAt: Number(o.catalog.updatedAt) || 0,
+        recent: Array.isArray(o.catalog.recent) ? o.catalog.recent : []
+      }
+    }
     return {
       version: 1,
       updatedAt: Number(o.updatedAt) || 0,
       count: Number(o.count) || (Array.isArray(o.casts) ? o.casts.length : 0),
       latest: o.latest || (Array.isArray(o.casts) ? o.casts[0] || null : null),
-      casts: Array.isArray(o.casts) ? o.casts : []
+      casts: Array.isArray(o.casts) ? o.casts : [],
+      catalog: cat
     }
   } catch (e) {
     return empty

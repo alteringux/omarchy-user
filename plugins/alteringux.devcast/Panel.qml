@@ -24,9 +24,16 @@ Panel {
   readonly property var casts: (root.index && root.index.casts) ? root.index.casts : []
   readonly property var latest: (root.index && root.index.latest) ? root.index.latest : null
   readonly property bool building: !!(hostWidget && hostWidget.building)
+  readonly property bool scanning: !!(hostWidget && hostWidget.scanning)
+  readonly property bool importing: !!(hostWidget && hostWidget.importing)
+  readonly property var catalog: (hostWidget && hostWidget.catalog) ? hostWidget.catalog : null
+  readonly property var sessions: (root.catalog && root.catalog.recent) ? root.catalog.recent : []
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
 
-  function open() { root.controller.show() }
+  function open() {
+    root.controller.show()
+    if (root.hostWidget) root.hostWidget.refreshCatalog()
+  }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) root.close(); else root.open() }
   function switchPanel(direction) {
@@ -203,8 +210,144 @@ Panel {
             hint: "Build one from your last Claude Code session with the button above."
             foreground: root.barForeground
           }
+
+          Rectangle { width: parent.width; height: Style.spacing.hairline; color: root.barForeground; opacity: 0.12 }
+
+          // ── session library ("all sessions + history") ──────────────
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            Kit.MetaText {
+              width: implicitWidth
+              content: "LIBRARY"
+              foreground: root.barForeground
+            }
+            Item { width: parent.width - x - libStats.width; height: 1 }
+            Text {
+              id: libStats
+              text: root.catalog
+                ? (root.catalog.totalSessions + " sessions · " + root.catalog.built + " replays"
+                   + (root.catalog.stale > 0 ? " · " + root.catalog.stale + " stale" : ""))
+                : (root.scanning ? "scanning…" : "—")
+              color: Qt.darker(root.barForeground, 1.4)
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(8)
+            Repeater {
+              model: [
+                { t: root.importing ? "Importing…" : "Import recent", act: "import", on: !root.importing && !!root.catalog && root.catalog.unbuilt > 0 },
+                { t: root.scanning ? "Scanning…" : "Rescan", act: "scan", on: !root.scanning }
+              ]
+              delegate: Rectangle {
+                required property var modelData
+                width: (parent.width - Style.space(8)) / 2
+                height: Style.space(30)
+                radius: Style.cornerRadius
+                opacity: modelData.on ? 1.0 : 0.5
+                color: rowA.containsMouse && modelData.on
+                  ? Style.hoverFillFor(root.barForeground, Color.accent)
+                  : Util.alpha(root.barForeground, 0.08)
+                Text {
+                  anchors.centerIn: parent
+                  text: modelData.t
+                  color: root.barForeground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                }
+                MouseArea {
+                  id: rowA
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  enabled: modelData.on
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: {
+                    if (!root.hostWidget) return
+                    if (modelData.act === "import") root.hostWidget.importRecent()
+                    else root.hostWidget.refreshCatalog()
+                  }
+                }
+              }
+            }
+          }
+
+          Repeater {
+            model: root.sessions
+
+            delegate: Rectangle {
+              required property var modelData
+              width: parent.width
+              height: sCol.implicitHeight + Style.space(14)
+              radius: Style.cornerRadius
+              color: sArea.containsMouse ? Util.alpha(root.barForeground, 0.08) : Util.alpha(root.barForeground, 0.03)
+
+              MouseArea {
+                id: sArea
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                  if (modelData.built) root.openPath(root.castPathFor(modelData.built))
+                  else if (root.hostWidget) root.hostWidget.buildSession(modelData.sourcePath, true)
+                }
+              }
+
+              Column {
+                id: sCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.margins: Style.space(9)
+                spacing: Style.space(2)
+
+                Row {
+                  width: parent.width
+                  spacing: Style.space(6)
+                  Text {
+                    text: modelData.built ? "▶" : (modelData.stale ? "~" : "·")
+                    color: modelData.built ? Kit.Palette.positive
+                      : (modelData.stale ? Kit.Palette.warning : Qt.darker(root.barForeground, 1.5))
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    width: Style.space(12)
+                  }
+                  Text {
+                    width: parent.width - x
+                    text: modelData.title || "session"
+                    color: root.barForeground
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                    font.bold: !!modelData.built
+                    elide: Text.ElideRight
+                  }
+                }
+                Text {
+                  width: parent.width
+                  text: {
+                    var proj = (modelData.project || "").replace(/^\/home\/[^/]+/, "~")
+                    var when = modelData.endedAt ? Qt.formatDateTime(new Date(modelData.endedAt), "MMM d") : ""
+                    return when + "  ·  " + modelData.toolUses + " tools  ·  " + proj
+                      + (modelData.stale ? "  ·  replay stale" : "")
+                  }
+                  color: Qt.darker(root.barForeground, 1.5)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  elide: Text.ElideRight
+                }
+              }
+            }
+          }
         }
       }
     }
+  }
+
+  // catalog.recent carries a built dir NAME; turn it into a replay.html path.
+  function castPathFor(dirName) {
+    return Quickshell.env("HOME") + "/.local/state/omarchy/devcasts/" + dirName + "/replay.html"
   }
 }

@@ -14,7 +14,29 @@
 
 All output lives under `~/.local/state/omarchy/devcasts/<stamp>-<slug>/`.
 `~/.local/state/omarchy/devcast-index.json` is the single file the bar widget
-watches (rebuilt on every `build` / `prune`; `omarchy-devcast reindex` forces it).
+watches (rebuilt on every `build` / `prune` / `catalog`; `omarchy-devcast
+reindex` forces it).
+
+## Session catalogue ("all sessions + history")
+
+`omarchy-devcast catalog` streams **every** `~/.claude/projects/*/*.jsonl`
+(regex-first, ~1.4 s for 600+ transcripts, incremental by mtime) into
+`~/.local/state/omarchy/devcast-catalog.json` — one entry per session with
+title, project, timestamps, line/tool/prompt counts, and whether a replay is
+`built` / `stale` (transcript grew since the replay was made). A capped
+`catalog` block (stats + 60 most-recent) is folded into `devcast-index.json`
+for the widget.
+
+- `omarchy-devcast library` — list every session (`▶` built, `~` stale, `·` none).
+- `omarchy-devcast import [--all] [--since YYYY-MM-DD] [--project SUBSTR]
+  [--min-tools N] [--limit N]` — bulk-build replays from the catalogue.
+  Default: unbuilt or stale, ≥3 tool calls, 25 newest.
+- `build` is session-id aware: rebuilding a session replaces its existing
+  replay dir in place (one replay per session).
+- `omarchy-devcast-catalog.timer` (systemd --user, **enabled**, every 30 min)
+  keeps the catalogue current; the panel also rescans on open.
+- Panel "LIBRARY" section shows the stats + recent sessions with Import /
+  Rescan buttons and per-row build/open.
 
 ## How the parse works (Model.js)
 

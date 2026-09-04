@@ -8,6 +8,7 @@
 const fs = require("fs")
 const path = require("path")
 const http = require("http")
+const readline = require("readline")
 const { spawn } = require("child_process")
 const Model = require("./Model.js")
 
@@ -85,6 +86,282 @@ if (op === "build") {
   process.exit(0)
 }
 
+if (op === "scan") {
+  // scan <transcriptPath> -> cheap catalogue metadata, streamed line-by-line so
+  // a 30 MB transcript costs no more memory than a 3 KB one. Regex-first; only
+  // JSON.parse the handful of lines a field actually needs.
+  const p = process.argv[3]
+  if (!p) fail("scan needs <transcriptPath>")
+  let st
+  try {
+    st = fs.statSync(p)
+  } catch (e) {
+    fail("cannot stat: " + e.message)
+  }
+
+  const out = {
+    sessionId: "",
+    title: "",
+    project: "",
+    gitBranch: "",
+    firstTs: null,
+    lastTs: null,
+    lines: 0,
+    toolUses: 0,
+    prompts: 0,
+    bytes: st.size,
+    sourceMtimeMs: Math.round(st.mtimeMs)
+  }
+  let firstUserPrompt = ""
+
+  const rl = readline.createInterface({
+    input: fs.createReadStream(p, { encoding: "utf8" }),
+    crlfDelay: Infinity
+  })
+  rl.on("line", (line) => {
+    if (!line) return
+    out.lines++
+
+    const tsm = line.match(/"timestamp":"([^"]+)"/)
+    if (tsm) {
+      const ms = Date.parse(tsm[1])
+      if (isFinite(ms)) {
+        if (out.firstTs == null) out.firstTs = ms
+        out.lastTs = ms
+      }
+    }
+
+    // tool_use blocks: one "type":"tool_use" per call
+    const tu = line.match(/"type":"tool_use"/g)
+    if (tu) out.toolUses += tu.length
+
+    if (!out.sessionId) {
+      const sm = line.match(/"sessionId":"([^"]+)"/)
+      if (sm) out.sessionId = sm[1]
+    }
+    if (!out.title) {
+      const am = line.match(/"aiTitle":"((?:[^"\\]|\\.)*)"/)
+      if (am) {
+        try {
+          out.title = JSON.parse('"' + am[1] + '"').replace(/^[^\p{L}\p{N}"']+/u, "").trim()
+        } catch (e) {}
+      }
+    }
+    if (!out.project || !out.gitBranch) {
+      const cm = line.match(/"cwd":"((?:[^"\\]|\\.)*)"/)
+      if (cm && !out.project) {
+        try { out.project = JSON.parse('"' + cm[1] + '"') } catch (e) {}
+      }
+      const gm = line.match(/"gitBranch":"([^"]*)"/)
+      if (gm && gm[1] && !out.gitBranch) out.gitBranch = gm[1]
+    }
+
+    // rough prompt count: non-meta user lines that aren't tool results
+    if (
+      line.indexOf('"type":"user"') !== -1 &&
+      line.indexOf('"isMeta":true') === -1 &&
+      line.indexOf('"tool_result"') === -1
+    ) {
+      out.prompts++
+      if (!firstUserPrompt) {
+        try {
+          const rec = JSON.parse(line)
+          const c = rec && rec.message && rec.message.content
+          const raw = typeof c === "string" ? c : Array.isArray(c) ? (c.find((b) => b && b.type === "text") || {}).text || "" : ""
+          const cleaned = Model.cleanPromptText(raw).trim()
+          if (cleaned && !/^\/?(clear|compact|resume|cost|help|init|context|export)\b/i.test(cleaned)) {
+            firstUserPrompt = cleaned
+          }
+        } catch (e) {}
+      }
+    }
+  })
+  rl.on("close", () => {
+    if (!out.title && firstUserPrompt) {
+      out.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").slice(0, 72).trim()
+    }
+    if (!out.title) out.title = "session"
+    process.stdout.write(JSON.stringify(out) + "\n")
+    process.exit(0)
+  })
+  rl.on("error", (e) => fail("read error: " + e.message))
+  return
+}
+
+if (op === "catalog") {
+  // catalog <projectsDir> [--prev <catalog.json>] [--built <tsv>] [--rebuild]
+  // Streams every <projectsDir>/*/*.jsonl into one catalogue, reusing a prior
+  // entry when the file's mtime is unchanged, and attaching built/stale from
+  // the built-map TSV (sessionId \t castDir \t buildMtimeMs).
+  const projectsDir = process.argv[3]
+  if (!projectsDir) fail("catalog needs <projectsDir>")
+  const args = process.argv.slice(4)
+  let prevPath = "",
+    builtPath = "",
+    rebuild = false
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--prev") prevPath = args[++i]
+    else if (args[i] === "--built") builtPath = args[++i]
+    else if (args[i] === "--rebuild") rebuild = true
+  }
+
+  const prevByPath = {}
+  if (prevPath && !rebuild) {
+    try {
+      const prev = JSON.parse(fs.readFileSync(prevPath, "utf8"))
+      for (const s of prev.sessions || []) if (s.sourcePath) prevByPath[s.sourcePath] = s
+    } catch (e) {}
+  }
+  const builtBySession = {}
+  if (builtPath) {
+    try {
+      for (const ln of fs.readFileSync(builtPath, "utf8").split("\n")) {
+        const [sid, dir, mt] = ln.split("\t")
+        if (sid && dir) builtBySession[sid] = { dir, mt: Number(mt) || 0 }
+      }
+    } catch (e) {}
+  }
+
+  // enumerate <projectsDir>/*/*.jsonl
+  const files = []
+  let projects = []
+  try {
+    projects = fs.readdirSync(projectsDir)
+  } catch (e) {
+    fail("cannot read projects dir: " + e.message)
+  }
+  for (const proj of projects) {
+    const pdir = path.join(projectsDir, proj)
+    let ents = []
+    try {
+      if (!fs.statSync(pdir).isDirectory()) continue
+      ents = fs.readdirSync(pdir)
+    } catch (e) {
+      continue
+    }
+    for (const e of ents) if (e.endsWith(".jsonl")) files.push(path.join(pdir, e))
+  }
+
+  function scanOne(p) {
+    return new Promise((resolve) => {
+      let st
+      try {
+        st = fs.statSync(p)
+      } catch (e) {
+        return resolve(null)
+      }
+      const mtimeMs = Math.round(st.mtimeMs)
+      const prev = prevByPath[p]
+      if (prev && prev.sourceMtimeMs === mtimeMs) return resolve({ ...prev, bytes: st.size })
+
+      const o = {
+        sessionId: "",
+        title: "",
+        project: "",
+        gitBranch: "",
+        firstTs: null,
+        lastTs: null,
+        lines: 0,
+        toolUses: 0,
+        prompts: 0,
+        bytes: st.size,
+        sourceMtimeMs: mtimeMs,
+        sourcePath: p
+      }
+      let firstUserPrompt = ""
+      const rl = readline.createInterface({ input: fs.createReadStream(p, { encoding: "utf8" }), crlfDelay: Infinity })
+      rl.on("line", (line) => {
+        if (!line) return
+        o.lines++
+        const tsm = line.match(/"timestamp":"([^"]+)"/)
+        if (tsm) {
+          const ms = Date.parse(tsm[1])
+          if (isFinite(ms)) {
+            if (o.firstTs == null) o.firstTs = ms
+            o.lastTs = ms
+          }
+        }
+        const tu = line.match(/"type":"tool_use"/g)
+        if (tu) o.toolUses += tu.length
+        if (!o.sessionId) {
+          const sm = line.match(/"sessionId":"([^"]+)"/)
+          if (sm) o.sessionId = sm[1]
+        }
+        if (!o.title) {
+          const am = line.match(/"aiTitle":"((?:[^"\\]|\\.)*)"/)
+          if (am) {
+            try {
+              o.title = JSON.parse('"' + am[1] + '"').replace(/^[^\p{L}\p{N}"']+/u, "").trim()
+            } catch (e) {}
+          }
+        }
+        if (!o.project) {
+          const cm = line.match(/"cwd":"((?:[^"\\]|\\.)*)"/)
+          if (cm) {
+            try {
+              o.project = JSON.parse('"' + cm[1] + '"')
+            } catch (e) {}
+          }
+        }
+        if (!o.gitBranch) {
+          const gm = line.match(/"gitBranch":"([^"]*)"/)
+          if (gm && gm[1]) o.gitBranch = gm[1]
+        }
+        if (
+          line.indexOf('"type":"user"') !== -1 &&
+          line.indexOf('"isMeta":true') === -1 &&
+          line.indexOf('"tool_result"') === -1
+        ) {
+          o.prompts++
+          if (!firstUserPrompt) {
+            try {
+              const rec = JSON.parse(line)
+              const c = rec && rec.message && rec.message.content
+              const raw =
+                typeof c === "string"
+                  ? c
+                  : Array.isArray(c)
+                  ? (c.find((b) => b && b.type === "text") || {}).text || ""
+                  : ""
+              const cleaned = Model.cleanPromptText(raw).trim()
+              if (cleaned && !/^\/?(clear|compact|resume|cost|help|init|context|export)\b/i.test(cleaned))
+                firstUserPrompt = cleaned
+            } catch (e) {}
+          }
+        }
+      })
+      rl.on("close", () => {
+        if (!o.title && firstUserPrompt)
+          o.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").slice(0, 72).trim()
+        if (!o.title) o.title = "session"
+        resolve(o)
+      })
+      rl.on("error", () => resolve(o))
+    })
+  }
+
+  ;(async () => {
+    const sessions = []
+    const POOL = 8
+    for (let i = 0; i < files.length; i += POOL) {
+      const batch = await Promise.all(files.slice(i, i + POOL).map(scanOne))
+      for (const s of batch) {
+        if (!s) continue
+        const b = s.sessionId && builtBySession[s.sessionId]
+        s.built = b ? b.dir : null
+        s.stale = b ? s.sourceMtimeMs > b.mt : false
+        sessions.push(s)
+      }
+    }
+    sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0))
+    process.stdout.write(
+      JSON.stringify({ version: 1, updatedAt: Date.now(), count: sessions.length, sessions }) + "\n"
+    )
+    process.exit(0)
+  })()
+  return
+}
+
 if (op === "stats") {
   // argv: stats <castJsonPath>
   const castPath = process.argv[3]
@@ -129,7 +406,7 @@ if (op === "export-frames") {
   return
 }
 
-fail("unknown op '" + op + "' (build | stats | export-frames)")
+fail("unknown op '" + op + "' (build | stats | scan | catalog | export-frames)")
 
 async function exportFrames(o) {
   fs.mkdirSync(o.framesDir, { recursive: true })
