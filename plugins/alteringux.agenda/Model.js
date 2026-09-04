@@ -8,6 +8,8 @@
 //     off their master VEVENT but only that first instance is considered.
 //   - TZID / floating times are treated as local wall-clock. Only trailing-Z
 //     (UTC) and VALUE=DATE are handled precisely.
+//   - DURATION is honored for the end time, but year/month components are
+//     rejected (they have no fixed length in seconds).
 
 function defaultConfig() {
   return {
@@ -102,6 +104,28 @@ function parseIcsDate(rawValue, params) {
   return { epoch: epoch, allDay: dateOnly }
 }
 
+// RFC 5545 dur-value, e.g. "PT90M", "P1DT12H", "P2W". Returns whole seconds
+// (signed), or null if unparseable. Year/month components have no fixed
+// length and are rejected.
+function parseIcsDuration(rawValue) {
+  var v = String(rawValue || "").trim()
+  var m = v.match(/^([+-]?)P(?:(\d+)W|(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?)$/)
+  if (!m) return null
+  if (!m[2] && !m[3] && !m[4] && !m[5] && !m[6] && !m[7] && !m[8]) return null // bare "P" / "PT"
+  var sign = m[1] === "-" ? -1 : 1
+  var years = +(m[3] || 0)
+  var months = +(m[4] || 0)
+  if (years > 0 || months > 0) return null
+  var total =
+    +(m[2] || 0) * 604800 +
+    +(m[5] || 0) * 86400 +
+    +(m[6] || 0) * 3600 +
+    +(m[7] || 0) * 60 +
+    +(m[8] || 0)
+  if (total === 0) return null
+  return sign * total
+}
+
 // Parse every VEVENT out of one .ics blob (which may itself be several
 // concatenated calendars). Returns an array of normalized event objects.
 function parseEvents(icsText) {
@@ -136,6 +160,11 @@ function parseEvents(icsText) {
         if (e) cur.end = e.epoch
         break
       }
+      case "DURATION": {
+        var dur = parseIcsDuration(p.value)
+        if (dur) cur.duration = dur
+        break
+      }
     }
   }
   return events
@@ -144,9 +173,14 @@ function parseEvents(icsText) {
 function finalizeEvent(cur) {
   var allDay = !!cur.allDay
   var start = cur.start
-  var end = (typeof cur.end === "number" && cur.end > start)
-    ? cur.end
-    : start + (allDay ? 86400 : 3600)
+  var end
+  if (typeof cur.end === "number" && cur.end > start) {
+    end = cur.end
+  } else if (typeof cur.duration === "number" && cur.duration > 0) {
+    end = start + cur.duration
+  } else {
+    end = start + (allDay ? 86400 : 3600)
+  }
   var summary = (cur.summary && cur.summary.trim()) ? cur.summary.trim() : "(busy)"
   return {
     uid: cur.uid || (summary + "@" + start),
@@ -304,6 +338,7 @@ if (typeof module !== "undefined" && module.exports) {
     splitProperty: splitProperty,
     unescapeText: unescapeText,
     parseIcsDate: parseIcsDate,
+    parseIcsDuration: parseIcsDuration,
     parseEvents: parseEvents,
     computeAgenda: computeAgenda,
     shouldNotify: shouldNotify,
