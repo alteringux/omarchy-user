@@ -1,9 +1,9 @@
 {
   "label": "Wind-down",
-  "description": "End of day: stop every timer, reset the pomodoro and score, a last stocks refresh, a plan-the-day reminder for the morning, the LLM daily recap, and drop the VPN.",
+  "description": "End of day: reset the pomodoro and score, cancel the check-in stopwatch, a last stocks refresh, a plan-the-day reminder for the morning, the LLM daily recap, and drop the VPN. Does NOT touch activity timers — those are long-lived trackers, not session state.",
   "steps": [
     { "when": "start", "cli": "omarchy-pomodoro",       "args": ["reset"],                     "speak": "Winding down." },
-    { "when": "start", "cli": "omarchy-timers",         "args": ["clear"] },
+    { "when": "start", "cli": "omarchy-cliamp-start",   "args": [],                            "optional": true },
     { "when": "start", "cli": "omarchy-stopwatch",      "args": ["cancel"] },
     { "when": "start", "cli": "omarchy-score",          "args": ["reset"] },
     { "when": "start", "cli": "omarchy-stocks-refresh", "args": [],                            "optional": true },

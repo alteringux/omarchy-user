@@ -6,6 +6,7 @@
     { "when": "start", "cli": "omarchy-stocks-refresh",           "args": [],                       "optional": true },
     { "when": "start", "cli": "omarchy-dictionary-suggest-daily", "args": [],                       "optional": true },
     { "when": "start", "cli": "omarchy-countdown",                "args": [],                       "optional": true },
+    { "when": "start", "cli": "omarchy-cliamp-start",             "args": [],                       "optional": true },
     { "when": "start", "cli": "omarchy-pomodoro",                 "args": ["reset"] },
     { "when": "start", "cli": "omarchy-score",                    "args": ["reset"] },
     { "when": "start", "cli": "omarchy-remind",                   "args": ["--at", "09:30", "Standup"], "optional": true },

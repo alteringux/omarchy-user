@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# omarchy-cliamp-start — idempotently get cliamp playing music.
+#
+# If cliamp is already running: just issue `play` (resume) over its socket.
+# If not running: start it headless (`--daemon --auto-play`, no terminal
+# window) and let it pick up its default provider/config, then confirm.
+#
+# Meant to be called as a conductor ritual step (see
+# ~/.config/omarchy/conductor/rituals/*.json) — exits non-zero only if the
+# socket never comes up, so an optional ritual step just gets skipped.
+set -uo pipefail
+
+SOCK="$HOME/.config/cliamp/cliamp.sock"
+
+if [[ ! -S "$SOCK" ]]; then
+  nohup cliamp --daemon --auto-play >/dev/null 2>&1 &
+  disown
+
+  for _ in $(seq 1 20); do
+    [[ -S "$SOCK" ]] && break
+    sleep 0.5
+  done
+else
+  cliamp play >/dev/null 2>&1
+fi
+
+[[ -S "$SOCK" ]] || { echo "omarchy-cliamp-start: cliamp socket never came up" >&2; exit 1; }
