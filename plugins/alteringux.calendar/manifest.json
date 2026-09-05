@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.calendar",
+  "name": "Calendar",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Birthdays, public holidays and time-blocking with a click-to-block month view; feeds alteringux.agenda for timed-event notifications and asks Featherless to help reschedule",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Calendar",
+    "description": "Today's birthdays/holidays on the bar; click for a month grid — click any date to block time — plus an Ask AI box that can add, move or free up time via omarchy-calendar-ai",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

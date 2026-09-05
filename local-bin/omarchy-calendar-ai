@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""omarchy-calendar-ai -- a Featherless scheduling assistant over omarchy-calendar.
+
+Same client-side tool-calling shape as ~/.local/bin/llm-agent (Featherless is
+inference-only: it names a tool, we run it) but the tools are calendar verbs
+that shell out to `omarchy-calendar` -- the CLI stays the single writer of
+calendar state (docs/adr/0006-cli-first-plugins.md); this script never touches
+the JSON/ICS files directly. That keeps "help me reschedule my week" and
+"omarchy-calendar event move 3 ..." typed by hand fully interchangeable.
+
+Usage:
+    omarchy-calendar-ai "PROMPT"
+    echo "PROMPT" | omarchy-calendar-ai
+
+Options:
+    --json-full     print {text, steps[], iters, model} instead of prose
+    --model NAME    Featherless model id (default: moonshotai/Kimi-K2-Instruct
+                    -- must be tool-calling-capable, see llm-agent's notes)
+    --max-iters N   max model<->tool round trips (default 6)
+    --max-tokens N  completion cap per call (default 1200)
+    --verbose       log each tool call to stderr
+
+Environment: FEATHERLESS_API_KEY, or ~/.config/featherless/key, or
+~/.config/opencode/opencode.json (same lookup as llm-agent / llm-blurb).
+
+Exit codes: 0 ok | 2 bad args | 3 no key | 4 transport failure | 5 empty answer
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+FEATHERLESS_URL = "https://api.featherless.ai/v1/chat/completions"
+DEFAULT_MODEL = os.environ.get("LLM_AGENT_MODEL", "moonshotai/Kimi-K2-Instruct")
+CALENDAR_CLI = os.environ.get("OMARCHY_CALENDAR_CLI", os.path.expanduser("~/.local/bin/omarchy-calendar"))
+RETRY_BACKOFF = (0, 3, 8, 15)
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr, flush=True)
+
+
+def load_key() -> str:
+    k = os.environ.get("FEATHERLESS_API_KEY", "").strip()
+    if not k:
+        p = os.path.expanduser("~/.config/featherless/key")
+        if os.path.isfile(p):
+            try:
+                k = open(p, encoding="utf-8").read().strip()
+            except OSError:
+                pass
+    if not k:
+        p = os.path.expanduser("~/.config/opencode/opencode.json")
+        if os.path.isfile(p):
+            try:
+                cfg = json.load(open(p, encoding="utf-8"))
+                k = (
+                    cfg.get("provider", {})
+                    .get("featherless", {})
+                    .get("options", {})
+                    .get("apiKey", "")
+                    .strip()
+                )
+            except (OSError, ValueError):
+                pass
+    return "".join(k.split())
+
+
+# --------------------------------------------------------------------------
+# calendar tools -- each one shells out to the omarchy-calendar CLI
+# --------------------------------------------------------------------------
+
+def run_cli(args: list, timeout: float = 15) -> str:
+    try:
+        r = subprocess.run([CALENDAR_CLI, *args], capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return json.dumps({"error": f"omarchy-calendar not found at {CALENDAR_CLI}"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": "omarchy-calendar timed out"})
+    if r.returncode != 0:
+        return json.dumps({"error": (r.stderr or r.stdout or "unknown error").strip()})
+    return r.stdout.strip() or "{}"
+
+
+def tool_list_events(args: dict) -> str:
+    cli_args = ["event", "list", "--json"]
+    if args.get("upcoming_only", True):
+        cli_args.append("--upcoming")
+    if args.get("month"):
+        cli_args += ["--month", str(args["month"])]
+    return run_cli(cli_args)
+
+
+def tool_add_event(args: dict) -> str:
+    cli_args = ["event", "add", str(args["title"]), str(args["date"])]
+    if args.get("start"):
+        cli_args.append(str(args["start"]))
+        cli_args.append(str(args.get("end", "")) or _plus_hour(args["start"]))
+    if args.get("location"):
+        cli_args += ["--location", str(args["location"])]
+    return run_cli(cli_args)
+
+
+def _plus_hour(hhmm: str) -> str:
+    h, m = hhmm.split(":")
+    h = (int(h) + 1) % 24
+    return f"{h:02d}:{m}"
+
+
+def tool_add_block(args: dict) -> str:
+    return run_cli(["block", "add", str(args["date"]), str(args["start"]), str(args["end"]), str(args["activity"])])
+
+
+def tool_move_event(args: dict) -> str:
+    cli_args = ["event", "move", str(args["id"]), str(args["date"])]
+    if args.get("start"):
+        cli_args.append(str(args["start"]))
+        if args.get("end"):
+            cli_args.append(str(args["end"]))
+    return run_cli(cli_args)
+
+
+def tool_remove_event(args: dict) -> str:
+    return run_cli(["event", "rm", str(args["id"])])
+
+
+def tool_list_holidays(args: dict) -> str:
+    cli_args = ["holiday", "list", "--json"]
+    if args.get("month"):
+        cli_args += ["--month", str(args["month"])]
+    return run_cli(cli_args)
+
+
+def tool_list_birthdays(_args: dict) -> str:
+    return run_cli(["birthday", "list", "--json"])
+
+
+def tool_free_slots(args: dict) -> str:
+    cli_args = ["free", str(args["date"]), "--json"]
+    if args.get("duration_minutes"):
+        cli_args += ["--duration", str(args["duration_minutes"])]
+    return run_cli(cli_args)
+
+
+def tool_get_day(args: dict) -> str:
+    return run_cli(["day", str(args["date"]), "--json"])
+
+
+TOOL_IMPLS = {
+    "list_events": tool_list_events,
+    "add_event": tool_add_event,
+    "add_block": tool_add_block,
+    "move_event": tool_move_event,
+    "remove_event": tool_remove_event,
+    "list_holidays": tool_list_holidays,
+    "list_birthdays": tool_list_birthdays,
+    "free_slots": tool_free_slots,
+    "get_day": tool_get_day,
+}
+
+TOOLS = [
+    {"type": "function", "function": {
+        "name": "list_events", "description": "List the user's own events and time blocks (not birthdays/holidays).",
+        "parameters": {"type": "object", "properties": {
+            "upcoming_only": {"type": "boolean", "description": "Only events from today onward (default true)."},
+            "month": {"type": "string", "description": "Restrict to one month, YYYY-MM."},
+        }},
+    }},
+    {"type": "function", "function": {
+        "name": "add_event", "description": "Add a calendar event. Omit start/end for an all-day event.",
+        "parameters": {"type": "object", "properties": {
+            "title": {"type": "string"},
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "start": {"type": "string", "description": "HH:MM 24h, optional"},
+            "end": {"type": "string", "description": "HH:MM 24h, optional"},
+            "location": {"type": "string"},
+        }, "required": ["title", "date"]},
+    }},
+    {"type": "function", "function": {
+        "name": "add_block", "description": "Block out time for a personal activity (gym, focus time, etc).",
+        "parameters": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "start": {"type": "string", "description": "HH:MM 24h"},
+            "end": {"type": "string", "description": "HH:MM 24h"},
+            "activity": {"type": "string"},
+        }, "required": ["date", "start", "end", "activity"]},
+    }},
+    {"type": "function", "function": {
+        "name": "move_event", "description": "Move an existing event/block (by id from list_events) to a new date/time.",
+        "parameters": {"type": "object", "properties": {
+            "id": {"type": "integer"},
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "start": {"type": "string", "description": "HH:MM 24h, optional"},
+            "end": {"type": "string", "description": "HH:MM 24h, optional"},
+        }, "required": ["id", "date"]},
+    }},
+    {"type": "function", "function": {
+        "name": "remove_event", "description": "Delete an event/block by id.",
+        "parameters": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    }},
+    {"type": "function", "function": {
+        "name": "list_holidays", "description": "List cached public holidays, optionally for one month (YYYY-MM).",
+        "parameters": {"type": "object", "properties": {"month": {"type": "string"}}},
+    }},
+    {"type": "function", "function": {
+        "name": "list_birthdays", "description": "List all saved birthdays with month/day and known age.",
+        "parameters": {"type": "object", "properties": {}},
+    }},
+    {"type": "function", "function": {
+        "name": "free_slots", "description": "Find free gaps on a given day within working hours.",
+        "parameters": {"type": "object", "properties": {
+            "date": {"type": "string", "description": "YYYY-MM-DD"},
+            "duration_minutes": {"type": "integer", "description": "Minimum gap length wanted, default 30"},
+        }, "required": ["date"]},
+    }},
+    {"type": "function", "function": {
+        "name": "get_day", "description": "Full detail (events, birthdays, holidays) for one specific day.",
+        "parameters": {"type": "object", "properties": {"date": {"type": "string", "description": "YYYY-MM-DD"}}, "required": ["date"]},
+    }},
+]
+
+
+def system_prompt() -> str:
+    now = time.localtime()
+    today = time.strftime("%Y-%m-%d", now)
+    weekday = time.strftime("%A", now)
+    return (
+        f"You are a terse, practical scheduling assistant for the user's personal calendar. "
+        f"Today is {weekday}, {today}. Resolve relative dates (\"tomorrow\", \"next Friday\", \"in 2 weeks\") "
+        f"against that. Always call list_events / get_day / free_slots before adding or moving something, "
+        f"so you don't create a conflict — if the requested slot overlaps something existing, say so and "
+        f"propose the nearest free alternative instead of silently double-booking. "
+        f"Dates are YYYY-MM-DD, times are 24h HH:MM. When you've made changes, say plainly what you did "
+        f"(what/when), not what tool you called. Keep the final answer to a few sentences."
+    )
+
+
+def call_featherless(messages, model, max_tokens, key, verbose):
+    payload = {
+        "model": model,
+        "messages": messages,
+        "tools": TOOLS,
+        "tool_choice": "auto",
+        "temperature": 0.3,
+        "max_tokens": max_tokens,
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        FEATHERLESS_URL, data=body, method="POST",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            # Featherless sits behind Cloudflare, which 403s (error 1010) the
+            # bare "Python-urllib/x.y" default UA. Any ordinary token passes.
+            "User-Agent": "omarchy-calendar-ai/1.0 (+https://featherless.ai)",
+            "Accept": "application/json",
+        },
+    )
+    last_err = None
+    for delay in RETRY_BACKOFF:
+        if delay:
+            time.sleep(delay)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body_txt = e.read().decode("utf-8", "replace")
+            if e.code == 429:
+                last_err = f"rate limited: {body_txt[:200]}"
+                if verbose:
+                    eprint(f"[429] retrying... {last_err}")
+                continue
+            raise RuntimeError(f"HTTP {e.code}: {body_txt[:300]}") from e
+        except urllib.error.URLError as e:
+            last_err = str(e)
+            if verbose:
+                eprint(f"[transport error] {last_err}, retrying...")
+            continue
+    raise RuntimeError(f"Featherless unreachable after retries: {last_err}")
+
+
+def main():
+    ap = argparse.ArgumentParser(add_help=True)
+    ap.add_argument("prompt", nargs="*")
+    ap.add_argument("--json-full", action="store_true")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--max-iters", type=int, default=6)
+    ap.add_argument("--max-tokens", type=int, default=1200)
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args()
+
+    prompt = " ".join(args.prompt).strip()
+    if not prompt and not sys.stdin.isatty():
+        prompt = sys.stdin.read().strip()
+    if not prompt:
+        eprint("usage: omarchy-calendar-ai \"PROMPT\"")
+        sys.exit(2)
+
+    key = load_key()
+    if not key:
+        eprint("omarchy-calendar-ai: no Featherless API key found")
+        sys.exit(3)
+
+    messages = [
+        {"role": "system", "content": system_prompt()},
+        {"role": "user", "content": prompt},
+    ]
+    steps = []
+
+    for i in range(args.max_iters):
+        try:
+            resp = call_featherless(messages, args.model, args.max_tokens, key, args.verbose)
+        except RuntimeError as e:
+            eprint(f"omarchy-calendar-ai: {e}")
+            sys.exit(4)
+
+        choice = (resp.get("choices") or [{}])[0]
+        msg = choice.get("message", {})
+        tool_calls = msg.get("tool_calls") or []
+
+        if not tool_calls:
+            content = (msg.get("content") or "").strip()
+            if not content:
+                eprint("omarchy-calendar-ai: empty answer from model")
+                sys.exit(5)
+            if args.json_full:
+                print(json.dumps({"text": content, "steps": steps, "iters": i + 1, "model": args.model}))
+            else:
+                print(content)
+            return
+
+        messages.append(msg)
+        for tc in tool_calls:
+            fn = tc.get("function", {})
+            name = fn.get("name", "")
+            try:
+                fargs = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                fargs = {}
+            impl = TOOL_IMPLS.get(name)
+            result = impl(fargs) if impl else json.dumps({"error": f"unknown tool {name}"})
+            if args.verbose:
+                eprint(f"[tool] {name}({fargs}) -> {result[:200]}")
+            steps.append({"tool": name, "args": fargs, "result": result[:500]})
+            messages.append({"role": "tool", "tool_call_id": tc.get("id", ""), "content": result})
+
+    eprint("omarchy-calendar-ai: gave up after max iterations without a final answer")
+    sys.exit(5)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,812 @@
+#!/usr/bin/env bash
+# omarchy-calendar — CLI-first personal calendar: events, time blocks,
+# birthdays and public holidays, with an ICS export layer so
+# alteringux.agenda's existing "notify N minutes before" service picks up
+# timed events/blocks for free (see ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md
+# for the "CLI is the sole writer" convention this follows).
+#
+# Source of truth is JSON under $OMARCHY_STATE_DIR (bash + jq, matching every
+# other omarchy-* CLI). ICS files under ~/.local/share/calendars are a
+# generated export, fully rebuilt from JSON on every mutation — never
+# hand-edited, never the thing this CLI reads back from. This sidesteps
+# alteringux.agenda's documented v1 limitation (RRULE is not expanded): a
+# birthday is exported as two concrete VEVENTs (this year + next year) rather
+# than one recurring one, so agenda always has an upcoming instance to notify
+# on without needing RRULE support.
+#
+# The alteringux.calendar bar widget is a thin view: Kit.Store watches
+# calendar-state.json, a Process calls the verbs below.
+#
+#   omarchy-calendar event add "<title>" <YYYY-MM-DD> [HH:MM] [HH:MM] [--location L]
+#   omarchy-calendar event list [--month YYYY-MM] [--today] [--upcoming] [--json]
+#   omarchy-calendar event rm <id>
+#   omarchy-calendar event move <id> <YYYY-MM-DD> [HH:MM] [HH:MM]
+#   omarchy-calendar block add <YYYY-MM-DD> <HH:MM> <HH:MM> "<activity>"
+#   omarchy-calendar block list [--date YYYY-MM-DD]
+#   omarchy-calendar birthday add "<name>" <MM-DD|YYYY-MM-DD>
+#   omarchy-calendar birthday list [--json]
+#   omarchy-calendar birthday rm <id>
+#   omarchy-calendar holiday sync [--country CC] [--year YYYY]
+#   omarchy-calendar holiday list [--month YYYY-MM] [--json]
+#   omarchy-calendar month [YYYY-MM] [--json]     terminal grid, or per-day markers as JSON
+#   omarchy-calendar day [YYYY-MM-DD] [--json]
+#   omarchy-calendar free [YYYY-MM-DD] [--duration MIN] [--json]
+#   omarchy-calendar status [--write]             widget snapshot (calendar-state.json)
+#   omarchy-calendar digest [--force]             notify today's birthdays/holidays (idempotent per day)
+#   omarchy-calendar rebuild                      force-regenerate the ICS export files
+#   omarchy-calendar config get [key] | set <key> <value>
+#   omarchy-calendar install-timers | uninstall-timers
+#
+# Env: OMARCHY_STATE_DIR    override state dir (tests)
+#      OMARCHY_CALENDAR_DIR override the ICS export dir (tests)
+#      OMARCHY_CONFIG_DIR   override ~/.config/omarchy (tests)
+set -uo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+CAL_DIR="${OMARCHY_CALENDAR_DIR:-$HOME/.local/share/calendars}"
+CONFIG_DIR="${OMARCHY_CONFIG_DIR:-$HOME/.config/omarchy}"
+
+EVENTS_FILE="$STATE_DIR/calendar-events.json"
+BIRTHDAYS_FILE="$STATE_DIR/calendar-birthdays.json"
+HOLIDAYS_CACHE="$STATE_DIR/calendar-holidays-cache.json"
+STATE_FILE="$STATE_DIR/calendar-state.json"
+DIGEST_MARKER="$STATE_DIR/calendar-digest-marker"
+CONFIG_FILE="$CONFIG_DIR/calendar.json"
+
+PERSONAL_ICS="$CAL_DIR/personal.ics"
+BIRTHDAYS_ICS="$CAL_DIR/birthdays.ics"
+HOLIDAYS_ICS="$CAL_DIR/holidays.ics"
+
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+
+mkdir -p "$STATE_DIR" "$CAL_DIR" "$CONFIG_DIR"
+
+DEFAULT_CONFIG='{"holidayCountry":"AU","digestTime":"08:00","workStart":"09:00","workEnd":"17:00"}'
+
+usage() {
+  sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'
+  exit "${1:-0}"
+}
+
+# ---------------------------------------------------------------------------
+# tolerant IO
+# ---------------------------------------------------------------------------
+
+read_json() {   # $1 = file, $2 = default JSON if missing/invalid
+  local f="$1" def="$2"
+  { [ -f "$f" ] && jq -e . "$f" 2>/dev/null; } || printf '%s' "$def"
+}
+
+write_json() {   # $1 = target; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-calendar: refusing to write invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+events_json()    { read_json "$EVENTS_FILE" "[]"; }
+birthdays_json() { read_json "$BIRTHDAYS_FILE" "[]"; }
+holidays_cache() { read_json "$HOLIDAYS_CACHE" '{"country":"","years":{}}'; }
+config_json()    { read_json "$CONFIG_FILE" "$DEFAULT_CONFIG"; }
+
+config_get_one() {   # $1 = key
+  config_json | jq -r --arg k "$1" '.[$k] // empty'
+}
+
+next_id() {   # $1 = file (JSON array of {id,...})
+  read_json "$1" "[]" | jq '([.[].id, 0] | max) + 1'
+}
+
+today() { date +%F; }
+now_epoch() { date +%s; }
+
+# ---------------------------------------------------------------------------
+# validation
+# ---------------------------------------------------------------------------
+
+valid_date() { date -d "$1" +%F >/dev/null 2>&1; }
+valid_time() { [[ $1 =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+
+norm_date() { date -d "$1" +%F 2>/dev/null; }
+
+require_date() {   # $1 = value, $2 = label -> prints normalized date or exits 1
+  if ! valid_date "$1"; then
+    echo "omarchy-calendar: invalid $2 date: $1 (want YYYY-MM-DD)" >&2
+    exit 1
+  fi
+  norm_date "$1"
+}
+
+require_time_opt() {   # $1 = value (may be empty) -> prints it, or exits 1 if malformed
+  local v="$1"
+  [ -z "$v" ] && return 0
+  if ! valid_time "$v"; then
+    echo "omarchy-calendar: invalid time: $v (want HH:MM, 24h)" >&2
+    exit 1
+  fi
+  printf '%s' "$v"
+}
+
+# ---------------------------------------------------------------------------
+# config
+# ---------------------------------------------------------------------------
+
+cmd_config() {
+  local sub="${1:-}"
+  case "$sub" in
+    get)
+      local key="${2:-}"
+      if [ -z "$key" ]; then config_json; else config_get_one "$key"; fi
+      ;;
+    set)
+      local key="${2:-}" val="${3:-}"
+      [ -z "$key" ] && { echo "usage: omarchy-calendar config set <key> <value>" >&2; exit 1; }
+      config_json | jq --arg k "$key" --arg v "$val" '.[$k] = $v' | write_json "$CONFIG_FILE"
+      ;;
+    *) echo "usage: omarchy-calendar config get [key] | set <key> <value>" >&2; exit 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# events + blocks (kind: "event" | "block")
+# ---------------------------------------------------------------------------
+
+add_entry() {   # $1=kind $2=title $3=date $4=start $5=end $6=location
+  local kind="$1" title="$2" date="$3" start="$4" end="$5" location="$6" id
+  id="$(next_id "$EVENTS_FILE")"
+  events_json | jq \
+    --argjson id "$id" \
+    --arg title "$title" \
+    --arg date "$date" \
+    --arg start "$start" \
+    --arg end "$end" \
+    --arg location "$location" \
+    --arg kind "$kind" \
+    --argjson createdAt "$(now_epoch)" \
+    '. + [{
+      id: $id, title: $title, date: $date,
+      start: ($start | if . == "" then null else . end),
+      end: ($end | if . == "" then null else . end),
+      location: $location, kind: $kind, createdAt: $createdAt
+    }]' | write_json "$EVENTS_FILE"
+  echo "$id"
+}
+
+cmd_event() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    add)
+      local title="" date="" start="" end="" location="" positional=()
+      while (($#)); do
+        case "$1" in
+          --location) location="${2:-}"; shift 2 ;;
+          *) positional+=("$1"); shift ;;
+        esac
+      done
+      title="${positional[0]:-}"; date="${positional[1]:-}"
+      start="${positional[2]:-}"; end="${positional[3]:-}"
+      [ -z "$title" ] && { echo "usage: omarchy-calendar event add \"<title>\" <YYYY-MM-DD> [HH:MM] [HH:MM] [--location L]" >&2; exit 1; }
+      date="$(require_date "$date" event)" || exit 1
+      start="$(require_time_opt "$start")" || exit 1
+      end="$(require_time_opt "$end")" || exit 1
+      local id; id="$(add_entry event "$title" "$date" "$start" "$end" "$location")"
+      rebuild_all
+      echo "Added event #$id: $title on $date${start:+ $start}${end:+–$end}"
+      ;;
+    list)
+      local month="" today_only=0 upcoming=0 want_json=0
+      while (($#)); do
+        case "$1" in
+          --month) month="${2:-}"; shift 2 ;;
+          --today) today_only=1; shift ;;
+          --upcoming) upcoming=1; shift ;;
+          --json) want_json=1; shift ;;
+          *) shift ;;
+        esac
+      done
+      local filtered
+      filtered="$(events_json)"
+      if [ -n "$month" ]; then
+        filtered="$(jq --arg m "$month" '[.[] | select(.date | startswith($m))]' <<<"$filtered")"
+      fi
+      if [ "$today_only" = 1 ]; then
+        filtered="$(jq --arg d "$(today)" '[.[] | select(.date == $d)]' <<<"$filtered")"
+      fi
+      if [ "$upcoming" = 1 ]; then
+        filtered="$(jq --arg d "$(today)" '[.[] | select(.date >= $d)]' <<<"$filtered")"
+      fi
+      filtered="$(jq 'sort_by(.date, (.start // "00:00"))' <<<"$filtered")"
+      if [ "$want_json" = 1 ]; then
+        printf '%s\n' "$filtered"
+      else
+        print_entry_table "$filtered"
+      fi
+      ;;
+    rm)
+      local id="${1:-}"
+      [[ $id =~ ^[0-9]+$ ]] || { echo "usage: omarchy-calendar event rm <id>" >&2; exit 1; }
+      local before after
+      before="$(events_json | jq 'length')"
+      events_json | jq --argjson id "$id" '[.[] | select(.id != $id)]' | write_json "$EVENTS_FILE"
+      after="$(events_json | jq 'length')"
+      rebuild_all
+      if [ "$before" = "$after" ]; then
+        echo "omarchy-calendar: no event/block with id $id" >&2; exit 1
+      fi
+      echo "Removed #$id"
+      ;;
+    move)
+      local id="${1:-}" date="${2:-}" start="${3:-}" end="${4:-}"
+      [[ $id =~ ^[0-9]+$ ]] || { echo "usage: omarchy-calendar event move <id> <YYYY-MM-DD> [HH:MM] [HH:MM]" >&2; exit 1; }
+      date="$(require_date "$date" event)" || exit 1
+      start="$(require_time_opt "$start")" || exit 1
+      end="$(require_time_opt "$end")" || exit 1
+      local existing; existing="$(events_json | jq --argjson id "$id" '[.[] | select(.id == $id)] | first')"
+      if [ "$existing" = "null" ] || [ -z "$existing" ]; then
+        echo "omarchy-calendar: no event/block with id $id" >&2; exit 1
+      fi
+      events_json | jq \
+        --argjson id "$id" --arg date "$date" \
+        --arg start "$start" --arg end "$end" \
+        '[.[] | if .id == $id then
+            .date = $date
+            | .start = (if $start == "" then .start else $start end)
+            | .end = (if $end == "" then .end else $end end)
+          else . end]' | write_json "$EVENTS_FILE"
+      rebuild_all
+      echo "Moved #$id to $date${start:+ $start}${end:+–$end}"
+      ;;
+    *) echo "usage: omarchy-calendar event add|list|rm|move ..." >&2; exit 1 ;;
+  esac
+}
+
+cmd_block() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    add)
+      local date="${1:-}" start="${2:-}" end="${3:-}" title="${4:-}"
+      [ -z "$title" ] && { echo "usage: omarchy-calendar block add <YYYY-MM-DD> <HH:MM> <HH:MM> \"<activity>\"" >&2; exit 1; }
+      date="$(require_date "$date" block)" || exit 1
+      valid_time "$start" || { echo "omarchy-calendar: invalid start time: $start" >&2; exit 1; }
+      valid_time "$end" || { echo "omarchy-calendar: invalid end time: $end" >&2; exit 1; }
+      local id; id="$(add_entry block "$title" "$date" "$start" "$end" "")"
+      rebuild_all
+      echo "Blocked #$id: $title on $date $start–$end"
+      ;;
+    list)
+      local date="" want_json=0
+      while (($#)); do
+        case "$1" in
+          --date) date="${2:-}"; shift 2 ;;
+          --json) want_json=1; shift ;;
+          *) shift ;;
+        esac
+      done
+      local filtered; filtered="$(events_json | jq '[.[] | select(.kind == "block")]')"
+      [ -n "$date" ] && filtered="$(jq --arg d "$date" '[.[] | select(.date == $d)]' <<<"$filtered")"
+      filtered="$(jq 'sort_by(.date, (.start // "00:00"))' <<<"$filtered")"
+      if [ "$want_json" = 1 ]; then printf '%s\n' "$filtered"; else print_entry_table "$filtered"; fi
+      ;;
+    *) echo "usage: omarchy-calendar block add|list ..." >&2; exit 1 ;;
+  esac
+}
+
+print_entry_table() {   # stdin/$1 = JSON array
+  local rows="$1"
+  local n; n="$(jq 'length' <<<"$rows")"
+  if [ "$n" = 0 ]; then echo "(none)"; return; fi
+  jq -r '.[] | "#\(.id)\t\(.date)\t\(.start // "all-day")\(if .end and .start then "–"+.end else "" end)\t[\(.kind)]\t\(.title)\(if .location != "" and .location != null then "  @ "+.location else "" end)"' <<<"$rows" \
+    | column -t -s $'\t'
+}
+
+# ---------------------------------------------------------------------------
+# birthdays
+# ---------------------------------------------------------------------------
+
+cmd_birthday() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    add)
+      local name="${1:-}" raw="${2:-}"
+      [ -z "$name" ] || [ -z "$raw" ] && { echo "usage: omarchy-calendar birthday add \"<name>\" <MM-DD|YYYY-MM-DD>" >&2; exit 1; }
+      local month day year=""
+      if [[ $raw =~ ^([0-9]{4})-([0-9]{2})-([0-9]{2})$ ]]; then
+        year="${BASH_REMATCH[1]}"; month="${BASH_REMATCH[2]}"; day="${BASH_REMATCH[3]}"
+      elif [[ $raw =~ ^([0-9]{2})-([0-9]{2})$ ]]; then
+        month="${BASH_REMATCH[1]}"; day="${BASH_REMATCH[2]}"
+      else
+        echo "omarchy-calendar: invalid birthday date: $raw (want MM-DD or YYYY-MM-DD)" >&2; exit 1
+      fi
+      valid_date "2000-$month-$day" || { echo "omarchy-calendar: invalid month/day: $month-$day" >&2; exit 1; }
+      local id; id="$(next_id "$BIRTHDAYS_FILE")"
+      birthdays_json | jq \
+        --argjson id "$id" --arg name "$name" \
+        --argjson month "$((10#$month))" --argjson day "$((10#$day))" \
+        --arg year "$year" \
+        '. + [{id: $id, name: $name, month: $month, day: $day, year: ($year | if . == "" then null else tonumber end)}]' \
+        | write_json "$BIRTHDAYS_FILE"
+      rebuild_all
+      echo "Added birthday #$id: $name ($month-$day${year:+/$year})"
+      ;;
+    list)
+      local want_json=0
+      [ "${1:-}" = "--json" ] && want_json=1
+      local rows; rows="$(birthdays_json | jq 'sort_by(.month, .day)')"
+      if [ "$want_json" = 1 ]; then printf '%s\n' "$rows"; return; fi
+      local n; n="$(jq 'length' <<<"$rows")"
+      [ "$n" = 0 ] && { echo "(none)"; return; }
+      jq -r '.[] | "#\(.id)\t\(.month)-\(.day)\t\(.name)\(if .year then "  (b. "+(.year|tostring)+")" else "" end)"' <<<"$rows" \
+        | column -t -s $'\t'
+      ;;
+    rm)
+      local id="${1:-}"
+      [[ $id =~ ^[0-9]+$ ]] || { echo "usage: omarchy-calendar birthday rm <id>" >&2; exit 1; }
+      local before after
+      before="$(birthdays_json | jq 'length')"
+      birthdays_json | jq --argjson id "$id" '[.[] | select(.id != $id)]' | write_json "$BIRTHDAYS_FILE"
+      after="$(birthdays_json | jq 'length')"
+      rebuild_all
+      [ "$before" = "$after" ] && { echo "omarchy-calendar: no birthday with id $id" >&2; exit 1; }
+      echo "Removed birthday #$id"
+      ;;
+    *) echo "usage: omarchy-calendar birthday add|list|rm ..." >&2; exit 1 ;;
+  esac
+}
+
+# ---------------------------------------------------------------------------
+# holidays (Nager.Date public holiday API — no key required)
+# ---------------------------------------------------------------------------
+
+holiday_sync_year() {   # $1 = country $2 = year -> caches into HOLIDAYS_CACHE
+  local country="$1" year="$2" resp
+  resp="$(curl -fsS --max-time 15 "https://date.nager.at/api/v3/publicholidays/${year}/${country}" 2>/dev/null)" || return 1
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"$resp" || return 1
+  local simplified
+  simplified="$(jq '[.[] | {date: .date, name: .localName}]' <<<"$resp")"
+  holidays_cache | jq \
+    --arg country "$country" --arg year "$year" --argjson days "$simplified" --argjson now "$(now_epoch)" \
+    '.country = $country | .years[$year] = $days | .fetchedAt[$year] = $now' \
+    | write_json "$HOLIDAYS_CACHE"
+}
+
+cmd_holiday() {
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    sync)
+      local country="" year=""
+      while (($#)); do
+        case "$1" in
+          --country) country="${2:-}"; shift 2 ;;
+          --year) year="${2:-}"; shift 2 ;;
+          *) shift ;;
+        esac
+      done
+      [ -z "$country" ] && country="$(config_get_one holidayCountry)"
+      [ -z "$country" ] && country="AU"
+      if [ -n "$year" ]; then
+        holiday_sync_year "$country" "$year" && rebuild_all && echo "Synced $country holidays for $year" \
+          || { echo "omarchy-calendar: could not fetch holidays for $country $year" >&2; exit 1; }
+      else
+        local y1 y2 ok=0
+        y1="$(date +%Y)"; y2="$(date -d "$y1-01-01 +1 year" +%Y)"
+        holiday_sync_year "$country" "$y1" && ok=1
+        holiday_sync_year "$country" "$y2" && ok=1
+        if [ "$ok" = 1 ]; then rebuild_all; echo "Synced $country holidays for $y1–$y2"
+        else echo "omarchy-calendar: could not reach the holiday API" >&2; exit 1; fi
+      fi
+      ;;
+    list)
+      local month="" want_json=0
+      while (($#)); do
+        case "$1" in
+          --month) month="${2:-}"; shift 2 ;;
+          --json) want_json=1; shift ;;
+          *) shift ;;
+        esac
+      done
+      local all; all="$(holidays_cache | jq '[.years[]?[]] | sort_by(.date)')"
+      [ -n "$month" ] && all="$(jq --arg m "$month" '[.[] | select(.date | startswith($m))]' <<<"$all")"
+      if [ "$want_json" = 1 ]; then printf '%s\n' "$all"; return; fi
+      local n; n="$(jq 'length' <<<"$all")"
+      [ "$n" = 0 ] && { echo "(none cached — run: omarchy-calendar holiday sync)"; return; }
+      jq -r '.[] | "\(.date)\t\(.name)"' <<<"$all" | column -t -s $'\t'
+      ;;
+    *) echo "usage: omarchy-calendar holiday sync|list ..." >&2; exit 1 ;;
+  esac
+}
+
+ensure_holiday_cache_fresh() {
+  # Best-effort: (re)sync current + next year if missing or older than 25 days.
+  # Never fatal — offline runs just keep the last cache.
+  local country y1 y2 fetched_y1 fetched_y2 now cutoff
+  country="$(config_get_one holidayCountry)"; [ -z "$country" ] && country="AU"
+  y1="$(date +%Y)"; y2="$(date -d "$y1-01-01 +1 year" +%Y)"
+  now="$(now_epoch)"; cutoff=$((25 * 86400))
+  fetched_y1="$(holidays_cache | jq -r --arg y "$y1" '.fetchedAt[$y] // 0')"
+  fetched_y2="$(holidays_cache | jq -r --arg y "$y2" '.fetchedAt[$y] // 0')"
+  if [ $(( now - fetched_y1 )) -gt "$cutoff" ]; then holiday_sync_year "$country" "$y1" >/dev/null 2>&1 || true; fi
+  if [ $(( now - fetched_y2 )) -gt "$cutoff" ]; then holiday_sync_year "$country" "$y2" >/dev/null 2>&1 || true; fi
+}
+
+# ---------------------------------------------------------------------------
+# ICS export (rebuilt wholesale from JSON — never hand-edited, never read back)
+# ---------------------------------------------------------------------------
+
+ics_escape() {   # stdin -> RFC5545-escaped text on stdout (single-line fields only)
+  sed -e 's/\\/\\\\/g' -e 's/;/\\;/g' -e 's/,/\\,/g'
+}
+
+ics_header() { printf 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//omarchy-calendar//EN\r\nCALSCALE:GREGORIAN\r\n'; }
+ics_footer() { printf 'END:VCALENDAR\r\n'; }
+
+rebuild_personal_ics() {
+  { ics_header
+    jq -r '.[] | @base64' <(events_json) | while IFS= read -r row; do
+      local e; e="$(base64 -d <<<"$row")"
+      local id title date start end location kind
+      id="$(jq -r '.id' <<<"$e")"; title="$(jq -r '.title' <<<"$e" | ics_escape)"
+      date="$(jq -r '.date' <<<"$e")"; start="$(jq -r '.start // ""' <<<"$e")"
+      end="$(jq -r '.end // ""' <<<"$e")"; location="$(jq -r '.location // ""' <<<"$e" | ics_escape)"
+      kind="$(jq -r '.kind' <<<"$e")"
+      local dtstart dtend
+      if [ -n "$start" ]; then
+        dtstart="DTSTART:$(date -d "$date $start" +%Y%m%dT%H%M%S)"
+        if [ -n "$end" ]; then dtend="DTEND:$(date -d "$date $end" +%Y%m%dT%H%M%S)"
+        else dtend="DTEND:$(date -d "$date $start +1 hour" +%Y%m%dT%H%M%S)"; fi
+      else
+        dtstart="DTSTART;VALUE=DATE:$(date -d "$date" +%Y%m%d)"
+        dtend="DTEND;VALUE=DATE:$(date -d "$date +1 day" +%Y%m%d)"
+      fi
+      printf 'BEGIN:VEVENT\r\nUID:cal-%s-%s@omarchy\r\nDTSTAMP:%s\r\n%s\r\n%s\r\nSUMMARY:%s\r\n' \
+        "$kind" "$id" "$(date -u +%Y%m%dT%H%M%SZ)" "$dtstart" "$dtend" "$title"
+      [ -n "$location" ] && printf 'LOCATION:%s\r\n' "$location"
+      printf 'CATEGORIES:%s\r\nEND:VEVENT\r\n' "$(tr '[:lower:]' '[:upper:]' <<<"$kind")"
+    done
+    ics_footer
+  } > "$PERSONAL_ICS"
+}
+
+rebuild_birthdays_ics() {
+  { ics_header
+    jq -r '.[] | @base64' <(birthdays_json) | while IFS= read -r row; do
+      local b; b="$(base64 -d <<<"$row")"
+      local id name month day year
+      id="$(jq -r '.id' <<<"$b")"; name="$(jq -r '.name' <<<"$b" | ics_escape)"
+      month="$(jq -r '.month' <<<"$b")"; day="$(jq -r '.day' <<<"$b")"
+      year="$(jq -r '.year // ""' <<<"$b")"
+      # Two concrete instances (this year + next) so agenda always sees an
+      # upcoming occurrence without needing RRULE expansion.
+      for y in "$(date +%Y)" "$(date -d "$(date +%Y)-01-01 +1 year" +%Y)"; do
+        local mmdd; mmdd="$(printf '%02d%02d' "$month" "$day")"
+        local summary="$name's birthday"
+        [ -n "$year" ] && summary="$summary (turns $((y - year)))"
+        printf 'BEGIN:VEVENT\r\nUID:cal-birthday-%s-%s@omarchy\r\nDTSTAMP:%s\r\nDTSTART;VALUE=DATE:%s%s\r\nDTEND;VALUE=DATE:%s\r\nSUMMARY:%s\r\nCATEGORIES:BIRTHDAY\r\nEND:VEVENT\r\n' \
+          "$id" "$y" "$(date -u +%Y%m%dT%H%M%SZ)" "$y" "$mmdd" \
+          "$(date -d "$y-$month-$day +1 day" +%Y%m%d 2>/dev/null || echo "${y}${mmdd}")" \
+          "$(ics_escape <<<"$summary")"
+      done
+    done
+    ics_footer
+  } > "$BIRTHDAYS_ICS"
+}
+
+rebuild_holidays_ics() {
+  { ics_header
+    jq -r '[.years[]?[]] | .[] | @base64' <(holidays_cache) | while IFS= read -r row; do
+      local h; h="$(base64 -d <<<"$row")"
+      local hdate name
+      hdate="$(jq -r '.date' <<<"$h")"; name="$(jq -r '.name' <<<"$h" | ics_escape)"
+      valid_date "$hdate" || continue
+      printf 'BEGIN:VEVENT\r\nUID:cal-holiday-%s@omarchy\r\nDTSTAMP:%s\r\nDTSTART;VALUE=DATE:%s\r\nDTEND;VALUE=DATE:%s\r\nSUMMARY:%s\r\nCATEGORIES:HOLIDAY\r\nEND:VEVENT\r\n' \
+        "$hdate" "$(date -u +%Y%m%dT%H%M%SZ)" "$(date -d "$hdate" +%Y%m%d)" "$(date -d "$hdate +1 day" +%Y%m%d)" "$name"
+    done
+    ics_footer
+  } > "$HOLIDAYS_ICS"
+}
+
+rebuild_all() {
+  rebuild_personal_ics
+  rebuild_birthdays_ics
+  rebuild_holidays_ics
+  ping_agenda_refresh
+}
+
+ping_agenda_refresh() {
+  command -v omarchy-shell >/dev/null 2>&1 && omarchy-shell alteringux.agenda refresh >/dev/null 2>&1 || true
+}
+
+# ---------------------------------------------------------------------------
+# month / day / free — read-side views over events + birthdays + holidays
+# ---------------------------------------------------------------------------
+
+birthdays_on() {   # $1 = YYYY-MM-DD -> JSON array of names (with age if known)
+  local d="$1" month day
+  month="$((10#$(date -d "$d" +%m)))"; day="$((10#$(date -d "$d" +%d)))"
+  local year_of_d; year_of_d="$(date -d "$d" +%Y)"
+  birthdays_json | jq --argjson m "$month" --argjson day "$day" --argjson y "$year_of_d" \
+    '[.[] | select(.month == $m and .day == $day) | {name: .name, age: (if .year then ($y - .year) else null end)}]'
+}
+
+holidays_on() {   # $1 = YYYY-MM-DD -> JSON array of names
+  local d="$1"
+  holidays_cache | jq --arg d "$d" '[.years[]?[] | select(.date == $d) | .name]'
+}
+
+events_on() {   # $1 = YYYY-MM-DD -> JSON array of events/blocks
+  local d="$1"
+  events_json | jq --arg d "$d" '[.[] | select(.date == $d)] | sort_by(.start // "00:00")'
+}
+
+cmd_day() {
+  local d="${1:-}" want_json=0
+  [ "$d" = "--json" ] && { want_json=1; d=""; }
+  [ "${2:-}" = "--json" ] && want_json=1
+  [ -z "$d" ] && d="$(today)"
+  d="$(require_date "$d" day)" || exit 1
+  ensure_holiday_cache_fresh
+  local ev bd hd
+  ev="$(events_on "$d")"; bd="$(birthdays_on "$d")"; hd="$(holidays_on "$d")"
+  if [ "$want_json" = 1 ]; then
+    jq -n --arg date "$d" --argjson events "$ev" --argjson birthdays "$bd" --argjson holidays "$hd" \
+      '{date: $date, events: $events, birthdays: $birthdays, holidays: $holidays}'
+    return
+  fi
+  echo "$d ($(date -d "$d" +%A))"
+  local hn; hn="$(jq 'length' <<<"$hd")"
+  [ "$hn" != 0 ] && jq -r '.[] | "  🎉 " + .' <<<"$hd"
+  local bn; bn="$(jq 'length' <<<"$bd")"
+  [ "$bn" != 0 ] && jq -r '.[] | "  🎂 " + .name + (if .age then " (turns " + (.age|tostring) + ")" else "" end)' <<<"$bd"
+  local en; en="$(jq 'length' <<<"$ev")"
+  if [ "$en" = 0 ]; then
+    [ "$hn" = 0 ] && [ "$bn" = 0 ] && echo "  (nothing scheduled)"
+  else
+    print_entry_table "$ev"
+  fi
+}
+
+cmd_month() {
+  local m="${1:-}" want_json=0
+  [ "$m" = "--json" ] && { want_json=1; m=""; }
+  [ "${2:-}" = "--json" ] && want_json=1
+  [ -z "$m" ] && m="$(date +%Y-%m)"
+  [[ $m =~ ^[0-9]{4}-[0-9]{2}$ ]] || { echo "omarchy-calendar: invalid month: $m (want YYYY-MM)" >&2; exit 1; }
+  ensure_holiday_cache_fresh
+  local days_in dow_first
+  days_in="$(date -d "$m-01 +1 month -1 day" +%d)"
+  dow_first="$(date -d "$m-01" +%w)"
+
+  if [ "$want_json" = 1 ]; then
+    local out="[]"
+    local d n
+    for ((d=1; d<=10#$days_in; d++)); do
+      n="$(printf '%s-%02d' "$m" "$d")"
+      out="$(jq --arg date "$n" \
+        --argjson ec "$(events_on "$n" | jq 'length')" \
+        --argjson bc "$(birthdays_on "$n" | jq 'length')" \
+        --argjson hc "$(holidays_on "$n" | jq 'length')" \
+        '. + [{date: $date, events: $ec, birthdays: $bc, holidays: $hc}]' <<<"$out")"
+    done
+    jq -n --arg month "$m" --argjson days "$out" '{month: $month, days: $days}'
+    return
+  fi
+
+  echo "$(date -d "$m-01" +'%B %Y')"
+  echo "Su Mo Tu We Th Fr Sa"
+  local line="" pad=$((dow_first))
+  for ((i=0; i<pad; i++)); do line+="   "; done
+  local todaystr; todaystr="$(today)"
+  local d n mark cell
+  for ((d=1; d<=10#$days_in; d++)); do
+    n="$(printf '%s-%02d' "$m" "$d")"
+    mark=" "
+    [ "$(holidays_on "$n" | jq 'length')" != 0 ] && mark="h"
+    [ "$mark" = " " ] && [ "$(birthdays_on "$n" | jq 'length')" != 0 ] && mark="b"
+    [ "$mark" = " " ] && [ "$(events_on "$n" | jq 'length')" != 0 ] && mark="."
+    cell="$(printf '%2d' "$d")"
+    if [ "$n" = "$todaystr" ]; then cell="[$cell]"; else cell="$cell$mark"; fi
+    line+="$cell "
+    if [ $(( (d + pad) % 7 )) = 0 ]; then echo "$line"; line=""; fi
+  done
+  [ -n "$line" ] && echo "$line"
+  echo
+  echo "legend: h=holiday  b=birthday  .=event/block  [today]"
+}
+
+# ---------------------------------------------------------------------------
+# free — gaps in a day's schedule
+# ---------------------------------------------------------------------------
+
+cmd_free() {
+  local d="" duration=30 want_json=0
+  local positional=()
+  while (($#)); do
+    case "$1" in
+      --duration) duration="${2:-}"; shift 2 ;;
+      --json) want_json=1; shift ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  d="${positional[0]:-}"
+  [ -z "$d" ] && d="$(today)"
+  d="$(require_date "$d" free)" || exit 1
+  local work_start work_end
+  work_start="$(config_get_one workStart)"; [ -z "$work_start" ] && work_start="09:00"
+  work_end="$(config_get_one workEnd)"; [ -z "$work_end" ] && work_end="17:00"
+
+  local busy; busy="$(events_on "$d" | jq '[.[] | select(.start != null and .end != null) | {start, end}] | sort_by(.start)')"
+
+  local slots="[]" cursor="$work_start"
+  local n; n="$(jq 'length' <<<"$busy")"
+  local i s e
+  for ((i=0; i<n; i++)); do
+    s="$(jq -r ".[$i].start" <<<"$busy")"
+    e="$(jq -r ".[$i].end" <<<"$busy")"
+    if [[ "$s" > "$cursor" ]]; then
+      slots="$(jq --arg s "$cursor" --arg e "$s" '. + [{start:$s, end:$e}]' <<<"$slots")"
+    fi
+    [[ "$e" > "$cursor" ]] && cursor="$e"
+  done
+  if [[ "$cursor" < "$work_end" ]]; then
+    slots="$(jq --arg s "$cursor" --arg e "$work_end" '. + [{start:$s, end:$e}]' <<<"$slots")"
+  fi
+  slots="$(jq --argjson dur "$duration" '[.[] | select(
+      ((.end | split(":") | (.[0]|tonumber)*60 + (.[1]|tonumber)) -
+       (.start | split(":") | (.[0]|tonumber)*60 + (.[1]|tonumber))) >= $dur
+    )]' <<<"$slots")"
+
+  if [ "$want_json" = 1 ]; then
+    jq -n --arg date "$d" --argjson slots "$slots" '{date: $date, minDuration: '"$duration"', slots: $slots}'
+    return
+  fi
+  echo "Free slots on $d (>= ${duration}m, within $work_start–$work_end):"
+  local sn; sn="$(jq 'length' <<<"$slots")"
+  [ "$sn" = 0 ] && { echo "  (none)"; return; }
+  jq -r '.[] | "  " + .start + "–" + .end' <<<"$slots"
+}
+
+# ---------------------------------------------------------------------------
+# status (widget snapshot) + digest (daily notifications)
+# ---------------------------------------------------------------------------
+
+cmd_status() {
+  local do_write=0
+  [ "${1:-}" = "--write" ] && do_write=1
+  ensure_holiday_cache_fresh
+  rebuild_all
+  local d; d="$(today)"
+  local ev bd hd next
+  ev="$(events_on "$d")"; bd="$(birthdays_on "$d")"; hd="$(holidays_on "$d")"
+  next="$(events_json | jq --arg d "$d" --arg now "$(date +%H:%M)" \
+    '[.[] | select(.date > $d or (.date == $d and .start != null and .start >= $now))]
+     | sort_by(.date, (.start // "00:00")) | first')"
+  local snapshot
+  snapshot="$(jq -n \
+    --argjson generatedAt "$(now_epoch)" \
+    --arg date "$d" \
+    --argjson todayEvents "$ev" --argjson todayBirthdays "$bd" --argjson todayHolidays "$hd" \
+    --argjson next "$next" \
+    '{version: 1, generatedAt: $generatedAt, date: $date,
+      today: {events: $todayEvents, birthdays: $todayBirthdays, holidays: $todayHolidays},
+      next: $next}')"
+  if [ "$do_write" = 1 ]; then
+    printf '%s' "$snapshot" | write_json "$STATE_FILE"
+  else
+    printf '%s\n' "$snapshot"
+  fi
+}
+
+cmd_digest() {
+  local force=0
+  [ "${1:-}" = "--force" ] && force=1
+  local d; d="$(today)"
+  if [ "$force" != 1 ] && [ -f "$DIGEST_MARKER" ] && [ "$(cat "$DIGEST_MARKER" 2>/dev/null)" = "$d" ]; then
+    exit 0
+  fi
+  ensure_holiday_cache_fresh
+  local bd hd
+  bd="$(birthdays_on "$d")"; hd="$(holidays_on "$d")"
+  jq -c '.[]' <<<"$bd" | while IFS= read -r row; do
+    local name age body
+    name="$(jq -r '.name' <<<"$row")"
+    age="$(jq -r '.age // empty' <<<"$row")"
+    body="It's $name's birthday today!"
+    [ -n "$age" ] && body="$body Turning $age."
+    notify-send -a "Calendar" -u normal -i x-office-calendar "🎂 Birthday" "$body" >/dev/null 2>&1 || true
+  done
+  jq -r '.[]' <<<"$hd" | while IFS= read -r name; do
+    notify-send -a "Calendar" -u normal -i x-office-calendar "🎉 Public Holiday" "$name" >/dev/null 2>&1 || true
+  done
+  printf '%s' "$d" > "$DIGEST_MARKER"
+}
+
+# ---------------------------------------------------------------------------
+# timers (persistent systemd --user units — a standing daily feature, unlike
+# omarchy-remind's deliberately transient one-off reminders)
+# ---------------------------------------------------------------------------
+
+cmd_install_timers() {
+  local unit_dir="$HOME/.config/systemd/user"
+  mkdir -p "$unit_dir"
+  local digest_time; digest_time="$(config_get_one digestTime)"; [ -z "$digest_time" ] && digest_time="08:00"
+
+  cat > "$unit_dir/omarchy-calendar-digest.service" <<EOF
+[Unit]
+Description=Omarchy calendar: notify today's birthdays/holidays
+
+[Service]
+Type=oneshot
+ExecStart=$SELF digest
+EOF
+
+  cat > "$unit_dir/omarchy-calendar-digest.timer" <<EOF
+[Unit]
+Description=Daily omarchy-calendar digest
+
+[Timer]
+OnCalendar=*-*-* ${digest_time}:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  cat > "$unit_dir/omarchy-calendar-refresh.service" <<EOF
+[Unit]
+Description=Omarchy calendar: refresh holiday cache + ICS export + widget snapshot
+
+[Service]
+Type=oneshot
+ExecStart=$SELF status --write
+EOF
+
+  cat > "$unit_dir/omarchy-calendar-refresh.timer" <<EOF
+[Unit]
+Description=Periodic omarchy-calendar refresh
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl --user daemon-reload
+  systemctl --user enable --now omarchy-calendar-digest.timer omarchy-calendar-refresh.timer
+  echo "Installed + enabled omarchy-calendar-digest.timer (daily $digest_time) and omarchy-calendar-refresh.timer (every 15m)."
+}
+
+cmd_uninstall_timers() {
+  systemctl --user disable --now omarchy-calendar-digest.timer omarchy-calendar-refresh.timer 2>/dev/null || true
+  rm -f "$HOME/.config/systemd/user/omarchy-calendar-digest."{service,timer} \
+        "$HOME/.config/systemd/user/omarchy-calendar-refresh."{service,timer}
+  systemctl --user daemon-reload
+  echo "Removed omarchy-calendar timers."
+}
+
+# ---------------------------------------------------------------------------
+# dispatch
+# ---------------------------------------------------------------------------
+
+case "${1:-}" in
+  ""|-h|--help|help) usage 0 ;;
+  event) shift; cmd_event "$@" ;;
+  block) shift; cmd_block "$@" ;;
+  birthday) shift; cmd_birthday "$@" ;;
+  holiday) shift; cmd_holiday "$@" ;;
+  month) shift; cmd_month "$@" ;;
+  day) shift; cmd_day "$@" ;;
+  free) shift; cmd_free "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  digest) shift; cmd_digest "$@" ;;
+  rebuild) rebuild_all; echo "Rebuilt ICS export." ;;
+  config) shift; cmd_config "$@" ;;
+  install-timers) cmd_install_timers ;;
+  uninstall-timers) cmd_uninstall_timers ;;
+  *) echo "omarchy-calendar: unknown command: $1" >&2; usage 1 ;;
+esac
