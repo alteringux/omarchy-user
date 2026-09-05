@@ -1,0 +1,290 @@
+"use strict"
+
+const test = require("node:test")
+const assert = require("node:assert/strict")
+const Model = require("../Model.js")
+
+const MIN = 60_000
+const HOUR = 60 * MIN
+const DAY = 24 * HOUR
+
+function cfg(over) { return Object.assign(Model.defaultConfig(), { enabled: true }, over || {}) }
+function state(over) { return Object.assign(Model.defaultState(), over || {}) }
+function quiz(over) {
+  return Object.assign({
+    id: "q1", kind: "quiz", category: "custom", title: null, slides: null,
+    front: "q", back: "a", image: null, linkedLessonId: null,
+    createdAt: 0, ease: 2.5, intervalDays: 0, dueAt: 0, reps: 0, lapses: 0,
+    lastGrade: null, shownAt: null
+  }, over || {})
+}
+function lesson(over) {
+  return Object.assign({
+    id: "l1", kind: "lesson", category: "technique", title: "T", slides: ["a", "b"],
+    front: null, back: null, image: null, linkedLessonId: null,
+    createdAt: 0, ease: 2.5, intervalDays: 0, dueAt: 0, reps: 0, lapses: 0,
+    lastGrade: null, shownAt: null
+  }, over || {})
+}
+
+// ── tolerant parsing ────────────────────────────────────────────────────────
+
+test("parseConfig: empty / garbage -> defaults", () => {
+  assert.deepEqual(Model.parseConfig(""), Model.defaultConfig())
+  assert.deepEqual(Model.parseConfig("not json"), Model.defaultConfig())
+  assert.deepEqual(Model.parseConfig("[1,2,3]"), Model.defaultConfig())
+})
+
+test("parseConfig: adopts known keys, ignores unknown", () => {
+  const c = Model.parseConfig(JSON.stringify({ baseIntervalMin: 30, bogus: 9 }))
+  assert.equal(c.baseIntervalMin, 30)
+  assert.equal(c.bogus, undefined)
+  assert.equal(c.minIntervalMin, Model.defaultConfig().minIntervalMin)
+})
+
+test("parseCards: empty / garbage -> seeded defaults", () => {
+  assert.deepEqual(Model.parseCards(""), Model.defaultCards())
+  assert.deepEqual(Model.parseCards("nope"), Model.defaultCards())
+})
+
+test("parseCards: drops malformed entries and de-dupes ids, keeps the rest", () => {
+  const raw = JSON.stringify({ cards: [quiz({ id: "a" }), quiz({ id: "a" }), quiz({ id: "b" }), { front: "no id" }] })
+  const parsed = Model.parseCards(raw)
+  const ids = parsed.cards.map((c) => c.id).sort()
+  assert.deepEqual(ids, ["a", "b"])
+})
+
+test("parseCards: unknown kind coerces to quiz, unknown category to custom", () => {
+  const parsed = Model.parseCards(JSON.stringify({ cards: [{ id: "x", kind: "bogus", category: "bogus", front: "f", back: "b" }] }))
+  assert.equal(parsed.cards[0].kind, "quiz")
+  assert.equal(parsed.cards[0].category, "custom")
+})
+
+test("parseState: empty / garbage -> defaults, no prompt", () => {
+  const s = Model.parseState("")
+  assert.deepEqual(s, Model.defaultState())
+  assert.equal(s.prompt, null)
+})
+
+test("parseState: a prompt missing cardIds is dropped, not trusted", () => {
+  const s = Model.parseState(JSON.stringify({ prompt: { kind: "checkin" } }))
+  assert.equal(s.prompt, null)
+})
+
+// ── seed content ─────────────────────────────────────────────────────────
+
+test("defaultCards: seeds technique lessons and a trivia starter deck", () => {
+  const cards = Model.defaultCards().cards
+  assert.ok(cards.some((c) => c.kind === "lesson"), "has at least one lesson")
+  assert.ok(cards.some((c) => c.kind === "quiz" && c.category === "trivia"), "has trivia quiz cards")
+  const ids = cards.map((c) => c.id)
+  assert.equal(new Set(ids).size, ids.length, "seed ids are unique")
+})
+
+// ── grading (SM-2-lite) ──────────────────────────────────────────────────
+
+test("grade 'again': resets reps, adds a lapse, drops ease, due soon (not days)", () => {
+  const c = quiz({ reps: 3, ease: 2.5, intervalDays: 10, lapses: 0 })
+  const g = Model.grade(c, "again", 1000)
+  assert.equal(g.reps, 0)
+  assert.equal(g.lapses, 1)
+  assert.equal(g.intervalDays, 0)
+  assert.ok(g.ease < c.ease)
+  assert.ok(g.dueAt - 1000 < Model.HOUR, "re-due within the hour, not days out")
+  assert.equal(g.lastGrade, "again")
+})
+
+test("grade never mutates the input card", () => {
+  const c = quiz({})
+  const before = JSON.stringify(c)
+  Model.grade(c, "good", 1000)
+  assert.equal(JSON.stringify(c), before)
+})
+
+test("grade 'good' on a new card graduates to a short first interval and advances dueAt", () => {
+  const c = quiz({})
+  const g = Model.grade(c, "good", 1000)
+  assert.equal(g.reps, 1)
+  assert.ok(g.intervalDays >= 1)
+  assert.equal(g.dueAt, 1000 + g.intervalDays * Model.DAY)
+})
+
+test("grade: easy grows the interval faster than good, which grows faster than hard", () => {
+  let easyCard = quiz({}), goodCard = quiz({}), hardCard = quiz({})
+  // graduate all three through two successful reps so interval math (rep 3+) is comparable
+  for (const g of ["good", "good"]) {
+    easyCard = Model.grade(easyCard, g, 0)
+    goodCard = Model.grade(goodCard, g, 0)
+    hardCard = Model.grade(hardCard, g, 0)
+  }
+  const easyNext = Model.grade(easyCard, "easy", 0)
+  const goodNext = Model.grade(goodCard, "good", 0)
+  const hardNext = Model.grade(hardCard, "hard", 0)
+  assert.ok(easyNext.intervalDays > goodNext.intervalDays, "easy grows faster than good")
+  assert.ok(goodNext.intervalDays > hardNext.intervalDays, "good grows faster than hard")
+})
+
+test("grade: ease is clamped to [1.3, 3.0] however many lapses/eases pile up", () => {
+  let c = quiz({ ease: 1.35 })
+  for (let i = 0; i < 20; i++) c = Model.grade(c, "again", i)
+  assert.ok(c.ease >= 1.3)
+  let d = quiz({ ease: 2.9 })
+  for (let i = 0; i < 20; i++) d = Model.grade(d, "easy", i * Model.DAY)
+  assert.ok(d.ease <= 3.0)
+})
+
+// ── due queues ───────────────────────────────────────────────────────────
+
+test("dueQuizzes: only quiz cards at or before now, oldest due first", () => {
+  const cards = [
+    quiz({ id: "a", dueAt: 5000 }),
+    quiz({ id: "b", dueAt: 1000 }),
+    quiz({ id: "c", dueAt: 20000 }),
+    lesson({ id: "d", dueAt: 0 })
+  ]
+  const due = Model.dueQuizzes(cards, 10000)
+  assert.deepEqual(due.map((c) => c.id), ["b", "a"])
+})
+
+test("unseenLessons: only lessons with shownAt == null", () => {
+  const cards = [lesson({ id: "a", shownAt: null }), lesson({ id: "b", shownAt: 5 }), quiz({ id: "c" })]
+  assert.deepEqual(Model.unseenLessons(cards).map((c) => c.id), ["a"])
+})
+
+// ── the decision engine ──────────────────────────────────────────────────
+
+test("decide: disabled config never prompts", () => {
+  const d = Model.decide(cfg({ enabled: false }), state(), [quiz({ dueAt: 0 })], 100000)
+  assert.equal(d.prompt, null)
+})
+
+test("decide: paused state never prompts until pauseUntilMs", () => {
+  const d = Model.decide(cfg(), state({ pauseUntilMs: 200000 }), [quiz({ dueAt: 0 })], 100000)
+  assert.equal(d.prompt, null)
+})
+
+test("decide: a brand-new, never-graded due card does NOT force a takeover", () => {
+  // regression: seeded cards start at dueAt 0 (epoch); a naive 'now - dueAt'
+  // overdue check would read that as ~decades overdue and always escalate.
+  const cards = [quiz({ id: "a", dueAt: 0, reps: 0, lapses: 0 })]
+  const d = Model.decide(cfg({ overdueTakeoverHours: 8 }), state(), cards, Date.now())
+  assert.ok(d.prompt === null || d.prompt.kind !== "takeover", "new cards alone never trigger takeover")
+})
+
+test("decide: a previously-graded card overdue past the threshold escalates to takeover", () => {
+  const now = 1_000_000_000_000
+  const cards = [quiz({ id: "a", reps: 3, lapses: 0, dueAt: now - 9 * HOUR })]
+  const d = Model.decide(cfg({ overdueTakeoverHours: 8, baseIntervalMin: 1 }), state({ lastPromptMs: 0 }), cards, now)
+  assert.equal(d.prompt.kind, "takeover")
+  assert.equal(d.prompt.reason, "overdue")
+})
+
+test("decide: dismissStreak at the threshold escalates the next prompt to takeover", () => {
+  const now = 1_000_000_000_000
+  const cards = [quiz({ id: "a", dueAt: now - MIN })]
+  const d = Model.decide(cfg({ dismissTakeoverStreak: 3, baseIntervalMin: 1 }), state({ dismissStreak: 3, lastPromptMs: 0 }), cards, now)
+  assert.equal(d.prompt.kind, "takeover")
+  assert.equal(d.prompt.reason, "dismissed")
+})
+
+test("decide: due cards but interval not yet elapsed since lastPromptMs -> no prompt", () => {
+  const now = 1_000_000_000_000
+  const cards = [quiz({ id: "a", dueAt: now - MIN })]
+  const d = Model.decide(cfg({ baseIntervalMin: 45 }), state({ lastPromptMs: now - MIN }), cards, now)
+  assert.equal(d.prompt, null)
+  assert.equal(d.reason, "not-yet")
+})
+
+test("decide: a non-escalated checkin batches at most quizBatchSize cards", () => {
+  const now = 1_000_000_000_000
+  const cards = Array.from({ length: 10 }, (_, i) => quiz({ id: "q" + i, dueAt: now - MIN }))
+  const d = Model.decide(cfg({ quizBatchSize: 5, baseIntervalMin: 0 }), state({ lastPromptMs: 0 }), cards, now)
+  assert.equal(d.prompt.kind, "checkin")
+  assert.equal(d.prompt.cardIds.length, 5)
+})
+
+test("decide: an unseen lesson always wins over a due quiz, and always takes over", () => {
+  const now = 1_000_000_000_000
+  const cards = [quiz({ id: "q", dueAt: now - HOUR }), lesson({ id: "l", shownAt: null })]
+  const d = Model.decide(cfg({ baseIntervalMin: 0 }), state({ lastPromptMs: 0 }), cards, now)
+  assert.equal(d.prompt.kind, "lesson")
+  assert.deepEqual(d.prompt.cardIds, ["l"])
+})
+
+test("decide: lesson rationed by dailyNewLessonCap", () => {
+  const now = 1_000_000_000_000
+  const cards = [lesson({ id: "l1", shownAt: null }), lesson({ id: "l2", shownAt: null })]
+  const d = Model.decide(cfg({ dailyNewLessonCap: 1 }), state({ lessonsToday: 1 }), cards, now)
+  assert.notEqual(d.reason, "new-lesson")
+})
+
+test("decide: lesson rationed by lessonGapHours since the last one", () => {
+  const now = 1_000_000_000_000
+  const cards = [lesson({ id: "l1", shownAt: null })]
+  const d = Model.decide(cfg({ lessonGapHours: 20 }), state({ lastLessonMs: now - HOUR }), cards, now)
+  assert.notEqual(d.reason, "new-lesson")
+})
+
+// ── lesson -> companion quiz linking ──────────────────────────────────────
+
+test("markLessonSeen: sets shownAt and spins up a linked companion quiz due tomorrow", () => {
+  const now = 1_000_000_000_000
+  const cards = [lesson({ id: "l1", title: "Chunking", slides: ["a", "final slide"] })]
+  const out = Model.markLessonSeen(cards, "l1", now)
+  const l = out.find((c) => c.id === "l1")
+  assert.equal(l.shownAt, now)
+  const companion = out.find((c) => c.linkedLessonId === "l1")
+  assert.ok(companion, "companion quiz card was created")
+  assert.equal(companion.kind, "quiz")
+  assert.equal(companion.back, "final slide")
+  assert.equal(companion.dueAt, now + DAY)
+})
+
+test("markLessonSeen: calling it twice does not duplicate the companion card", () => {
+  const now = 1_000_000_000_000
+  let cards = [lesson({ id: "l1", title: "Chunking", slides: ["x"] })]
+  cards = Model.markLessonSeen(cards, "l1", now)
+  cards = Model.markLessonSeen(cards, "l1", now + MIN)
+  const companions = cards.filter((c) => c.linkedLessonId === "l1")
+  assert.equal(companions.length, 1)
+})
+
+// ── mutation helpers ─────────────────────────────────────────────────────
+
+test("addQuizCard / dropCard round-trip", () => {
+  const r = Model.addQuizCard([], { front: "f", back: "b", category: "trivia" }, { id: "x", now: 1 })
+  assert.equal(r.cards.length, 1)
+  assert.equal(r.cards[0].front, "f")
+  assert.equal(Model.dropCard(r.cards, "x").length, 0)
+})
+
+test("addLessonCard stores slides in order", () => {
+  const r = Model.addLessonCard([], { title: "T", slides: ["1", "2", "3"] }, { id: "x", now: 1 })
+  assert.deepEqual(r.cards[0].slides, ["1", "2", "3"])
+})
+
+// ── daily bookkeeping ────────────────────────────────────────────────────
+
+test("rollDaily: resets lessonsToday on a new day, keeps it on the same day", () => {
+  const now = Date.parse("2026-09-05T10:00:00Z")
+  const s1 = Model.rollDaily(state({ lessonsToday: 1, lessonsTodayDate: "2026-09-04" }), now)
+  assert.equal(s1.lessonsToday, 0)
+  const s2 = Model.rollDaily(state({ lessonsToday: 1, lessonsTodayDate: "2026-09-05" }), now)
+  assert.equal(s2.lessonsToday, 1)
+})
+
+test("rollDaily: streakDays increments on a consecutive day, resets otherwise", () => {
+  const now = Date.parse("2026-09-05T10:00:00Z")
+  const consecutive = Model.rollDaily(state({ streakDays: 4, lastActiveDate: "2026-09-04" }), now)
+  assert.equal(consecutive.streakDays, 5)
+  const gap = Model.rollDaily(state({ streakDays: 4, lastActiveDate: "2026-09-01" }), now)
+  assert.equal(gap.streakDays, 1)
+})
+
+// ── stats ────────────────────────────────────────────────────────────────
+
+test("stats: retentionRate is null with no reviews yet, else success fraction", () => {
+  assert.equal(Model.stats([quiz({})], state()).retentionRate, null)
+  const cards = [quiz({ id: "a", reps: 1, lastGrade: "good" }), quiz({ id: "b", reps: 1, lastGrade: "again" })]
+  assert.equal(Model.stats(cards, state()).retentionRate, 0.5)
+})

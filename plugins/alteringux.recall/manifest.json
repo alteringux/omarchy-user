@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.recall",
+  "name": "Recall",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A spaced-repetition memory trainer: short memory-technique lessons taught as fullscreen takeovers, then quizzed later on an adaptive, escalating cadence alongside a trivia deck. Engine + state owned by ~/.local/bin/omarchy-recall.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Recall",
+    "description": "Due-review counter that reddens with backlog; click for the deck panel. A daemon teaches a short technique lesson full-screen when one is ready, and raises quiz check-ins on an adaptive cadence that escalates to a takeover if you keep dismissing or a review goes badly stale.",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

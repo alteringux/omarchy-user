@@ -232,3 +232,8 @@ o.bind("SUPER + ALT + BACKSPACE", "Hide all windows (scratchpad, auto-close 5 mi
 -- reboot. SUPER+CTRL+L is Omarchy's Lock and SUPER+L its layout toggle, so
 -- this rides SHIFT.
 o.bind("SUPER + SHIFT + L", "Toggle lid-close suspend", "lid-suspend-toggle")
+
+-- Recall (~/.local/bin/omarchy-recall): opens a terminal running the
+-- interactive review session -- unseen lessons, then due quiz/vocab cards,
+-- self-graded again/hard/good/easy (SM-2 spaced repetition).
+o.bind("SUPER + SHIFT + ALT + R", "Recall: review now", "foot -e omarchy-recall review")
