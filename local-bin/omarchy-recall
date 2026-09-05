@@ -21,6 +21,11 @@
 #   omarchy-recall grade <id> <again|hard|good|easy>   review one card (SRS)
 #   omarchy-recall lesson-seen <id>              mark a lesson taught, spins up
 #                                                its spaced recall companion card
+#   omarchy-recall lesson-progress <slide-index>  persist the active lesson's
+#                                                current slide (bar widget calls
+#                                                this on every "Next"), so a
+#                                                shell restart resumes instead
+#                                                of restarting the lesson
 #   omarchy-recall list                          the due queue, oldest first
 #   omarchy-recall get | get-state               raw recall-cards.json / -state.json
 #   omarchy-recall status                        live { prompt, reason, dueCount, ... }
@@ -28,6 +33,10 @@
 #   omarchy-recall checkin                       raise a check-in now (keybind target)
 #   omarchy-recall ack <lesson|checkin|takeover> [--engaged] [--snooze <min>]
 #                                                 respond to the on-screen prompt
+#   omarchy-recall choices <id> [n]              multiple-choice clue for one quiz
+#                                                 card: the answer plus n-1 (default
+#                                                 4 total) distractors from other cards,
+#                                                 shuffled — JSON {options, correctIndex}
 #   omarchy-recall seed-trivia                   add the built-in curated trivia
 #                                                 set (offline, no Featherless) —
 #                                                 safe to re-run, skips duplicates
@@ -229,6 +238,23 @@ cmd_lesson_seen() {
   echo "lesson-seen $id"
 }
 
+cmd_lesson_progress() {
+  local idx="${1:-}"
+  case "$idx" in ''|*[!0-9]*) die "usage: omarchy-recall lesson-progress <slide-index>" ;; esac
+  # Only patches an already-active prompt; never creates or overwrites a
+  # different one -- a stray call after the lesson closed (e.g. a queued
+  # runVerb landing late) is a silent no-op rather than corrupting state.
+  read_state | jq --argjson idx "$idx" \
+    'if .prompt != null then .prompt.slideIndex = $idx else . end' | put_state
+}
+
+cmd_choices() {
+  local id="${1:-}" n="${2:-4}"
+  [ -n "$id" ] || die "usage: omarchy-recall choices <id> [n]"
+  jq -n --argjson cards "$(read_cards)" --arg id "$id" --argjson n "$n" \
+        '{cards:$cards.cards, id:$id, n:$n}' | engine choices
+}
+
 cmd_list() {
   jq -n --argjson cards "$(read_cards)" --argjson now "$(now_ms)" '{cards:$cards.cards, now:$now}' \
     | engine render
@@ -426,7 +452,22 @@ cmd_review() {
     back="$(jq -r --arg id "$id" '.cards[] | select(.id==$id) | .back' <<<"$cards")"
     echo
     echo "  $front"
-    read -r -p "-- press Enter to reveal --" _ || true
+    read -r -p "-- press Enter to reveal, or 'c' for a multiple-choice clue --" ans || ans=""
+    if [ "$ans" = "c" ] || [ "$ans" = "C" ]; then
+      local choices_json opt_count letters=(a b c d e f)
+      choices_json="$(cmd_choices "$id" 4)"
+      opt_count="$(jq '.options | length' <<<"$choices_json")"
+      if [ "$opt_count" -gt 1 ]; then
+        echo "  clue — one of these:"
+        jq -r '.options[]' <<<"$choices_json" | while IFS= read -r opt; do
+          echo "    ${letters[0]}) $opt"
+          letters=("${letters[@]:1}")
+        done
+        read -r -p "-- press Enter to reveal --" _ || true
+      else
+        echo "  (not enough other cards yet for a clue)"
+      fi
+    fi
     echo "  -> $back"
     grade=""
     while [ -z "$grade" ]; do
@@ -533,6 +574,8 @@ case "${1:-status}" in
   drop|rm)            shift; cmd_drop "$@" ;;
   grade)              shift; cmd_grade "$@" ;;
   lesson-seen)        shift; cmd_lesson_seen "$@" ;;
+  lesson-progress)    shift; cmd_lesson_progress "$@" ;;
+  choices)            shift; cmd_choices "$@" ;;
   list|ls)            cmd_list ;;
   get)                read_cards | jq . ;;
   get-state)          read_state | jq . ;;
@@ -551,6 +594,6 @@ case "${1:-status}" in
   resume)             cmd_resume ;;
   on)                 cmd_on ;;
   off)                cmd_off ;;
-  -h|--help|help)     sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//' ;;
+  -h|--help|help)     sed -n '2,62p' "$0" | sed 's/^# \{0,1\}//' ;;
   *) echo "omarchy-recall: unknown command '${1}' (try --help)" >&2; exit 2 ;;
 esac

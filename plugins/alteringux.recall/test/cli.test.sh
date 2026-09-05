@@ -140,6 +140,23 @@ jq '.enabled=true | .prompt=null | .pauseUntilMs=0 | .dismissStreak=4 | .lessons
 "$CLI" tick
 [ "$(gs '.prompt.kind')" = "takeover" ] && ok "too many dismissals escalates a due prompt to a takeover" || bad "dismiss takeover" "$(cat "$STATE")"
 
+# ── seed-trivia: adds the curated set, idempotent on a second run ───────
+jq -n '{version:1,cards:[]}' > "$CARDS"
+out1="$("$CLI" seed-trivia)"
+n1="$(jq '.cards | length' "$CARDS")"
+echo "$out1" | grep -q "seeded $n1 new trivia" && ok "seed-trivia adds the curated trivia set" || bad "seed-trivia first run" "$out1 / count=$n1"
+[ "$n1" -gt 0 ] && ok "seed-trivia populated a non-empty deck" || bad "seed-trivia count" "$n1"
+
+out2="$("$CLI" seed-trivia)"
+n2="$(jq '.cards | length' "$CARDS")"
+[ "$n2" = "$n1" ] && ok "seed-trivia is a no-op on cards already present" || bad "seed-trivia idempotent count" "$n1 -> $n2"
+echo "$out2" | grep -q "already fully present" && ok "seed-trivia reports nothing-to-add on a repeat run" || bad "seed-trivia repeat message" "$out2"
+
+# a custom card with an unrelated id survives a reseed untouched
+"$CLI" add-quiz "my own question" "my own answer" --category custom >/dev/null
+"$CLI" seed-trivia >/dev/null
+[ "$(jq '[.cards[] | select(.front=="my own question")] | length' "$CARDS")" = "1" ] && ok "seed-trivia never touches unrelated existing cards" || bad "seed-trivia preserves custom" "$(cat "$CARDS")"
+
 # ── stats / list smoke ───────────────────────────────────────────────────
 "$CLI" stats | jq -e '.totalCards >= 1' >/dev/null && ok "stats returns a usable summary" || bad "stats" "$("$CLI" stats)"
 "$CLI" list >/dev/null && ok "list runs without error" || bad "list" "failed"

@@ -32,7 +32,13 @@ Item {
   function findCard(id) { return Model.findCard(root.cardsValue.cards, id) }
 
   // ---- lesson state -----------------------------------------------------
-  property int slideIndex: 0
+  // Slide position is persisted (hostWidget.stateValue.prompt.slideIndex) so
+  // a shell restart resumes an in-progress lesson instead of restarting it
+  // at slide 1. That initializer only matters at component creation --
+  // nextSlide() below owns slideIndex as plain local state from then on and
+  // pushes each step back to disk.
+  property int slideIndex: (hostWidget && hostWidget.stateValue.prompt && typeof hostWidget.stateValue.prompt.slideIndex === "number")
+    ? hostWidget.stateValue.prompt.slideIndex : 0
   readonly property var lessonCard: root.isLesson && root.promptCardIds.length ? root.findCard(root.promptCardIds[0]) : null
   readonly property int slideCount: root.lessonCard && root.lessonCard.slides ? root.lessonCard.slides.length : 0
   readonly property bool lastSlide: root.slideIndex >= root.slideCount - 1
@@ -43,32 +49,73 @@ Item {
     root.hostWidget.ackLesson()
   }
   function nextSlide() {
-    if (root.lastSlide) root.finishLesson()
-    else root.slideIndex += 1
+    if (root.lastSlide) { root.finishLesson(); return }
+    root.slideIndex += 1
+    if (root.hostWidget) root.hostWidget.setLessonSlide(root.slideIndex)
   }
 
   // ---- review state (checkin / takeover) --------------------------------
-  property int reviewIndex: 0
-  property int gradedCount: 0
+  // No local cursor into promptCardIds: the "current card" is always the
+  // first of promptCardIds that's still due right now. Grading persists to
+  // recall-cards.json and pushes the card's dueAt forward -- even "Again"
+  // goes 10 minutes out -- so a graded card drops out of this list on its
+  // own. That makes review resumable across a shell restart for free, with
+  // no separate progress counter to lose.
   property bool revealed: false
-  readonly property var reviewCard: (!root.isLesson && root.reviewIndex < root.promptCardIds.length)
-    ? root.findCard(root.promptCardIds[root.reviewIndex]) : null
-  readonly property bool reviewDone: !root.isLesson && root.promptCardIds.length > 0 && root.reviewIndex >= root.promptCardIds.length
+  property double nowMs: Date.now()
+  Timer { interval: 10000; repeat: true; running: root.mode !== "" && !root.isLesson; onTriggered: root.nowMs = Date.now() }
 
-  onPromptKeyChanged: {
-    root.slideIndex = 0
-    root.reviewIndex = 0
-    root.gradedCount = 0
-    root.revealed = false
+  readonly property var remainingIds: root.promptCardIds.filter(function (id) {
+    var c = root.findCard(id)
+    return c !== null && c.dueAt <= root.nowMs
+  })
+  readonly property var reviewCard: (!root.isLesson && root.remainingIds.length) ? root.findCard(root.remainingIds[0]) : null
+  readonly property int gradedCount: root.promptCardIds.length - root.remainingIds.length
+  readonly property bool reviewDone: !root.isLesson && root.promptCardIds.length > 0 && root.remainingIds.length === 0
+
+  // ---- multiple-choice clue, for when you need a nudge before Reveal ----
+  property bool clueLoading: false
+  property var clueOptions: []
+  readonly property bool clueShown: root.clueOptions.length > 0
+
+  function requestClue() {
+    if (!root.hostWidget || !root.reviewCard || root.clueLoading || root.clueShown) return
+    root.clueLoading = true
+    root.hostWidget.fetchChoices(root.reviewCard.id)
   }
+  function pickClue(text) {
+    root.revealed = true   // picking an option settles it either way — show the real answer
+  }
+  Connections {
+    target: root.hostWidget
+    function onLastChoicesChanged() {
+      if (!root.hostWidget || !root.reviewCard) return
+      if (root.hostWidget.lastChoicesForId !== root.reviewCard.id) return
+      root.clueOptions = root.hostWidget.lastChoices
+      root.clueLoading = false
+    }
+  }
+
+  function resetCardUi() {
+    root.revealed = false
+    root.clueOptions = []
+    root.clueLoading = false
+  }
+
+  // Same instance, new prompt (e.g. one checkin ends and another begins
+  // without the component being destroyed): reset the lesson cursor. A
+  // fresh component creation after a shell restart does NOT fire this (QML
+  // doesn't fire onXChanged for the initial value), so the persisted
+  // slideIndex above survives untouched.
+  onPromptKeyChanged: root.slideIndex = 0
+
+  readonly property string currentCardId: root.reviewCard ? root.reviewCard.id : ""
+  onCurrentCardIdChanged: root.resetCardUi()
 
   function reveal() { root.revealed = true }
   function gradeCurrent(g) {
     if (!root.hostWidget || !root.reviewCard) return
     root.hostWidget.gradeCard(root.reviewCard.id, g)
-    root.gradedCount += 1
-    root.reviewIndex += 1
-    root.revealed = false
   }
   function finishReview(engaged) {
     if (!root.hostWidget) return
@@ -198,7 +245,7 @@ Item {
             Text {
               width: parent.width
               visible: root.promptCardIds.length > 0
-              text: "Card " + Math.min(root.reviewIndex + 1, root.promptCardIds.length) + " of " + root.promptCardIds.length
+              text: "Card " + Math.min(root.gradedCount + 1, root.promptCardIds.length) + " of " + root.promptCardIds.length
               color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
@@ -231,6 +278,55 @@ Item {
               font.pixelSize: Style.font.body
             }
 
+            // ---- multiple-choice clue --------------------------------
+            Text {
+              width: parent.width
+              visible: root.clueLoading
+              text: "Fetching a clue…"
+              color: Kit.Palette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+            Column {
+              width: parent.width
+              visible: root.clueShown && !root.revealed
+              spacing: Style.space(6)
+
+              Repeater {
+                model: root.clueOptions
+
+                Rectangle {
+                  id: clueRow
+                  required property string modelData
+                  width: parent.width
+                  height: Style.space(30)
+                  radius: Style.cornerRadius
+                  color: clueHover.containsMouse
+                    ? Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.12)
+                    : Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.06)
+
+                  Text {
+                    anchors.fill: parent
+                    anchors.leftMargin: Style.space(10)
+                    anchors.rightMargin: Style.space(10)
+                    verticalAlignment: Text.AlignVCenter
+                    text: clueRow.modelData
+                    elide: Text.ElideRight
+                    color: Color.bar.text
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+                  }
+                  MouseArea {
+                    id: clueHover
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.pickClue(clueRow.modelData)
+                  }
+                }
+              }
+            }
+
             Flow {
               width: parent.width
               spacing: Style.space(8)
@@ -241,6 +337,13 @@ Item {
                 foreground: Color.bar.text
                 bordered: true
                 onClicked: root.reveal()
+              }
+              Button {
+                visible: root.reviewCard !== null && !root.revealed && !root.clueShown && !root.clueLoading
+                text: "Clue"
+                foreground: Kit.Palette.info
+                bordered: true
+                onClicked: root.requestClue()
               }
               Button {
                 visible: root.reviewCard !== null && root.revealed

@@ -71,6 +71,17 @@ test("parseState: a prompt missing cardIds is dropped, not trusted", () => {
   assert.equal(s.prompt, null)
 })
 
+test("parseState: a lesson prompt's slideIndex survives the round-trip (shell-restart resume)", () => {
+  const s = Model.parseState(JSON.stringify({ prompt: { kind: "lesson", cardIds: ["seed-loci"], reason: "daily", slideIndex: 2 } }))
+  assert.equal(s.prompt.slideIndex, 2)
+})
+
+test("parseState: an invalid slideIndex (negative, non-number, missing) is dropped rather than trusted", () => {
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "lesson", cardIds: ["x"], slideIndex: -1 } })).prompt.slideIndex, undefined)
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "lesson", cardIds: ["x"], slideIndex: "2" } })).prompt.slideIndex, undefined)
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "lesson", cardIds: ["x"] } })).prompt.slideIndex, undefined)
+})
+
 // ── seed content ─────────────────────────────────────────────────────────
 
 test("defaultCards: seeds technique lessons and a trivia starter deck", () => {
@@ -279,6 +290,84 @@ test("rollDaily: streakDays increments on a consecutive day, resets otherwise", 
   assert.equal(consecutive.streakDays, 5)
   const gap = Model.rollDaily(state({ streakDays: 4, lastActiveDate: "2026-09-01" }), now)
   assert.equal(gap.streakDays, 1)
+})
+
+// ── trivia seed + merge ────────────────────────────────────────────────
+
+test("triviaSeedCards: a non-empty, offline, unique-id trivia set", () => {
+  const cards = Model.triviaSeedCards()
+  assert.ok(cards.length > 0)
+  assert.ok(cards.every((c) => c.kind === "quiz" && c.category === "trivia"))
+  const ids = cards.map((c) => c.id)
+  assert.equal(new Set(ids).size, ids.length)
+})
+
+test("mergeCards: appends only additions whose id isn't already present", () => {
+  const existing = [quiz({ id: "a" }), quiz({ id: "b" })]
+  const additions = [quiz({ id: "b" }), quiz({ id: "c" })]
+  const r = Model.mergeCards(existing, additions)
+  assert.equal(r.addedCount, 1)
+  assert.deepEqual(r.cards.map((c) => c.id), ["a", "b", "c"])
+})
+
+test("mergeCards: re-applying the same trivia seed twice is a no-op the second time", () => {
+  const seed = Model.triviaSeedCards()
+  const first = Model.mergeCards([], seed)
+  assert.equal(first.addedCount, seed.length)
+  const second = Model.mergeCards(first.cards, Model.triviaSeedCards())
+  assert.equal(second.addedCount, 0)
+  assert.equal(second.cards.length, first.cards.length)
+})
+
+// ── multiple-choice clue ─────────────────────────────────────────────────
+
+test("buildChoices: includes the correct answer, exactly once, at correctIndex", () => {
+  const target = quiz({ id: "t", back: "Correct", category: "trivia" })
+  const pool = [
+    target,
+    quiz({ id: "d1", back: "Wrong A", category: "trivia" }),
+    quiz({ id: "d2", back: "Wrong B", category: "trivia" }),
+    quiz({ id: "d3", back: "Wrong C", category: "misc" })
+  ]
+  const r = Model.buildChoices(target, pool, 4, () => 0.5)
+  assert.equal(r.options.filter((o) => o === "Correct").length, 1)
+  assert.equal(r.options[r.correctIndex], "Correct")
+  assert.equal(r.options.length, 4)
+})
+
+test("buildChoices: never duplicates a distractor's text, even across categories", () => {
+  const target = quiz({ id: "t", back: "Correct", category: "trivia" })
+  const pool = [
+    target,
+    quiz({ id: "d1", back: "Same Text", category: "trivia" }),
+    quiz({ id: "d2", back: "Same Text", category: "misc" }),
+    quiz({ id: "d3", back: "Unique", category: "misc" })
+  ]
+  const r = Model.buildChoices(target, pool, 4, () => 0.5)
+  const counts = {}
+  r.options.forEach((o) => { counts[o] = (counts[o] || 0) + 1 })
+  assert.ok(Object.values(counts).every((n) => n === 1), "no option repeats")
+})
+
+test("buildChoices: degrades to fewer options (never throws) when the deck is too small", () => {
+  const target = quiz({ id: "t", back: "Correct" })
+  const r = Model.buildChoices(target, [target], 4, () => 0.5)
+  assert.equal(r.options.length, 1)
+  assert.equal(r.options[0], "Correct")
+  assert.equal(r.correctIndex, 0)
+})
+
+test("buildChoices: prefers same-category distractors when there are enough", () => {
+  const target = quiz({ id: "t", back: "Correct", category: "trivia" })
+  const pool = [
+    target,
+    quiz({ id: "d1", back: "Same-cat A", category: "trivia" }),
+    quiz({ id: "d2", back: "Same-cat B", category: "trivia" }),
+    quiz({ id: "d3", back: "Other-cat", category: "misc" })
+  ]
+  const r = Model.buildChoices(target, pool, 3, () => 0)
+  assert.ok(r.options.includes("Same-cat A") || r.options.includes("Same-cat B"))
+  assert.ok(!r.options.includes("Other-cat"), "same-category distractors are preferred over other-category ones")
 })
 
 // ── stats ────────────────────────────────────────────────────────────────

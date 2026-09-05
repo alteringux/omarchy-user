@@ -86,6 +86,31 @@ BarWidget {
     })
   }
 
+  // ---- multiple-choice clue lookup (read-only, doesn't touch state) --
+  property var lastChoices: []
+  property string lastChoicesForId: ""
+
+  Process {
+    id: choicesProc
+    running: false
+    property string forId: ""
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var data
+        try { data = JSON.parse(text || "{}") } catch (e) { data = {} }
+        root.lastChoices = Array.isArray(data.options) ? data.options : []
+        root.lastChoicesForId = choicesProc.forId
+      }
+    }
+  }
+  function fetchChoices(id) {
+    if (!id || choicesProc.running) return
+    choicesProc.forId = String(id)
+    choicesProc.command = [root.scriptPath, "choices", String(id), "4"]
+    choicesProc.running = true
+  }
+
   function setEnabled(on) { runVerb([on ? "on" : "off"]) }
   function forceCheckin() { runVerb(["checkin"]) }
   function pauseFor(minutes) { runVerb(["pause", String(Math.max(1, Math.round(minutes))) + "m"]) }
@@ -98,6 +123,7 @@ BarWidget {
   function dropCard(id) { if (id) runVerb(["drop", String(id)]) }
   function gradeCard(id, gradeName) { if (id) runVerb(["grade", String(id), String(gradeName)]) }
   function lessonSeen(id) { if (id) runVerb(["lesson-seen", String(id)]) }
+  function setLessonSlide(idx) { runVerb(["lesson-progress", String(Math.max(0, Math.round(idx)))]) }
 
   function ackLesson() { runVerb(["ack", "lesson"]) }
   function ackReview(kind, engaged) {

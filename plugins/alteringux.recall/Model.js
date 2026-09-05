@@ -270,6 +270,13 @@ function parseState(json) {
     var prompt = null
     if (o.prompt && typeof o.prompt === "object" && Array.isArray(o.prompt.cardIds)) {
       prompt = { kind: clampStr(o.prompt.kind, ""), cardIds: o.prompt.cardIds.filter(function (s) { return typeof s === "string" }), reason: clampStr(o.prompt.reason, "") }
+      // Current slide of an in-progress lesson, persisted so a shell
+      // restart resumes the lesson instead of restarting it at slide 1.
+      // Optional: absent for non-lesson prompts and for state written
+      // before this field existed.
+      if (typeof o.prompt.slideIndex === "number" && isFinite(o.prompt.slideIndex) && o.prompt.slideIndex >= 0) {
+        prompt.slideIndex = Math.floor(o.prompt.slideIndex)
+      }
     }
     return {
       version: 1,

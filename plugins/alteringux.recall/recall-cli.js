@@ -44,6 +44,13 @@ switch (op) {
     out = d
     break
   }
+  case "choices": {
+    const cards = cardsIn(p).cards
+    const card = Model.findCard(cards, String(p.id))
+    const n = typeof p.n === "number" ? p.n : 4
+    out = card ? Model.buildChoices(card, cards, n) : { options: [], correctIndex: -1 }
+    break
+  }
   case "top": {
     const now = nowIn(p)
     const n = typeof p.n === "number" ? p.n : 999
@@ -62,6 +69,12 @@ switch (op) {
     const now = nowIn(p)
     const cards = Model.defaultCards().cards.map((c) => { c.createdAt = now; return c })
     out = { cards: cards }
+    break
+  }
+  case "seed-trivia": {
+    const now = nowIn(p)
+    const additions = Model.triviaSeedCards().map((c) => { c.createdAt = now; return c })
+    out = Model.mergeCards(cardsIn(p).cards, additions)
     break
   }
   case "add-quiz":
