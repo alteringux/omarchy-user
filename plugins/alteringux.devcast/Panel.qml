@@ -75,7 +75,7 @@ Panel {
 
           Kit.PanelHead {
             width: parent.width
-            glyph: "" // nf-fa-film
+            glyph: "󰿎" // nf-md-movie_open
             title: "Devcast"
             meta: root.building
               ? "BUILDING…"

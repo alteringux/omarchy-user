@@ -18,7 +18,7 @@ BarWidget {
   readonly property int castCount: (indexLoaded && root.index) ? (root.index.count || 0) : 0
   readonly property var latest: (indexLoaded && root.index) ? root.index.latest : null
 
-  readonly property string glyph: "" // nf-fa-film
+  readonly property string glyph: "󰿎" // nf-md-movie_open
   readonly property string displayText: castCount > 0 ? (glyph + "  " + castCount) : glyph
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
