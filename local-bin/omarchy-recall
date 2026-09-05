@@ -28,11 +28,22 @@
 #   omarchy-recall checkin                       raise a check-in now (keybind target)
 #   omarchy-recall ack <lesson|checkin|takeover> [--engaged] [--snooze <min>]
 #                                                 respond to the on-screen prompt
+#   omarchy-recall seed-trivia                   add the built-in curated trivia
+#                                                 set (offline, no Featherless) —
+#                                                 safe to re-run, skips duplicates
 #   omarchy-recall generate-trivia <n> [--category X]   Featherless-generated
 #                                                 trivia cards via llm-blurb
 #   omarchy-recall generate-vocab <n>            Featherless-generated English
 #                                                 vocabulary cards (word / definition
 #                                                 + example), skips words already in deck
+#   omarchy-recall generate-technique <n>        Featherless-generated memory/study
+#                                                 technique lessons (title + 4 slides),
+#                                                 skips titles already taught
+#   omarchy-recall refresh-content [v] [t] [k]   run all three generators at once —
+#                                                 v vocab (default 2), t trivia (default 2),
+#                                                 k technique lessons (default 1); tolerates
+#                                                 one generator failing without blocking the
+#                                                 others (cron/timer target)
 #   omarchy-recall review                        interactive terminal session: walks
 #                                                 unseen lessons + due quizzes one at a
 #                                                 time (front, reveal, self-grade)
@@ -289,6 +300,19 @@ cmd_ack() {
   echo "ack $kind"
 }
 
+cmd_seed_trivia() {
+  local result added
+  result="$(jq -n --argjson cards "$(read_cards)" --argjson now "$(now_ms)" \
+        '{cards:$cards.cards, now:$now}' | engine seed-trivia)"
+  added="$(jq -r '.addedCount' <<<"$result")"
+  jq '{version:1, cards:.cards}' <<<"$result" | put_cards
+  if [ "$added" -gt 0 ]; then
+    echo "seeded $added new trivia card(s)"
+  else
+    echo "trivia seed already fully present — nothing to add"
+  fi
+}
+
 cmd_generate_trivia() {
   local n="${1:-10}"; shift || true
   local category="general knowledge"
@@ -330,6 +354,43 @@ cmd_generate_vocab() {
         '{cards:$cards.cards, items:$items, now:$now, idPrefix:$prefix}' \
     | engine add-quiz-batch | jq '{version:1, cards:.cards}' | put_cards
   echo "generated $(jq 'length' <<<"$items") vocabulary cards"
+}
+
+cmd_generate_technique() {
+  local n="${1:-1}"
+  have llm-blurb || die "llm-blurb not found on PATH (Featherless helper)"
+
+  local existing exclude_clause=""
+  existing="$(jq -r '[.cards[]? | select(.kind=="lesson") | .title] | join(", ")' <<<"$(read_cards)")"
+  [ -n "$existing" ] && exclude_clause=" Do not repeat any of these techniques already taught: $existing."
+
+  local prompt raw items count i title
+  prompt="Write $n short, practical memory/learning-technique lessons (mnemonic devices, study methods, focus/attention tricks, note-taking systems, and the like) in a terse, no-fluff teaching voice. Each lesson has a short title and exactly 4 slides, each slide one or two punchy sentences, building toward a concrete technique the reader can apply immediately — the last slide should say why/when it matters or how it contrasts with a related technique.$exclude_clause Return ONLY a JSON object of the shape {\"items\":[{\"title\":\"...\",\"slides\":[\"...\",\"...\",\"...\",\"...\"]}]} with exactly $n items, nothing else."
+  raw="$(llm-blurb --json --max-tokens 1500 "$prompt")" || die "llm-blurb failed"
+  items="$(jq -c '[.items[]? | select(.title and (.slides|type=="array") and (.slides|length)>0)]' <<<"$raw" 2>/dev/null)" || die "could not parse technique JSON from model"
+  count="$(jq 'length' <<<"$items" 2>/dev/null || echo 0)"
+  [ "$count" -gt 0 ] 2>/dev/null || die "model returned no usable technique lessons"
+
+  local added=0 slides_arr
+  for ((i = 0; i < count; i++)); do
+    title="$(jq -r ".[$i].title" <<<"$items")"
+    slides_arr=()
+    mapfile -t slides_arr < <(jq -r ".[$i].slides[]" <<<"$items")
+    [ -n "$title" ] && [ "${#slides_arr[@]}" -gt 0 ] || continue
+    cmd_add_lesson "$title" "${slides_arr[@]}" >/dev/null
+    added=$((added + 1))
+  done
+  echo "generated $added technique lesson(s)"
+}
+
+cmd_refresh_content() {
+  local vocab_n="${1:-2}" trivia_n="${2:-2}" tech_n="${3:-1}"
+  local ok=0 fail=0
+  ( cmd_generate_vocab "$vocab_n" ) && ok=$((ok + 1)) || { fail=$((fail + 1)); echo "vocab generation failed" >&2; }
+  ( cmd_generate_trivia "$trivia_n" ) && ok=$((ok + 1)) || { fail=$((fail + 1)); echo "trivia generation failed" >&2; }
+  ( cmd_generate_technique "$tech_n" ) && ok=$((ok + 1)) || { fail=$((fail + 1)); echo "technique generation failed" >&2; }
+  echo "content refresh: $ok/3 generators succeeded"
+  [ "$fail" -eq 0 ]
 }
 
 cmd_review() {
@@ -480,8 +541,11 @@ case "${1:-status}" in
   tick)               do_tick ;;
   checkin)            cmd_checkin ;;
   ack)                shift; cmd_ack "$@" ;;
+  seed-trivia)        cmd_seed_trivia ;;
   generate-trivia)    shift; cmd_generate_trivia "$@" ;;
   generate-vocab)     shift; cmd_generate_vocab "$@" ;;
+  generate-technique) shift; cmd_generate_technique "$@" ;;
+  refresh-content)    shift; cmd_refresh_content "$@" ;;
   review)             cmd_review ;;
   pause)              shift; cmd_pause "$@" ;;
   resume)             cmd_resume ;;

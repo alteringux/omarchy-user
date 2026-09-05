@@ -145,30 +145,51 @@ function seedCards() {
     ])
   ]
 
-  var trivia = [
-    ["geography", "What is the smallest country in the world by area?", "Vatican City"],
-    ["geography", "Which river is the longest in the world?", "The Nile (by most measures)"],
-    ["geography", "What is the capital of Australia?", "Canberra (not Sydney)"],
-    ["science", "What is the powerhouse of the cell?", "The mitochondrion"],
-    ["science", "What gas do plants absorb that animals exhale?", "Carbon dioxide"],
-    ["science", "What is the chemical symbol for gold?", "Au"],
-    ["history", "In what year did the Berlin Wall fall?", "1989"],
-    ["history", "Who was the first person to walk on the Moon?", "Neil Armstrong"],
-    ["history", "Which empire built Machu Picchu?", "The Inca Empire"],
-    ["language", "What is the plural of \"octopus\" preferred by classicists?", "Octopuses (octopodes is the Greek-derived form; \"octopi\" is a common myth)"],
-    ["language", "What does the Latin phrase \"carpe diem\" literally mean?", "Seize the day"],
-    ["art", "Who painted \"The Starry Night\"?", "Vincent van Gogh"],
-    ["art", "Which composer was deaf for much of his later career?", "Ludwig van Beethoven"],
-    ["misc", "How many bones are in the adult human body?", "206"],
-    ["misc", "What is the hardest natural substance on Earth?", "Diamond"]
-  ]
+  return lessons.concat(triviaSeedCards())
+}
 
-  var cards = lessons.slice()
-  for (var i = 0; i < trivia.length; i++) {
-    cards.push(quizSeed("seed-trivia-" + i, "trivia", trivia[i][1], trivia[i][2]))
-    cards[cards.length - 1].category = trivia[i][0] === "trivia" ? "trivia" : "trivia"
-  }
-  return cards
+// The curated, offline trivia starter set — no Featherless/network needed.
+// Kept separate from seedCards() so it can also be re-applied on its own
+// (see mergeCards / the CLI's `seed-trivia` verb) to top up an existing
+// deck that predates this list or is missing some of it, without touching
+// lessons or anything the user has added.
+var TRIVIA_SEED = [
+  ["geography", "What is the smallest country in the world by area?", "Vatican City"],
+  ["geography", "Which river is the longest in the world?", "The Nile (by most measures)"],
+  ["geography", "What is the capital of Australia?", "Canberra (not Sydney)"],
+  ["science", "What is the powerhouse of the cell?", "The mitochondrion"],
+  ["science", "What gas do plants absorb that animals exhale?", "Carbon dioxide"],
+  ["science", "What is the chemical symbol for gold?", "Au"],
+  ["history", "In what year did the Berlin Wall fall?", "1989"],
+  ["history", "Who was the first person to walk on the Moon?", "Neil Armstrong"],
+  ["history", "Which empire built Machu Picchu?", "The Inca Empire"],
+  ["language", "What is the plural of \"octopus\" preferred by classicists?", "Octopuses (octopodes is the Greek-derived form; \"octopi\" is a common myth)"],
+  ["language", "What does the Latin phrase \"carpe diem\" literally mean?", "Seize the day"],
+  ["art", "Who painted \"The Starry Night\"?", "Vincent van Gogh"],
+  ["art", "Which composer was deaf for much of his later career?", "Ludwig van Beethoven"],
+  ["misc", "How many bones are in the adult human body?", "206"],
+  ["misc", "What is the hardest natural substance on Earth?", "Diamond"],
+  ["geography", "What is the longest mountain range in the world?", "The Andes"],
+  ["science", "What planet has the most moons in our solar system?", "Saturn"],
+  ["history", "Which ancient wonder of the world still stands today?", "The Great Pyramid of Giza"],
+  ["language", "What does \"etc.\" stand for in Latin?", "Et cetera (\"and the rest\")"],
+  ["misc", "What is the most spoken native language in the world?", "Mandarin Chinese"]
+]
+
+function triviaSeedCards() {
+  return TRIVIA_SEED.map(function (row, i) {
+    return quizSeed("seed-trivia-" + i, "trivia", row[1], row[2])
+  })
+}
+
+// Appends any of `additions` whose id isn't already present in `cards` —
+// the general "top up a deck without duplicating" merge used to (re)apply
+// a seed set (e.g. trivia) after the initial seed, idempotently.
+function mergeCards(cards, additions) {
+  var seen = {}
+  for (var i = 0; i < cards.length; i++) seen[cards[i].id] = true
+  var added = additions.filter(function (c) { return !seen[c.id] })
+  return { cards: cards.concat(added), addedCount: added.length }
 }
 
 // ── parsing (tolerant — every reader gets a total, clamped shape) ────────
@@ -285,6 +306,46 @@ function unseenLessons(cards) {
 
 function topDue(cards, now, n) {
   return dueQuizzes(cards, now).slice(0, n)
+}
+
+function shuffle(arr, rng) {
+  rng = rng || Math.random
+  var a = arr.slice()
+  for (var i = a.length - 1; i > 0; i--) {
+    var j = Math.floor(rng() * (i + 1))
+    var tmp = a[i]; a[i] = a[j]; a[j] = tmp
+  }
+  return a
+}
+
+// Multiple-choice "clue" for a quiz card: the correct answer plus up to
+// n-1 distractors pulled from other quiz cards' back text (same category
+// preferred, any other category as a fallback), all shuffled together.
+// Pure and total: with too few other cards to draw distractors from it just
+// returns fewer options — it never throws and never repeats the same
+// answer text twice. `rng` is injectable (defaults to Math.random) so
+// shuffling is deterministic under test.
+function buildChoices(card, cards, n, rng) {
+  n = n || 4
+  var pool = cards.filter(function (c) {
+    return c.kind === "quiz" && c.id !== card.id && typeof c.back === "string" && c.back !== card.back
+  })
+  var sameCategory = shuffle(pool.filter(function (c) { return c.category === card.category }), rng)
+  var otherCategory = shuffle(pool.filter(function (c) { return c.category !== card.category }), rng)
+  var ordered = sameCategory.concat(otherCategory)
+
+  var seen = {}
+  seen[card.back] = true
+  var distractors = []
+  for (var i = 0; i < ordered.length && distractors.length < n - 1; i++) {
+    var back = ordered[i].back
+    if (seen[back]) continue
+    seen[back] = true
+    distractors.push(back)
+  }
+
+  var options = shuffle([card.back].concat(distractors), rng)
+  return { options: options, correctIndex: options.indexOf(card.back) }
 }
 
 // ── SM-2-lite grading ───────────────────────────────────────────────────
@@ -501,10 +562,12 @@ if (typeof module !== "undefined" && module.exports) {
     defaultConfig: defaultConfig, defaultCards: defaultCards, defaultState: defaultState,
     parseCards: parseCards, parseConfig: parseConfig, parseState: parseState,
     findCard: findCard, dueQuizzes: dueQuizzes, unseenLessons: unseenLessons, topDue: topDue,
+    buildChoices: buildChoices,
     grade: grade, gradeCard: gradeCard,
     dateKey: dateKey, rollDaily: rollDaily,
     nextIntervalMs: nextIntervalMs, decide: decide,
     addQuizCard: addQuizCard, addLessonCard: addLessonCard, dropCard: dropCard, markLessonSeen: markLessonSeen,
+    triviaSeedCards: triviaSeedCards, mergeCards: mergeCards,
     stats: stats, formatDue: formatDue
   }
 }
