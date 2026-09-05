@@ -13,10 +13,10 @@ function state(over) {
 
 // ── catalogue ────────────────────────────────────────────────────────────
 
-test("catalogue: exactly 11 pets, all with distinct ids and full phrase banks", () => {
-  assert.equal(Model.PETS.length, 11)
+test("catalogue: exactly 12 pets, all with distinct ids and full phrase banks", () => {
+  assert.equal(Model.PETS.length, 12)
   const ids = Model.PETS.map((p) => p.id)
-  assert.equal(new Set(ids).size, 11)
+  assert.equal(new Set(ids).size, 12)
   for (const pet of Model.PETS) {
     assert.ok(pet.glyph && pet.glyph.length > 0, pet.id + " glyph")
     assert.ok(pet.tagline && pet.tagline.length > 0, pet.id + " tagline")

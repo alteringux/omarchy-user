@@ -176,6 +176,20 @@ var PETS = [
     lowBattery: "Low power looks familiar. I run on a sunbeam and vibes. Try a charger instead.",
     longIdle: "I stayed exactly where you left me. Reptiles are efficient like that.",
     milestone: "That's a lot of pokes for a creature that values stillness this much."
+  },
+  {
+    id: "hamster", name: "Hamster", glyph: "🐹", tone: "positive",
+    tagline: "Runs its wheel, judges your pace.",
+    voice: function (s) { return s + " *chomp chomp*"; },
+    greet: ["*pops up out of the wheel, cheeks puffed.* Oh. You're here.", "*cheeks bulge suspiciously.* Hi. I was saving that."],
+    poke: ["*squeezes shut like a stress ball, then wiggles back.*", "Mm. Cheek-approved.", "*files the pat away in a hidden stash.*"],
+    feed: ["*cheeks instantly, magically, impossibly full.*"],
+    play: ["*does three full wheel laps at top speed, then stops dead.*"],
+    sleepy: "*curls into a ball around its tail. It has one tail. It has one tail.*",
+    wake: "*one rapid blink; the wheel is already spinning.*",
+    lowBattery: "Low battery means the wheel slows down. We are all the wheel.",
+    longIdle: "The wheel got quiet while you were away. I kept time for you.",
+    milestone: "A hamster can only be patted so many times before it hides in the hay."
   }
 ]
 
