@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.deskpet",
+  "name": "Desk Pet",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A small companion that overlooks your desktop from a floating overlay: pick from 11 pets, pet/feed/play with it, watch it doze off when idle, and get unsolicited Clippy-style tips in its speech bubble. Optionally let it actually glance at your screen (via a vision AI) and comment on what's there. Bar icon opens stats and settings.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Desk Pet",
+    "description": "Mood/hunger indicator for your floating desktop pet; click for the settings panel (pick a pet, feed, play, mute).",
+    "category": "Fun",
+    "allowMultiple": false
+  }
+}

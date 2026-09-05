@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# deskpet-look -- one-shot screen glance + in-character comment, via
+# Featherless's Qwen3-VL vision model. Used by alteringux.deskpet's floating
+# pet when the (opt-in, default-off) "let it look at your screen" setting is
+# on: grabs a screenshot, downscales it, sends it off with a system prompt
+# describing the pet's personality, and prints back one short line.
+#
+# This sends a downscaled copy of your actual screen content to a third-party
+# API (Featherless) every time it runs. It only runs when the user has
+# explicitly enabled screen-watch in the Desk Pet settings panel.
+#
+# Usage: deskpet-look --system "SYSTEM PROMPT TEXT" [--max-tokens N] [--timeout N]
+#
+# On ANY failure (no key, no grim/magick/jq, capture failure, curl failure,
+# empty reply) prints one reason line to stderr and exits non-zero *quietly*
+# -- the caller just skips this ambient beat and falls back to its own canned
+# lines, same contract as llm-blurb.
+#
+# Environment:
+#   FEATHERLESS_API_KEY   falls back to ~/.config/featherless/key
+#   DESKPET_LOOK_MODEL    override the vision model (default Qwen/Qwen3-VL-30B-A3B-Instruct)
+#
+# Exit codes: 0 ok | 2 bad args | 3 no key | 4 capture/network failure | 5 empty reply
+set -uo pipefail
+
+API_URL="https://api.featherless.ai/v1/chat/completions"
+MODEL="${DESKPET_LOOK_MODEL:-Qwen/Qwen3-VL-30B-A3B-Instruct}"
+system=""
+max_tokens=70
+timeout=35
+retries=3
+backoff=(0 3 8)
+
+while (($#)); do
+  case "$1" in
+    --system)     system="${2:-}"; shift 2 ;;
+    --max-tokens) max_tokens="${2:-}"; shift 2 ;;
+    --timeout)    timeout="${2:-}"; shift 2 ;;
+    *)            echo "deskpet-look: unknown arg $1" >&2; exit 2 ;;
+  esac
+done
+[[ -z "$system" ]] && { echo "deskpet-look: --system is required" >&2; exit 2; }
+
+key="${FEATHERLESS_API_KEY:-}"
+[[ -z "$key" && -r "$HOME/.config/featherless/key" ]] && key="$(<"$HOME/.config/featherless/key")"
+key="${key//[$'\r\n\t ']/}"
+[[ -z "$key" ]] && { echo "deskpet-look: no Featherless API key" >&2; exit 3; }
+
+for bin in grim magick jq curl; do
+  command -v "$bin" >/dev/null || { echo "deskpet-look: $bin not found" >&2; exit 4; }
+done
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+grim "$work/full.png" 2>/dev/null || { echo "deskpet-look: screenshot capture failed" >&2; exit 4; }
+magick "$work/full.png" -resize 900x -quality 55 "$work/small.jpg" 2>/dev/null \
+  || { echo "deskpet-look: downscale failed" >&2; exit 4; }
+
+b64=$(base64 -w0 "$work/small.jpg")
+
+payload=$(jq -n \
+  --arg model "$MODEL" --arg system "$system" --arg b64 "$b64" --argjson max_tokens "$max_tokens" \
+  '{model: $model, max_tokens: $max_tokens, temperature: 0.9,
+    messages: [
+      {role: "system", content: $system},
+      {role: "user", content: [
+        {type: "text", text: "Here is my screen right now."},
+        {type: "image_url", image_url: {url: ("data:image/jpeg;base64," + $b64)}}
+      ]}
+    ]}') || { echo "deskpet-look: failed to build request payload" >&2; exit 4; }
+
+resp=""
+for i in $(seq 0 $((retries - 1))); do
+  [[ $i -gt 0 ]] && sleep "${backoff[$i]}"
+  resp=$(curl -s -m "$timeout" -w '\n%{http_code}' "$API_URL" \
+    -H "Authorization: Bearer $key" -H "Content-Type: application/json" -d "$payload")
+  code="${resp##*$'\n'}"
+  body="${resp%$'\n'*}"
+  [[ "$code" == "200" ]] && { resp="$body"; break; }
+  [[ "$code" != "429" ]] && { resp=""; echo "deskpet-look: HTTP $code: $body" >&2; break; }
+  resp=""
+done
+[[ -z "$resp" ]] && exit 4
+
+line=$(printf '%s' "$resp" | jq -r '.choices[0].message.content // empty' 2>/dev/null)
+[[ -z "$line" ]] && { echo "deskpet-look: no content in response" >&2; exit 5; }
+
+line=$(printf '%s' "$line" | tr '\n' ' ' | sed -E 's/^[[:space:]]+|[[:space:]]+$//g')
+printf '%s\n' "${line:0:220}"
