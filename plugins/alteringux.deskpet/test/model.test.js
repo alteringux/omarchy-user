@@ -247,6 +247,12 @@ test("pickAmbientLine: falls back to a voiced generic tip when nothing else appl
   assert.equal(line, pet.voice(Model.CLIPPY_TIPS[0]))
 })
 
+test("pickZoomLine: comes from the shared pool, wrapped in the pet's own voice()", () => {
+  const fox = Model.petById("fox")
+  const line = Model.pickZoomLine(fox, 0)
+  assert.ok(Model.ZOOM_LINES.some((z) => line === fox.voice(z)), "wrapped zoom line matches one entry")
+})
+
 test("sleepyLine / wakeLine return the pet's own singleton lines", () => {
   const pet = Model.petById("penguin")
   assert.equal(Model.sleepyLine(pet), pet.sleepy)

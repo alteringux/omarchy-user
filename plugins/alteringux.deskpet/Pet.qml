@@ -270,14 +270,42 @@ Item {
       readonly property string roamMode: root.state.roamMode || "off"
       property bool roamed: false
       property bool facingLeft: false
+      property bool moving: false
 
       function roamSpeedPxPerSec() { return petContainer.roamMode === "gallop" ? 220 : 70 }
       function roamPauseMs() {
         return petContainer.roamMode === "gallop" ? (400 + Math.random() * 700) : (1500 + Math.random() * 2500)
       }
 
-      NumberAnimation { id: roamMoveX; target: petContainer; property: "x"; easing.type: Easing.Linear }
+      NumberAnimation { id: roamMoveX; target: petContainer; property: "x"; easing.type: Easing.Linear; onStopped: petContainer.moving = false }
       NumberAnimation { id: roamMoveY; target: petContainer; property: "y"; easing.type: Easing.Linear }
+
+      // ---- gimmicky "in motion" flourishes ---------------------------
+      // Purely decorative: a little dust/motion-line trail kicked up behind
+      // it while a leg is in flight, gallop kicking up more and faster than
+      // a walk. Reuses the same particleComponent the poke/feed/play bursts
+      // use, just with different glyphs and a downward drift instead of up.
+      Timer {
+        id: dustTimer
+        running: petContainer.moving
+        repeat: true
+        interval: petContainer.roamMode === "gallop" ? 180 : 420
+        onTriggered: petContainer.spawnDust()
+      }
+
+      function spawnDust() {
+        var gallop = petContainer.roamMode === "gallop"
+        var trailX = hitBox.width / 2 + (petContainer.facingLeft ? 1 : -1) * (14 + Math.random() * 6)
+        var startY = hitBox.height * 0.7 + (Math.random() * 8 - 4)
+        particleComponent.createObject(hitBox, {
+          text: gallop ? "💨" : "·",
+          "font.pixelSize": gallop ? Style.space(14) : Style.space(10),
+          x: trailX,
+          y: startY,
+          opacity: 0.75,
+          targetY: startY + (gallop ? 10 : 4)
+        })
+      }
 
       Timer {
         id: roamTimer
@@ -304,9 +332,14 @@ Item {
           var duration = Math.max(300, Math.round((dist / petContainer.roamSpeedPxPerSec()) * 1000))
 
           petContainer.facingLeft = dx < 0
+          petContainer.moving = true
           roamMoveX.to = targetX; roamMoveX.duration = duration
           roamMoveY.to = targetY; roamMoveY.duration = duration
           roamMoveX.restart(); roamMoveY.restart()
+
+          if (petContainer.roamMode === "gallop" && Math.random() < 0.3) {
+            root.say(Model.pickZoomLine(root.pet, Math.random() * 10000), 2200)
+          }
 
           petContainer.roamed = true
           roamTimer.interval = duration + petContainer.roamPauseMs()
@@ -420,8 +453,18 @@ Item {
           x: (hitBox.width - width) / 2 + hitBox.walkOffset
           y: (hitBox.height - height) / 2 + hitBox.bobOffset
           scale: hitBox.blinkScale
-          // Mirrors to face the direction it's currently roaming toward.
-          transform: Scale { xScale: petContainer.facingLeft ? -1 : 1; origin.x: glyphText.width / 2; origin.y: glyphText.height / 2 }
+          // Mirrors to face the direction it's currently roaming toward, and
+          // squashes/stretches cartoon-run style while a leg is in flight --
+          // gallop stretches harder than a walk does.
+          transform: Scale {
+            origin.x: glyphText.width / 2
+            origin.y: glyphText.height / 2
+            xScale: (petContainer.facingLeft ? -1 : 1)
+              * (petContainer.moving ? (petContainer.roamMode === "gallop" ? 1.3 : 1.12) : 1.0)
+            yScale: petContainer.moving ? (petContainer.roamMode === "gallop" ? 0.78 : 0.92) : 1.0
+            Behavior on xScale { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+            Behavior on yScale { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+          }
           opacity: root.liveState.asleep ? 0.6 : 1.0
           Behavior on opacity { NumberAnimation { duration: 400 } }
         }

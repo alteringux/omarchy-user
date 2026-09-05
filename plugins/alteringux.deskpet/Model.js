@@ -520,6 +520,12 @@ function screenLookSystemPrompt(pet) {
   ].join(" ")
 }
 
+// Short quip occasionally fired mid-gallop -- see Pet.qml's roam timer.
+// Shared pool wrapped in the pet's own voice(), same trick CLIPPY_TIPS uses,
+// so the 11-pet catalogue doesn't need a dedicated bank just for this.
+var ZOOM_LINES = ["Zoom!", "Gotta go fast.", "Wheee!", "*blurs past*", "Look at me go.", "Vroom."]
+function pickZoomLine(pet, seed) { return pet.voice(pick(ZOOM_LINES, seed)) }
+
 function pickAmbientLine(pet, context, seed) {
   var ctx = context || {}
   if (ctx.isLowBattery) return pet.lowBattery
@@ -533,7 +539,7 @@ function pickAmbientLine(pet, context, seed) {
 if (typeof module !== "undefined") {
   module.exports = {
     HOUR: HOUR, MIN: MIN,
-    PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS,
+    PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS, ZOOM_LINES: ZOOM_LINES,
     POKE_STREAK_WINDOW_MS: POKE_STREAK_WINDOW_MS, POKE_STREAK_ANNOY: POKE_STREAK_ANNOY,
     ACHIEVEMENTS: ACHIEVEMENTS, ACCESSORIES: ACCESSORIES, LEVEL_TITLES: LEVEL_TITLES, ROAM_MODES: ROAM_MODES,
     clamp: clamp,
@@ -544,6 +550,7 @@ if (typeof module !== "undefined") {
     moodLabel: moodLabel, ageDays: ageDays, minutesIdle: minutesIdle,
     pickGreeting: pickGreeting, pickPokeLine: pickPokeLine, pickFeedLine: pickFeedLine,
     pickPlayLine: pickPlayLine, sleepyLine: sleepyLine, wakeLine: wakeLine, pickAmbientLine: pickAmbientLine,
+    pickZoomLine: pickZoomLine,
     screenLookSystemPrompt: screenLookSystemPrompt,
     unlockedAchievementIds: unlockedAchievementIds, newlyUnlocked: newlyUnlocked,
     levelInfo: levelInfo, isAccessoryUnlocked: isAccessoryUnlocked, equipAccessory: equipAccessory,
