@@ -112,7 +112,7 @@ Item {
   }
 
   function _scheduleAmbient() {
-    var minutes = (root.state && root.state.speechFreqMin > 0) ? root.state.speechFreqMin : 6
+    var minutes = (root.state && root.state.speechFreqMin > 0) ? root.state.speechFreqMin : 3
     var jitter = 0.7 + Math.random() * 0.6
     ambientTimer.interval = Math.max(20000, Math.round(minutes * 60000 * jitter))
     ambientTimer.restart()

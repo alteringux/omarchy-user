@@ -180,10 +180,12 @@ var PETS = [
 ]
 
 // Shared Clippy-style tip pool. Each pet's `voice()` flavors these, so ten
-// pets don't need ten independent copies of the same content.
+// pets don't need ten independent copies of the same content. Three flavors
+// mixed into one pool (hotkeys, fun facts, jokes) so `pickAmbientLine`'s
+// fallback case doesn't need its own weighting logic -- it's still just
+// `pick(CLIPPY_TIPS, seed)`.
 var CLIPPY_TIPS = [
   "It looks like you're doing something. Would you like help? (I have none to offer, but I care.)",
-  "SUPER + comma opens the launcher, if you forgot again.",
   "Reminder: `omarchy reminder 15 \"thing\"` beats trying to remember it yourself.",
   "You've had a lot of windows open for a while. No judgment. Okay, some judgment.",
   "Fun fact: I don't do anything useful. But I am very cute.",
@@ -199,7 +201,52 @@ var CLIPPY_TIPS = [
   "I've been perched here calculating nothing this whole time. It's very peaceful.",
   "If you're stuck, rubber duck debugging works. I'm basically a rubber duck with opinions.",
   "Every window you close is a window you don't have to think about anymore. Freeing, right?",
-  "Right-click me any time for the settings panel. I promise I won't judge... much."
+  "Right-click me any time for the settings panel. I promise I won't judge... much.",
+
+  // ── hotkey tips (this machine's actual bindings) ──────────────────────────
+  "SUPER + SPACE opens the Omarchy menu, if you forgot again.",
+  "SUPER + RETURN opens a terminal. Fastest way in or out of trouble.",
+  "SUPER + T toggles a window between floating and tiled.",
+  "F4 takes a screenshot on this machine. No PrintScreen key required.",
+  "SUPER + H toggles Voxtype dictation, if your hands are busy but your mouth isn't.",
+  "SUPER + D looks up a word. Select one first, or press it cold to type one.",
+  "SUPER + ALT + X is a voice assistant. Just say what you want done.",
+  "SUPER + W hides a window instead of losing it. SUPER + SHIFT + S brings the last one back.",
+  "SUPER + SHIFT + ALT + R opens a spaced-repetition review, whenever you're ready to learn something.",
+  "SUPER + ALT + P starts or pauses a Pomodoro. Focus is one keypress away.",
+  "SUPER + ALT + Q pops an AI briefing notification. No talking required.",
+  "SUPER + SEMICOLON tightens up whatever text is selected into a leaner prompt.",
+  "SUPER + comma dismisses your last notification. Handy when they pile up.",
+  "SUPER + CTRL + comma silences notifications entirely, if you need the quiet.",
+  "SUPER + SHIFT + ALT + K opens Recall's panel, for a quick look at what's due.",
+
+  // ── fun facts ──────────────────────────────────────────────────────────────
+  "Fun fact: the first computer bug was an actual moth, stuck in a relay in 1947.",
+  "Fun fact: \"debugging\" predates computers. Edison used the word in 1878.",
+  "Fun fact: an octopus has three hearts and blue blood.",
+  "Fun fact: honey never spoils. Archaeologists have found 3,000-year-old honey that's still edible.",
+  "Fun fact: bananas are berries, botanically. Strawberries aren't.",
+  "Fun fact: a group of flamingos is called a flamboyance.",
+  "Fun fact: QWERTY was laid out to slow typists down, not speed them up.",
+  "Fun fact: Wi-Fi doesn't actually stand for anything. It was just a catchy name.",
+  "Fun fact: Linus Torvalds originally wanted to call Linux \"Freax.\" We got lucky.",
+  "Fun fact: the first 1GB hard drive, in 1980, weighed about 250 kilograms.",
+  "Fun fact: an average cumulus cloud weighs around a million tons. It just floats anyway.",
+  "Fun fact: sharks predate trees by tens of millions of years.",
+
+  // ── jokes ──────────────────────────────────────────────────────────────────
+  "Why do programmers prefer dark mode? Because light attracts bugs.",
+  "There are 10 types of people: those who understand binary, and those who don't.",
+  "Why did the developer go broke? They used up all their cache.",
+  "A SQL query walks into a bar, walks up to two tables, and asks: \"Can I join you?\"",
+  "Why do Java developers wear glasses? Because they don't C#.",
+  "How many programmers does it take to change a lightbulb? None, that's a hardware problem.",
+  "Why was the computer cold? It left its Windows open.",
+  "I'd tell you a UDP joke, but you might not get it.",
+  "Why do programmers hate nature? Too many bugs, not enough documentation.",
+  "There's no place like 127.0.0.1.",
+  "I told my computer I needed a break. Now it won't stop sending me KitKat ads.",
+  "Why did the developer quit their job? They didn't get arrays."
 ]
 
 // ── achievements ─────────────────────────────────────────────────────────────
@@ -336,7 +383,7 @@ function defaultState() {
     totalPokes: 0,
     totalFeeds: 0,
     totalPlays: 0,
-    speechFreqMin: 6,
+    speechFreqMin: 3,
     bornMs: now,
     shiny: false,
     accessoryId: null,

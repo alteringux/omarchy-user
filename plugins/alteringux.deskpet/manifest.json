@@ -4,7 +4,7 @@
   "name": "Desk Pet",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "A small companion that overlooks your desktop from a floating overlay: pick from 11 pets, pet/feed/play with it, watch it doze off when idle, and get unsolicited Clippy-style tips in its speech bubble. Optionally let it actually glance at your screen (via a vision AI) and comment on what's there. Bar icon opens stats and settings.",
+  "description": "A small companion that overlooks your desktop from a floating overlay: pick from 11 pets, pet/feed/play with it, watch it doze off when idle, and get unsolicited chatter in its speech bubble -- hotkey tips, fun facts, and jokes, at a chattiness level you control. Optionally let it actually glance at your screen (via a vision AI) and comment on what's there. Bar icon opens stats and settings.",
   "kinds": [
     "bar-widget"
   ],

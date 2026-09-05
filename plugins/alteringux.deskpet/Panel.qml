@@ -19,7 +19,7 @@ Panel {
   readonly property var st: hostWidget ? hostWidget.liveState : Model.defaultState()
   readonly property var pet: hostWidget ? hostWidget.pet : Model.petById("cat")
   readonly property string mood: hostWidget ? hostWidget.mood : "content"
-  readonly property var speechPresets: [3, 6, 15]
+  readonly property var speechPresets: [1.5, 3, 6, 15]
   readonly property var level: hostWidget ? hostWidget.levelInfo : Model.levelInfo(Model.defaultState())
   readonly property var unlockedIds: hostWidget ? hostWidget.unlockedIds : []
 
@@ -272,7 +272,7 @@ Panel {
             model: root.speechPresets
             Button {
               required property var modelData
-              text: modelData <= 3 ? "Chatty" : (modelData <= 6 ? "Normal" : "Quiet")
+              text: modelData <= 1.5 ? "Very Chatty" : (modelData <= 3 ? "Chatty" : (modelData <= 6 ? "Normal" : "Quiet"))
               foreground: root.barForeground
               bordered: hostWidget && hostWidget.state.speechFreqMin === modelData
               onClicked: if (hostWidget) hostWidget.setSpeechFreq(modelData)
