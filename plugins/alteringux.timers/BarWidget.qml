@@ -149,6 +149,11 @@ BarWidget {
     usage.record("clear")
   }
 
+  // Forget one remembered label — the × on that chip in the panel. The CLI
+  // drops every completed entry with that label, so the chip disappears and
+  // the label's "running long" baseline is recomputed from what's left.
+  function forgetLabel(label) { root.runVerb(["forget", label]) }
+
   // ---- tick ----------------------------------------------------------
   // Only runs while the overlay is open — that's the only place elapsed
   // time is shown. Kick nowMs once on open so cards are current immediately.
@@ -173,6 +178,7 @@ BarWidget {
     function rename(id: string, label: string): void { root.renameEntry(id, label) }
     function pauseToggle(id: string): void { root.togglePauseEntry(id) }
     function clear(): void { root.clearEntries() }
+    function forgetLabel(label: string): void { root.forgetLabel(label) }
     function status(): string {
       return guard.call("ipc.status", function() {
         var now = Date.now()

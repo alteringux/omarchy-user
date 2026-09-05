@@ -13,6 +13,7 @@
 #   omarchy-timers pause-toggle <id>        pause a running / resume a paused timer
 #   omarchy-timers remove <id>              stop + fold into the completion log
 #   omarchy-timers clear                    fold every timer into the log, empty the list
+#   omarchy-timers forget <label>           drop every matching entry from the completion log
 #
 # OMARCHY_STATE_DIR overrides the state directory (used by test/cli.test.sh).
 set -euo pipefail
@@ -152,8 +153,18 @@ case "$cmd" in
     state_jq '.entries = []'
     ;;
 
+  forget)
+    label="${1-}"
+    trimmed="$(printf '%s' "$label" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -n "$trimmed" ] || exit 0
+    lc="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+    read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
+      .completed = ([ .completed[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
+    ' | write_json "$HISTORY_FILE"
+    ;;
+
   -h | --help | help)
-    sed -n '2,18p' "$0"
+    sed -n '2,19p' "$0"
     ;;
 
   *)
