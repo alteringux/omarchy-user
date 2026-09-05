@@ -33,6 +33,7 @@ o.bind("SUPER + ALT + O", "Score: open panel", "omarchy-shell -q alteringux.scor
 o.bind("SUPER + ALT + L", "Stocks: open panel", "omarchy-shell -q alteringux.stocks toggle")
 o.bind("SUPER + ALT + U", "Stopwatch: open panel", "omarchy-shell -q alteringux.stopwatch toggle")
 o.bind("SUPER + ALT + H", "Dashboard: open panel", "omarchy-shell -q shell toggle alteringux.dashboard")
+o.bind("SUPER + SHIFT + ALT + M", "Recall: open panel", "omarchy-shell -q alteringux.recall toggle")
 
 -- Conductor plugin (alteringux.conductor): runs whole "rituals" -- ordered
 -- sequences of every other alteringux plugin's CLI verb -- and shows a live
