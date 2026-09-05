@@ -16,6 +16,10 @@ var MIN = 60000
 var POKE_STREAK_WINDOW_MS = 4000
 var POKE_STREAK_ANNOY = 6
 
+// The "ages up a notch" milestone: the same 50-pat mark as the pat_pat_pat
+// achievement. See ageUp().
+var AGE_UP_POKE_THRESHOLD = 50
+
 // ── the catalogue ───────────────────────────────────────────────────────────
 // Ten pets, each with a glyph, an accent tone (keyed to Kit.Palette), a short
 // tagline shown under its name in the picker, and its own small phrase bank.
