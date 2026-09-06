@@ -28,7 +28,6 @@ Panel {
   readonly property bool importing: !!(hostWidget && hostWidget.importing)
   readonly property var catalog: (hostWidget && hostWidget.catalog) ? hostWidget.catalog : null
   readonly property var sessions: (root.catalog && root.catalog.recent) ? root.catalog.recent : []
-  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
 
   function open() {
     root.controller.show()
