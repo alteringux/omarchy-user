@@ -167,26 +167,15 @@ BarWidget {
     verticalPadding: 8.75
     onPressed: function (b) { root.togglePanel() }
 
-    // A pulsing dot pinned to the corner while a prompt waits unanswered — the
-    // widget's own opacity is a bound expression, so the pulse lives here.
-    Rectangle {
-      id: pulseDot
-      visible: root.promptKind !== ""
-      width: Math.max(5, Style.spaceReal(5))
-      height: width
-      radius: width / 2
-      color: root.promptKind === "takeover" ? Kit.Palette.negative : Kit.Palette.urgent
+    // A pulsing dot pinned to the corner while a prompt waits unanswered.
+    // Shared shape — see Kit.AttentionDot / alteringux.pulse.
+    Kit.AttentionDot {
       anchors.top: parent.top
       anchors.right: parent.right
       anchors.topMargin: Style.spaceReal(3)
       anchors.rightMargin: Style.spaceReal(2)
-
-      SequentialAnimation on opacity {
-        running: pulseDot.visible
-        loops: Animation.Infinite
-        NumberAnimation { to: 0.25; duration: 650; easing.type: Easing.InOutSine }
-        NumberAnimation { to: 1.0; duration: 650; easing.type: Easing.InOutSine }
-      }
+      active: root.promptKind !== ""
+      level: root.promptKind === "takeover" ? "critical" : "urgent"
     }
   }
 }
