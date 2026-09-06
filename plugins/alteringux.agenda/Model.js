@@ -132,16 +132,23 @@ function parseEvents(icsText) {
   var lines = unfoldLines(icsText)
   var events = []
   var cur = null
+  var inAlarm = false
 
   for (var i = 0; i < lines.length; i++) {
     var line = lines[i]
-    if (line === "BEGIN:VEVENT") { cur = { recurring: false }; continue }
+    if (line === "BEGIN:VEVENT") { cur = { recurring: false }; inAlarm = false; continue }
     if (line === "END:VEVENT") {
       if (cur && typeof cur.start === "number") events.push(finalizeEvent(cur))
       cur = null
+      inAlarm = false
       continue
     }
     if (!cur) continue
+    // VALARM is a VEVENT sub-component with its own SUMMARY/DESCRIPTION/
+    // LOCATION-like properties; skip it so it can't clobber the event.
+    if (line === "BEGIN:VALARM") { inAlarm = true; continue }
+    if (line === "END:VALARM") { inAlarm = false; continue }
+    if (inAlarm) continue
 
     var p = splitProperty(line)
     switch (p.name) {

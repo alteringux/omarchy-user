@@ -101,6 +101,20 @@ test("parseEvents pulls fields and defaults the end", () => {
   assert.equal(events[0].allDay, false)
 })
 
+test("parseEvents ignores VALARM sub-component properties", () => {
+  const cal =
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" +
+    "BEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:Standup\r\nLOCATION:HQ\r\n" +
+    "DTSTART:20260830T140000Z\r\n" +
+    "BEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:Alarm summary\r\n" +
+    "DESCRIPTION:Beep\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\n" +
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+  const events = Model.parseEvents(cal)
+  assert.equal(events.length, 1)
+  assert.equal(events[0].summary, "Standup")
+  assert.equal(events[0].location, "HQ")
+})
+
 test("parseEvents uses DURATION when DTEND is absent", () => {
   const events = Model.parseEvents(ics([
     { summary: "Sprint", start: "20260830T140000Z", duration: "PT90M" },
