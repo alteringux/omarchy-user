@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.glimpse",
+  "name": "Glimpse",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A visual / photographic-memory trainer. Wallhaven scene photos shown briefly, then recalled — first mode Spot the Change (study a scene, then click what changed in an altered copy). Drill on an adaptive difficulty ramp, or let scheduled scenes resurface on an SM-2 interval. Engine + state owned by ~/.local/bin/omarchy-glimpse.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Glimpse",
+    "description": "Scene-memory trainer: shows a streak / due count, reddens when a scheduled review is due; click for the panel. SUPER+SHIFT+ALT+G starts a drill round.",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}
