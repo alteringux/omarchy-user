@@ -131,3 +131,31 @@ test("parseVoiceMuted ignores unrecognised file contents", () => {
   assert.strictEqual(Model.parseVoiceMuted("on"), false)
   assert.strictEqual(Model.parseVoiceMuted("{}"), false)
 })
+
+test("parseChimeMode treats a missing / empty file as speak-mode", () => {
+  assert.strictEqual(Model.parseChimeMode(""), false)
+  assert.strictEqual(Model.parseChimeMode(null), false)
+  assert.strictEqual(Model.parseChimeMode(undefined), false)
+})
+
+test("parseChimeMode recognises the marker text, with trailing newline", () => {
+  assert.strictEqual(Model.parseChimeMode("chime"), true)
+  assert.strictEqual(Model.parseChimeMode("chime\n"), true)
+})
+
+test("parseChimeMode ignores unrecognised file contents", () => {
+  assert.strictEqual(Model.parseChimeMode("bell"), false)
+  assert.strictEqual(Model.parseChimeMode("muted"), false)
+})
+
+test("pausedEpochOf returns 0 for a running / missing / malformed state", () => {
+  assert.strictEqual(Model.pausedEpochOf(null), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100 }), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 0 }), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: "x" }), 0)
+})
+
+test("pausedEpochOf returns the floored positive paused epoch", () => {
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175 }), 175)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175.9 }), 175)
+})

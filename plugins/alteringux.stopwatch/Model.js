@@ -99,6 +99,26 @@ function parseVoiceMuted(raw) {
   return !!raw && raw.trim() === "muted"
 }
 
+// Mirrors parseVoiceMuted for the CLI's bell switch: a bare marker file
+// ($XDG_RUNTIME_DIR/omarchy-stopwatch/chime) holding the text "chime".
+// Present => the stopwatch rings a bell at each interval instead of speaking
+// the elapsed time. The bar widget watches the path through Kit.Store, which
+// reports both "file absent" and "file empty" as "", so only the exact marker
+// text counts as chime-mode; everything else means speak.
+function parseChimeMode(raw) {
+  return !!raw && raw.trim() === "chime"
+}
+
+// Reads the frozen-at epoch the CLI's `pause` stamps into the state file.
+// A positive number means the stopwatch is paused and its elapsed count
+// should be shown as (paused_epoch - start_epoch), not (now - start_epoch).
+// Anything missing / non-numeric / non-positive => not paused (0).
+function pausedEpochOf(state) {
+  if (!state) return 0
+  var n = Number(state.paused_epoch)
+  return (isFinite(n) && n > 0) ? Math.floor(n) : 0
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     formatElapsed: formatElapsed,
@@ -108,6 +128,8 @@ if (typeof module !== "undefined") {
     formatDelta: formatDelta,
     parseConfig: parseConfig,
     sanitizeInterval: sanitizeInterval,
-    parseVoiceMuted: parseVoiceMuted
+    parseVoiceMuted: parseVoiceMuted,
+    parseChimeMode: parseChimeMode,
+    pausedEpochOf: pausedEpochOf
   }
 }

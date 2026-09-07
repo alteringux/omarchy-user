@@ -38,7 +38,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened && root.anchorItem !== null
-    contentWidth: panel.fittedContentWidth(Style.space(260))
+    contentWidth: panel.fittedContentWidth(Style.space(280))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -62,13 +62,16 @@ Panel {
         Kit.PanelHead {
           glyph: "\uf2f2"   // nf-fa-stopwatch, matches the bar widget
           title: "Stopwatch"
-          meta: (hostWidget && hostWidget.active) ? "Running" : "Ready"
+          meta: {
+            if (!(hostWidget && hostWidget.active)) return "Ready"
+            return hostWidget.paused ? "Paused" : "Running"
+          }
           foreground: root.barForeground
         }
 
         Text {
           visible: hostWidget && hostWidget.active
-          text: hostWidget ? ("Running: " + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
+          text: hostWidget ? ((hostWidget.paused ? "Paused: " : "Running: ") + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
           color: root.barForeground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
@@ -94,6 +97,33 @@ Panel {
           checked: !(hostWidget && hostWidget.voiceMuted)
           foreground: root.barForeground
           onClicked: if (hostWidget) hostWidget.toggleVoice()
+        }
+
+        // Bell instead of the spoken time. Shown even while idle so it can be
+        // set as the default for the next stopwatch (persisted to config); a
+        // click while one is running also flips it live via the CLI marker.
+        // Mouse-only, same as the voice toggle.
+        Toggle {
+          id: bellToggle
+          width: content.width
+          activeFocusOnTab: false
+          label: "Ring a bell"
+          readonly property bool chOn: hostWidget
+            ? (hostWidget.active ? hostWidget.chimeMode : hostWidget.chimeDefault)
+            : false
+          description: (hostWidget && hostWidget.active && hostWidget.voiceMuted)
+            ? "Muted — turn announcements back on to hear the bell"
+            : (chOn ? "A short bell at each interval, instead of speaking the time"
+                    : "Speak the elapsed time at each interval")
+          checked: chOn
+          enabled: !(hostWidget && hostWidget.active && hostWidget.voiceMuted)
+          foreground: root.barForeground
+          onClicked: {
+            if (!hostWidget) return
+            var v = !chOn
+            hostWidget.rememberChimeDefault(v)
+            if (hostWidget.active) hostWidget.setChimeMode(v)
+          }
         }
 
         Text {
@@ -153,6 +183,17 @@ Panel {
             bordered: true
             enabled: !(hostWidget && hostWidget.active)
             onClicked: root.startIfPossible()
+          }
+          Button {
+            text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
+            foreground: root.barForeground
+            bordered: true
+            enabled: hostWidget && hostWidget.active
+            onClicked: {
+              if (!hostWidget) return
+              if (hostWidget.paused) hostWidget.resumeStopwatch()
+              else hostWidget.pauseStopwatch()
+            }
           }
           Button {
             text: "Cancel"
