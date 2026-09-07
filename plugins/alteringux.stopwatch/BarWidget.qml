@@ -30,6 +30,11 @@ BarWidget {
   // muted for the running stopwatch; the systemd unit keeps counting.
   property bool voiceMuted: false
   property alias historyData: historyStore.value
+  // Last announce-interval the user picked in the panel, persisted to
+  // stopwatch-config.json so it survives a shell restart / reboot and becomes
+  // the starting value for the next stopwatch. A *running* stopwatch's own
+  // interval is restored independently by the CLI's `resume`.
+  readonly property int lastInterval: Model.sanitizeInterval(configStore.value && configStore.value.interval_minutes)
   // Frozen copy of historyData as it stood *before* the current session
   // started. The CLI's `cancel` appends the finished session to the history
   // file and only then removes the state file, so by the time this widget
@@ -61,7 +66,12 @@ BarWidget {
   function applyState(state) {
     guard.run("applyState", function() {
       if (!state) {
-        root.resetState()
+        // A vanished / briefly-unreadable state file while we believe a
+        // stopwatch is running could be a real cancel or crash, or just a
+        // transient read landing during the CLI's own write. Let the
+        // authoritative unit check arbitrate rather than flip straight to idle.
+        if (root.active) root.checkLiveness()
+        else root.resetState()
         return
       }
       // Idle -> active edge: freeze the baseline this session will be judged
@@ -89,6 +99,16 @@ BarWidget {
       root.active = false
       root.startEpoch = 0
       root.label = ""
+      root.elapsedSeconds = 0
+    })
+  }
+
+  // Persist the panel's announce-interval so the next stopwatch (this session
+  // or after a reboot) defaults to it instead of the hard-coded 5.
+  function rememberInterval(minutes) {
+    guard.run("rememberInterval", function() {
+      configStore.value = { interval_minutes: Model.sanitizeInterval(minutes) }
+      configStore.save()
     })
   }
 
@@ -138,7 +158,12 @@ BarWidget {
     fileName: "state"
     watch: true
     pollMs: 2000
-    polling: !root.active
+    // Poll even while running: FileView's inode watch can go stale against a
+    // file the CLI deletes on `cancel` and recreates on the next start (or that
+    // `resume` recreates at boot), so a running -> idle edge would otherwise
+    // wait on the 5 s liveness timer, or be missed entirely. A null read while
+    // active is routed through checkLiveness(), not straight to reset.
+    polling: true
     parse: function (raw) { return Model.parseState(raw) }
     onExternallyChanged: function (value) { root.applyState(value) }
   }
@@ -155,6 +180,14 @@ BarWidget {
     // next session starts from an up-to-date baseline. Once active, the
     // snapshot is frozen (see applyState).
     onExternallyChanged: function (value) { if (!root.active) root.historySnapshot = value }
+  }
+
+  // Panel config: the last announce-interval the user chose. Plugin-owned
+  // (only rememberInterval() writes it), so no watch — just load-on-start.
+  Kit.Store {
+    id: configStore
+    fileName: "stopwatch-config.json"
+    parse: function (raw) { return Model.parseConfig(raw) }
   }
 
   // The CLI's voice switch: `omarchy-stopwatch mute` drops a marker file here,
@@ -179,7 +212,7 @@ BarWidget {
   }
 
   Timer {
-    interval: 10000
+    interval: 5000
     repeat: true
     running: root.active
     onTriggered: root.checkLiveness()
@@ -226,12 +259,14 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function cancel(): void { root.cancelStopwatch() }
+    // Set the persisted default announce-interval (what the panel starts on).
+    function setInterval(minutes: int): void { root.rememberInterval(minutes) }
     function mute(): void { root.setVoiceMuted(true) }
     function unmute(): void { root.setVoiceMuted(false) }
     function voiceToggle(): void { root.toggleVoice() }
     function status(): string {
       return guard.call("ipc.status", function() {
-        return JSON.stringify({ active: root.active, elapsedSeconds: root.elapsedSeconds, label: root.label, voiceMuted: root.voiceMuted })
+        return JSON.stringify({ active: root.active, elapsedSeconds: root.elapsedSeconds, label: root.label, voiceMuted: root.voiceMuted, lastInterval: root.lastInterval })
       }, "{}")
     }
   }

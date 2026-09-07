@@ -15,7 +15,9 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
-  property int intervalValue: 5
+  // Seeds from the persisted last-used interval once hostWidget is injected;
+  // a user edit below breaks this binding and pins their choice for the session.
+  property int intervalValue: hostWidget ? hostWidget.lastInterval : 5
   property string labelValue: ""
 
   readonly property var guard: Kit.BugGuard.create("alteringux.stopwatch", function(argv) { Quickshell.execDetached(argv) })
@@ -114,7 +116,10 @@ Panel {
             from: 1
             to: 60
             foreground: root.barForeground
-            onModified: function(v) { root.intervalValue = v }
+            onModified: function(v) {
+              root.intervalValue = v
+              if (hostWidget) hostWidget.rememberInterval(v)
+            }
           }
         }
 

@@ -93,6 +93,29 @@ test("formatDelta returns empty string when there's no average to compare agains
   assert.strictEqual(Model.formatDelta(100, 0), "")
 })
 
+test("parseConfig returns {} for missing / empty / malformed input", () => {
+  assert.deepStrictEqual(Model.parseConfig(""), {})
+  assert.deepStrictEqual(Model.parseConfig(null), {})
+  assert.deepStrictEqual(Model.parseConfig("not json"), {})
+  assert.deepStrictEqual(Model.parseConfig("[1,2]"), {})
+})
+
+test("parseConfig round-trips a stored interval", () => {
+  assert.deepStrictEqual(Model.parseConfig(JSON.stringify({ interval_minutes: 12 })), { interval_minutes: 12 })
+})
+
+test("sanitizeInterval clamps to the panel's 1..60 range and falls back to 5", () => {
+  assert.strictEqual(Model.sanitizeInterval(12), 12)
+  assert.strictEqual(Model.sanitizeInterval("7"), 7)
+  assert.strictEqual(Model.sanitizeInterval(0), 5)
+  assert.strictEqual(Model.sanitizeInterval(-3), 5)
+  assert.strictEqual(Model.sanitizeInterval(61), 5)
+  assert.strictEqual(Model.sanitizeInterval(undefined), 5)
+  assert.strictEqual(Model.sanitizeInterval(null), 5)
+  assert.strictEqual(Model.sanitizeInterval(NaN), 5)
+  assert.strictEqual(Model.sanitizeInterval(3.6), 4)
+})
+
 test("parseVoiceMuted treats a missing / empty file as voice-on", () => {
   assert.strictEqual(Model.parseVoiceMuted(""), false)
   assert.strictEqual(Model.parseVoiceMuted(null), false)

@@ -66,6 +66,29 @@ function formatDelta(currentSeconds, avgSeconds) {
   return pct + "% " + (diff < 0 ? "shorter" : "longer") + " than your average"
 }
 
+// Parses the panel-config blob at ~/.local/state/omarchy/stopwatch-config.json,
+// e.g. {"interval_minutes":12}. This file only holds the last announce-interval
+// the user chose in the panel, kept so it survives a shell restart / reboot and
+// becomes the default for the next stopwatch. A running stopwatch's own interval
+// is restored separately by the CLI's `resume` from its persistent state file.
+// Total: any missing / empty / malformed input yields {}.
+function parseConfig(raw) {
+  if (!raw || raw.length === 0) return {}
+  try {
+    var parsed = JSON.parse(raw)
+    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
+  } catch (e) {
+    return {}
+  }
+}
+
+// Clamp a raw interval (from disk or the panel) to the NumberField's 1..60
+// range, falling back to 5 for anything non-numeric or out of range.
+function sanitizeInterval(value) {
+  var n = Math.round(Number(value))
+  return (isFinite(n) && n >= 1 && n <= 60) ? n : 5
+}
+
 // The CLI's voice switch is a bare marker file ($XDG_RUNTIME_DIR/
 // omarchy-stopwatch/voice-muted) holding the text "muted": `omarchy-stopwatch
 // mute` writes it, `unmute` removes it, and speak() skips playback whenever it
@@ -83,6 +106,8 @@ if (typeof module !== "undefined") {
     parseHistory: parseHistory,
     historyAverage: historyAverage,
     formatDelta: formatDelta,
+    parseConfig: parseConfig,
+    sanitizeInterval: sanitizeInterval,
     parseVoiceMuted: parseVoiceMuted
   }
 }
