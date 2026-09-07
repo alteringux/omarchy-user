@@ -292,6 +292,19 @@ test("rollDaily: streakDays increments on a consecutive day, resets otherwise", 
   assert.equal(gap.streakDays, 1)
 })
 
+test("rollDaily keys on the LOCAL calendar day (regression: dateKey was UTC via toISOString)", () => {
+  // 00:30 local on 1 Jan — its UTC date is 31 Dec for any observer east of
+  // UTC (the AEST dev box), which the old toISOString() dateKey returned.
+  // Built from local parts so the expectation is the runner's own local day.
+  const d = new Date(2026, 0, 1, 0, 30, 0)
+  const today = Model.dateKey(d.getTime())
+  assert.equal(today, "2026-01-01")
+  assert.equal(Model.prevDateKey(today), "2025-12-31")
+  const s = Model.rollDaily(state({ streakDays: 2, lastActiveDate: "2025-12-31" }), d.getTime())
+  assert.equal(s.streakDays, 3)
+  assert.equal(s.lastActiveDate, "2026-01-01")
+})
+
 // ── trivia seed + merge ────────────────────────────────────────────────
 
 test("triviaSeedCards: a non-empty, offline, unique-id trivia set", () => {

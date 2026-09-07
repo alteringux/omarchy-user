@@ -390,7 +390,25 @@ function grade(card, gradeName, now) {
 
 // ── daily bookkeeping ───────────────────────────────────────────────────
 
-function dateKey(ms) { return new Date(ms).toISOString().slice(0, 10) }
+// Local calendar day of `ms` as "YYYY-MM-DD". NOT toISOString().slice(0,10):
+// that is a UTC boundary, so for a user hours off UTC (AEST is +10/+11) the
+// daily lesson cap would reset mid-morning and the streak could miscount
+// around that offset. Local, like pomodoro's todayDateString.
+function dateKey(ms) {
+  var d = new Date(ms)
+  var mo = d.getMonth() + 1
+  var da = d.getDate()
+  return d.getFullYear() + "-" + (mo < 10 ? "0" : "") + mo + "-" + (da < 10 ? "0" : "") + da
+}
+
+// The local calendar day before `key` ("YYYY-MM-DD"). Walks the date field so
+// a DST transition can't land it two days back (which `dateKey(now - DAY)` can).
+function prevDateKey(key) {
+  var p = String(key).split("-").map(Number)
+  var d = new Date(p[0], p[1] - 1, p[2])
+  d.setDate(d.getDate() - 1)
+  return dateKey(d.getTime())
+}
 
 function rollDaily(state, now) {
   var today = dateKey(now)
@@ -401,8 +419,7 @@ function rollDaily(state, now) {
     next.lessonsTodayDate = today
   }
   if (state.lastActiveDate !== today) {
-    var yesterday = dateKey(now - DAY)
-    next.streakDays = state.lastActiveDate === yesterday ? state.streakDays + 1 : 1
+    next.streakDays = state.lastActiveDate === prevDateKey(today) ? state.streakDays + 1 : 1
     next.lastActiveDate = today
   }
   return next
@@ -571,7 +588,7 @@ if (typeof module !== "undefined" && module.exports) {
     findCard: findCard, dueQuizzes: dueQuizzes, unseenLessons: unseenLessons, topDue: topDue,
     buildChoices: buildChoices,
     grade: grade, gradeCard: gradeCard,
-    dateKey: dateKey, rollDaily: rollDaily,
+    dateKey: dateKey, prevDateKey: prevDateKey, rollDaily: rollDaily,
     nextIntervalMs: nextIntervalMs, decide: decide,
     addQuizCard: addQuizCard, addLessonCard: addLessonCard, dropCard: dropCard, markLessonSeen: markLessonSeen,
     triviaSeedCards: triviaSeedCards, mergeCards: mergeCards,
