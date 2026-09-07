@@ -173,7 +173,11 @@ Item {
     var next = root.state
     if (prev && hostWidget) {
       var unlocked = Model.newlyUnlocked(prev, next, hostWidget.nowMs)
-      if (unlocked.length > 0) {
+      if (next.agedUp && !prev.agedUp) {
+        root.say(Model.pickAgeUpLine(root.pet), 7000)
+        spawnParticles("sparkle")
+        bounceAnim.restart()
+      } else if (unlocked.length > 0) {
         root.say("🏆 " + unlocked[0].name + " — " + unlocked[0].description, 7000)
         spawnParticles("sparkle")
       } else if ((next.totalPokes || 0) > (prev.totalPokes || 0)) {
