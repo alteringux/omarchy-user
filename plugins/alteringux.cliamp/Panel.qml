@@ -195,10 +195,10 @@ Panel {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: "Volume"
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
+             color: root.barForeground
+             opacity: 0.6
+             font.family: Style.font.family
+             font.pixelSize: Style.font.bodySmall
           }
           Button {
             text: "-2 dB"
@@ -234,10 +234,10 @@ Panel {
           Text {
             anchors.verticalCenter: parent.verticalCenter
             text: "Repeat"
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            font.bold: true
+             color: root.barForeground
+             opacity: 0.6
+             font.family: Style.font.family
+             font.pixelSize: Style.font.bodySmall
           }
           Button {
             text: root.status.repeat && root.status.repeat.length ? root.status.repeat : "Off"
@@ -252,10 +252,10 @@ Panel {
           visible: root.running
           width: content.width
           text: "Visualiser"
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+           color: root.barForeground
+           opacity: 0.6
+           font.family: Style.font.family
+           font.pixelSize: Style.font.bodySmall
         }
 
         Dropdown {
@@ -289,9 +289,9 @@ Panel {
 
         Text {
           text: "Space: play/pause  ·  X: stop  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
         }
       }
     }
