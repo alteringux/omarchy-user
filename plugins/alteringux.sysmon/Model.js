@@ -128,10 +128,11 @@ function isStale(state, nowMs, staleAfterMs) {
   return (nowMs - state.updatedAt) > (staleAfterMs || 15000)
 }
 
-// The QML JS import mechanism has no `module` global; guard so loading this
-// file in the shell doesn't throw a ReferenceError on every startup. The
-// export is only for the plain-node test harness.
-if (typeof module !== "undefined") {
+// Exposed only for the plain-node test harness. QML's JS import has no `module`
+// global, and this file is re-evaluated on every state poll, so even a `typeof
+// module` guard surfaces a ReferenceError in the shell log each tick. A bare
+// try/catch is the only form that stays quiet in the shell.
+try {
   module.exports = {
     defaultState: defaultState,
     parseState: parseState,
@@ -145,4 +146,4 @@ if (typeof module !== "undefined") {
     barLabel: barLabel,
     isStale: isStale
   }
-}
+} catch (e) {}
