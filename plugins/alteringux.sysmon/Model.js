@@ -128,16 +128,21 @@ function isStale(state, nowMs, staleAfterMs) {
   return (nowMs - state.updatedAt) > (staleAfterMs || 15000)
 }
 
-module.exports = {
-  defaultState: defaultState,
-  parseState: parseState,
-  clampPct: clampPct,
-  pctLevel: pctLevel,
-  tempLevel: tempLevel,
-  formatPct: formatPct,
-  formatTemp: formatTemp,
-  formatGb: formatGb,
-  formatUptime: formatUptime,
-  barLabel: barLabel,
-  isStale: isStale
+// The QML JS import mechanism has no `module` global; guard so loading this
+// file in the shell doesn't throw a ReferenceError on every startup. The
+// export is only for the plain-node test harness.
+if (typeof module !== "undefined") {
+  module.exports = {
+    defaultState: defaultState,
+    parseState: parseState,
+    clampPct: clampPct,
+    pctLevel: pctLevel,
+    tempLevel: tempLevel,
+    formatPct: formatPct,
+    formatTemp: formatTemp,
+    formatGb: formatGb,
+    formatUptime: formatUptime,
+    barLabel: barLabel,
+    isStale: isStale
+  }
 }
