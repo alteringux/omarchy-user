@@ -158,7 +158,20 @@ BarWidget {
   function nudgeVolume(db) { if (root.running) root.runVerb(["volume", String(db)]) }
   function toggleShuffle() { if (root.running) { root.runVerb(["shuffle"]); root.pollSoon() } }
   function cycleRepeat() { if (root.running) { root.runVerb(["repeat"]); root.pollSoon() } }
-  function setVis(name) { if (root.running && name) { root.runVerb(["vis", name]); root.pollSoon() } }
+  // Optimistically record the picked mode: the status JSON carries no
+  // visualizer field, and visstream (the only other source) is stopped while
+  // paused, so without this the next poll's parseStatus carries the *old*
+  // mode forward and the dropdown snaps back. Mirrors visProc's frame handler.
+  function setVis(name) {
+    if (!root.running || !name) return
+    if (root.status && root.status.visualizer !== name) {
+      var s = Object.assign({}, root.status)
+      s.visualizer = name
+      root.status = s
+    }
+    root.runVerb(["vis", name])
+    root.pollSoon()
+  }
 
   // ── IPC ─────────────────────────────────────────────────────────────
   IpcHandler {
