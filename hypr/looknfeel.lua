@@ -15,7 +15,9 @@ hl.config({
     -- Gel/glass look on every theme.
     rounding = 10,
     active_opacity = 1.0,
-    inactive_opacity = 0.96,
+    -- Was 0.96. Translucent unfocused windows force an alpha blend + blur-behind
+    -- every frame and disable occlusion culling, for a barely-visible effect.
+    inactive_opacity = 1.0,
 
     blur = {
       enabled = true,
@@ -27,6 +29,8 @@ hl.config({
       vibrancy = 0.25,
       vibrancy_darkness = 0.1,
       noise = 0.012,
+      -- Blur the workspace left behind when a special workspace slides over it.
+      special = true,
     },
 
     shadow = {
@@ -68,9 +72,11 @@ hl.animation({ leaf = "windowsIn",   enabled = true, speed = 6,   bezier = "liqu
 hl.animation({ leaf = "windowsOut",  enabled = true, speed = 5,   bezier = "liquidDecel",  style = "popin 80%" })
 hl.animation({ leaf = "windowsMove", enabled = true, speed = 6,   bezier = "liquidBounce" })
 
--- Borders: quick colour catch-up, plus a slowly spinning gradient.
+-- Borders: quick colour catch-up. The spinning gradient (borderangle + style=loop)
+-- is disabled: a looping animation keeps the screen dirty every frame, so VFR can
+-- never drop the render rate and Hyprland burns ~1 core at idle forever.
 hl.animation({ leaf = "border",      enabled = true, speed = 8,   bezier = "liquidDecel" })
-hl.animation({ leaf = "borderangle", enabled = true, speed = 40,  bezier = "liquidLinear", style = "loop" })
+hl.animation({ leaf = "borderangle", enabled = false, speed = 40,  bezier = "liquidLinear", style = "loop" })
 
 -- Fades.
 hl.animation({ leaf = "fade",       enabled = true, speed = 7, bezier = "liquidDecel" })
