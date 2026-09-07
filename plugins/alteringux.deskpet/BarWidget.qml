@@ -161,8 +161,10 @@ BarWidget {
 
   readonly property string displayText: {
     if (!root.state.enabled) return root.pet.glyph + " 󰈉"   // nf-md-eye_off, dimmed by hidden below
-    if (root.liveState.asleep) return root.pet.glyph + " 󰒲"  // nf-md-sleep
-    return root.pet.glyph
+    var t = root.pet.glyph
+    if (root.liveState.asleep) t += " 󰒲"                     // nf-md-sleep
+    if (root.state.muted) t += " \uf027"                     // fa-volume_off, the hush mark
+    return t
   }
 
   readonly property color displayColor: {
@@ -180,7 +182,11 @@ BarWidget {
     active: root.mood === "hungry" || root.mood === "grumpy"
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    onPressed: function (b) { root.togglePanel() }
+    onPressed: function (b) {
+      // Right-click hushes the pet (toggles mute) instead of opening the panel.
+      if (b === Qt.RightButton) { root.setMuted(!root.state.muted); return }
+      root.togglePanel()
+    }
 
     // A dot when the pet needs attention (hungry/grumpy) so the bar face
     // doubles as a "someone wants a snack" indicator, same shape grip uses.
