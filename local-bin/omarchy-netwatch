@@ -48,6 +48,7 @@ NW_DIR="${OMARCHY_NETWATCH_DIR:-$HOME/.config/omarchy/plugins/alteringux.netwatc
 STATE_FILE="$STATE_DIR/netwatch-state.json"
 SAMPLE_FILE="$STATE_DIR/netwatch-sample.json"
 CONFIG_FILE="$STATE_DIR/netwatch-config.json"
+SAMPLE_LOCK="$STATE_DIR/.netwatch-sample.lock"
 CLI="$NW_DIR/netwatch-cli.js"
 QUIET="${OMARCHY_NETWATCH_QUIET:-0}"
 
@@ -178,6 +179,22 @@ post_webhook() { # post_webhook <url>  ; body from stdin
 }
 
 cmd_sample() {
+  # Two samplers run this concurrently: the bar widget's tick while the shell
+  # is up, and omarchy-netwatch-sample.timer as backfill. Each `sample` is a
+  # read-modify-write of netwatch-state.json (the accumulated hour/day/month
+  # byte buckets) with no atomicity across the read and the write, so an
+  # overlap loses one sampler's bucket delta and rates-ring/peak push to
+  # last-writer-wins, and a boundary-straddling delta can land in the wrong
+  # bucket. A sample that just ran makes an immediate re-run redundant, so
+  # skip on contention rather than queue behind it.
+  ensure_dir
+  (
+    flock -n 9 || exit 0
+    _do_sample "$@"
+  ) 9>"$SAMPLE_LOCK"
+}
+
+_do_sample() {
   local webhook_override=""
   while [ $# -gt 0 ]; do
     case "$1" in
