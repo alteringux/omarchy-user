@@ -73,7 +73,7 @@ Panel {
           spacing: Style.spacing.panelGap
 
           Kit.PanelHead {
-            glyph: ""
+            glyph: hostWidget ? hostWidget.icon : ""   // nf-fa-calendar, live from the bar widget
             title: "Calendar"
             meta: Model.todayBadgeCount(root.state) > 0
               ? (Model.todayBadgeCount(root.state) + " thing" + (Model.todayBadgeCount(root.state) === 1 ? "" : "s") + " today")
@@ -400,7 +400,7 @@ Panel {
           Text {
             width: content.width
             text: "Right-click widget: refresh  ·  Esc: close"
-            color: Qt.darker(root.barForeground, 1.4)
+            color: Kit.Palette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
