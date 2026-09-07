@@ -105,7 +105,8 @@ Item {
       root.say(Model.pickAmbientLine(root.pet, {
         isLowBattery: hostWidget.isLowBattery,
         minutesIdleValue: hostWidget.minutesIdleValue,
-        moodLabelValue: hostWidget.mood
+        moodLabelValue: hostWidget.mood,
+        hourValue: hostWidget.hourValue
       }, Math.random() * 10000))
     }
     root._scheduleAmbient()

@@ -614,6 +614,61 @@ function screenLookSystemPrompt(pet) {
 var ZOOM_LINES = ["Zoom!", "Gotta go fast.", "Wheee!", "*blurs past*", "Look at me go.", "Vroom."]
 function pickZoomLine(pet, seed) { return pet.voice(pick(ZOOM_LINES, seed)) }
 
+// Time-of-day chatter: a shared bank per period of the day, keyed off the
+// caller's wall-clock hour (0-23). Same trick as CLIPPY_TIPS and ZOOM_LINES --
+// one pool the caller wraps in the pet's own voice() -- so the 12-pet
+// catalogue doesn't need a dedicated bank just for this. Periods are a clean
+// 24/4 split: morning 5-12, afternoon 12-17, evening 17-22, late night 22-5.
+var TIME_LINES = {
+  morning: [
+    "Morning. You survived the night. That's genuinely all I can say for either of us.",
+    "It's early. I can tell by the suspicious number of open tabs.",
+    "Good morning. I checked: the coffee is still a liquid. We should go.",
+    "Rise and shine. Or just rise; shining is optional.",
+    "Morning person or night person, you're here, so: good morning."
+  ],
+  afternoon: [
+    "Afternoon. The day is halfway gone and I have opinions about that.",
+    "It's afternoon. The 3pm energy wave is incoming, brace yourself.",
+    "Halfway through the day. Also halfway to the couch.",
+    "Afternoon check-in: you're doing fine. Probably. I can't see the metrics.",
+    "Past noon now. Whatever you were going to do, the window's still open."
+  ],
+  evening: [
+    "Evening. Time to wind down, or at least pretend to.",
+    "It's evening. The day is done; the snacks are not.",
+    "Evening! Perfect time to close the tab you've been meaning to close.",
+    "The sun's going down. Your open browser windows don't get a vote on this.",
+    "Evening mode engaged. Legally, everything can wait until tomorrow."
+  ],
+  lateNight: [
+    "It's late. I'm here to support your choices without judging them. (I'm judging them.)",
+    "Late-night hours. The internet gets weirder, and so do you.",
+    "You're up late. I'll pretend this is work. We both know it isn't.",
+    "Late-night scrolling is a sport now. I've seen the leaderboards.",
+    "It's late. Future you sends regards and a request to stop."
+  ]
+}
+
+// The bucket an hour falls into; anything outside 0-23 (including a missing
+// hour) is null so the caller can fall back to a generic tip.
+function timePeriod(hour) {
+  var h = numOr(hour, NaN)
+  if (!isFinite(h) || h < 0 || h > 23) return null
+  if (h >= 5 && h < 12) return "morning"
+  if (h >= 12 && h < 17) return "afternoon"
+  if (h >= 17 && h < 22) return "evening"
+  return "lateNight"
+}
+
+function pickTimeLine(hour, seed) {
+  var period = timePeriod(hour)
+  return period ? pick(TIME_LINES[period], seed) : ""
+}
+
+// Priority for unsolicited chatter: low battery > long idle > mood >
+// time-of-day chatter (one third of the time, same seed) > generic Clippy
+// tip. `context` = { isLowBattery, minutesIdleValue, moodLabelValue, hourValue }
 function pickAmbientLine(pet, context, seed) {
   var ctx = context || {}
   if (ctx.isLowBattery) return pet.lowBattery
@@ -621,13 +676,20 @@ function pickAmbientLine(pet, context, seed) {
   var mood = ctx.moodLabelValue
   if (mood === "hungry") return pet.voice("I could really go for a snack right about now.")
   if (mood === "grumpy") return pet.voice("Not feeling it today. A pat might help.")
+  // One third of the seeds take the time-of-day branch; the same seed drives
+  // both the branch roll and the bank pick, so it's deterministic in tests.
+  // A missing/invalid hour just falls through to the generic tip.
+  if ((Math.abs(Math.floor(seed)) % 1000) < 300) {
+    var line = pickTimeLine(ctx.hourValue, seed)
+    if (line) return pet.voice(line)
+  }
   return pet.voice(pick(CLIPPY_TIPS, seed))
 }
 
 if (typeof module !== "undefined") {
   module.exports = {
     HOUR: HOUR, MIN: MIN,
-    PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS, ZOOM_LINES: ZOOM_LINES,
+    PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS, ZOOM_LINES: ZOOM_LINES, TIME_LINES: TIME_LINES,
     POKE_STREAK_WINDOW_MS: POKE_STREAK_WINDOW_MS, POKE_STREAK_ANNOY: POKE_STREAK_ANNOY,
     AGE_UP_POKE_THRESHOLD: AGE_UP_POKE_THRESHOLD, AGE_UP_LINE: AGE_UP_LINE,
     ACHIEVEMENTS: ACHIEVEMENTS, ACCESSORIES: ACCESSORIES, LEVEL_TITLES: LEVEL_TITLES, ROAM_MODES: ROAM_MODES,
@@ -640,6 +702,7 @@ if (typeof module !== "undefined") {
     moodLabel: moodLabel, ageDays: ageDays, minutesIdle: minutesIdle,
     pickGreeting: pickGreeting, pickPokeLine: pickPokeLine, pickFeedLine: pickFeedLine,
     pickPlayLine: pickPlayLine, sleepyLine: sleepyLine, wakeLine: wakeLine, pickAmbientLine: pickAmbientLine,
+    timePeriod: timePeriod, pickTimeLine: pickTimeLine,
     pickZoomLine: pickZoomLine,
     screenLookSystemPrompt: screenLookSystemPrompt,
     unlockedAchievementIds: unlockedAchievementIds, newlyUnlocked: newlyUnlocked,

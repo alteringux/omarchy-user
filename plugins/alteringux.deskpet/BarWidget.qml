@@ -49,6 +49,9 @@ BarWidget {
   readonly property var liveState: Model.applyDecay(root.state, root.nowMs)
   readonly property string mood: Model.moodLabel(root.liveState)
   readonly property int minutesIdleValue: Model.minutesIdle(root.liveState, root.nowMs)
+  // Wall-clock hour for the time-of-day chatter; re-derived on the same 20s
+  // clock as nowMs, so it's at most 20s stale when it matters.
+  readonly property int hourValue: new Date(root.nowMs).getHours()
   readonly property int ageDaysValue: Model.ageDays(root.liveState, root.nowMs)
   readonly property var levelInfo: Model.levelInfo(root.liveState)
   readonly property var unlockedIds: Model.unlockedAchievementIds(root.liveState, root.nowMs)

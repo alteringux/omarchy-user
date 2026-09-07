@@ -295,6 +295,55 @@ test("pickAmbientLine: falls back to a voiced generic tip when nothing else appl
   assert.equal(line, pet.voice(Model.CLIPPY_TIPS[0]))
 })
 
+// ── time-of-day chatter ────────────────────────────────────────────────────
+
+test("timePeriod: maps hours to the four buckets", () => {
+  assert.equal(Model.timePeriod(5), "morning")
+  assert.equal(Model.timePeriod(11), "morning")
+  assert.equal(Model.timePeriod(12), "afternoon")
+  assert.equal(Model.timePeriod(16), "afternoon")
+  assert.equal(Model.timePeriod(17), "evening")
+  assert.equal(Model.timePeriod(21), "evening")
+  assert.equal(Model.timePeriod(22), "lateNight")
+  assert.equal(Model.timePeriod(23), "lateNight")
+  assert.equal(Model.timePeriod(0), "lateNight")
+  assert.equal(Model.timePeriod(4), "lateNight")
+})
+
+test("timePeriod: rejects missing and out-of-range hours", () => {
+  assert.equal(Model.timePeriod(24), null)
+  assert.equal(Model.timePeriod(-1), null)
+  assert.equal(Model.timePeriod(undefined), null)
+  assert.equal(Model.timePeriod(NaN), null)
+})
+
+test("pickTimeLine: seeded and in-bank, empty for a missing hour", () => {
+  assert.equal(Model.pickTimeLine(9, 0), Model.TIME_LINES.morning[0])
+  assert.equal(Model.pickTimeLine(14, 3), Model.TIME_LINES.afternoon[3])
+  assert.equal(Model.pickTimeLine(19, 4), Model.TIME_LINES.evening[4])
+  assert.equal(Model.pickTimeLine(23, 1), Model.TIME_LINES.lateNight[1])
+  assert.equal(Model.pickTimeLine(undefined, 0), "")
+  assert.equal(Model.pickTimeLine(25, 0), "")
+})
+
+test("pickAmbientLine: the time branch fires for a third of seeds, voiced by the pet", () => {
+  const pet = Model.petById("cat")
+  const ctx = { isLowBattery: false, minutesIdleValue: 2, moodLabelValue: "content", hourValue: 9 }
+  assert.equal(Model.pickAmbientLine(pet, ctx, 0), pet.voice(Model.TIME_LINES.morning[0]))
+  // 300 % 1000 is not < 300 -> generic tip even with a valid hour
+  assert.equal(Model.pickAmbientLine(pet, ctx, 300), pet.voice(Model.CLIPPY_TIPS[300 % Model.CLIPPY_TIPS.length]))
+  // time-branch seed but no hour -> falls through to the generic tip
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, ctx, { hourValue: undefined }), 0), pet.voice(Model.CLIPPY_TIPS[0]))
+})
+
+test("pickAmbientLine: battery, idle, and mood still outrank the time branch", () => {
+  const pet = Model.petById("robot")
+  const base = { isLowBattery: false, minutesIdleValue: 2, moodLabelValue: "content", hourValue: 9 }
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { isLowBattery: true }), 0), pet.lowBattery)
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { minutesIdleValue: 45 }), 0), pet.longIdle)
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { moodLabelValue: "grumpy" }), 0), pet.voice("Not feeling it today. A pat might help."))
+})
+
 test("pickZoomLine: comes from the shared pool, wrapped in the pet's own voice()", () => {
   const fox = Model.petById("fox")
   const line = Model.pickZoomLine(fox, 0)
