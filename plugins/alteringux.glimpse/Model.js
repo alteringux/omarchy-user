@@ -432,7 +432,25 @@ function dropCard(cards, id) {
 
 // ── daily bookkeeping ───────────────────────────────────────────────────
 
-function dateKey(ms) { return new Date(ms).toISOString().slice(0, 10) }
+// Local calendar day of `ms` as "YYYY-MM-DD". NOT toISOString().slice(0,10):
+// that is a UTC boundary, so for a user hours off UTC (AEST is +10/+11) the
+// daily round cap would reset mid-morning and the streak could miscount
+// around that offset. Local, like recall's dateKey / pomodoro's todayDateString.
+function dateKey(ms) {
+  var d = new Date(ms)
+  var mo = d.getMonth() + 1
+  var da = d.getDate()
+  return d.getFullYear() + "-" + (mo < 10 ? "0" : "") + mo + "-" + (da < 10 ? "0" : "") + da
+}
+
+// The local calendar day before `key` ("YYYY-MM-DD"). Walks the date field so
+// a DST transition can't land it two days back (which `dateKey(now - DAY)` can).
+function prevDateKey(key) {
+  var p = String(key).split("-").map(Number)
+  var d = new Date(p[0], p[1] - 1, p[2])
+  d.setDate(d.getDate() - 1)
+  return dateKey(d.getTime())
+}
 
 function rollDaily(state, now) {
   var today = dateKey(now)
@@ -443,8 +461,7 @@ function rollDaily(state, now) {
     next.roundsTodayDate = today
   }
   if (state.lastActiveDate !== today) {
-    var yesterday = dateKey(now - DAY)
-    next.streakDays = state.lastActiveDate === yesterday ? state.streakDays + 1 : 1
+    next.streakDays = state.lastActiveDate === prevDateKey(today) ? state.streakDays + 1 : 1
     next.lastActiveDate = today
   }
   return next
@@ -532,7 +549,7 @@ if (typeof module !== "undefined" && module.exports) {
     scoreHits: scoreHits, gradeForAccuracy: gradeForAccuracy,
     grade: grade, gradeCard: gradeCard,
     startRound: startRound, addCardFromRound: addCardFromRound, dropCard: dropCard,
-    dateKey: dateKey, rollDaily: rollDaily, decide: decide,
+    dateKey: dateKey, prevDateKey: prevDateKey, rollDaily: rollDaily, decide: decide,
     stats: stats, formatDue: formatDue, formatPct: formatPct
   }
 }

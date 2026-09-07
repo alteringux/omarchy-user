@@ -164,7 +164,7 @@ test("decide: a brand-new card is due but never forces a takeover", () => {
 
 test("rollDaily resets today counter and bumps streak", () => {
   const now = Date.parse("2026-09-06T09:00:00Z")
-  const y = M.dateKey(now - DAY)
+  const y = M.prevDateKey(M.dateKey(now))
   const s = M.parseState(JSON.stringify({ roundsToday: 5, roundsTodayDate: y, streakDays: 4, lastActiveDate: y }))
   const r = M.rollDaily(s, now)
   assert.equal(r.roundsToday, 0)
@@ -172,6 +172,19 @@ test("rollDaily resets today counter and bumps streak", () => {
 
   const gap = M.parseState(JSON.stringify({ streakDays: 4, lastActiveDate: M.dateKey(now - 3 * DAY) }))
   assert.equal(M.rollDaily(gap, now).streakDays, 1)
+})
+
+test("rollDaily keys on the LOCAL calendar day (regression: dateKey was UTC via toISOString)", () => {
+  // 00:30 local on 1 Jan — its UTC date is 31 Dec for any observer east of
+  // UTC (the AEST dev box), which the old toISOString() dateKey returned.
+  const d = new Date(2026, 0, 1, 0, 30, 0)
+  const today = M.dateKey(d.getTime())
+  assert.equal(today, "2026-01-01")
+  assert.equal(M.prevDateKey(today), "2025-12-31")
+  const s = M.parseState(JSON.stringify({ streakDays: 2, lastActiveDate: "2025-12-31" }))
+  const r = M.rollDaily(s, d.getTime())
+  assert.equal(r.streakDays, 3)
+  assert.equal(r.lastActiveDate, "2026-01-01")
 })
 
 test("startRound assembles from a spec", () => {
