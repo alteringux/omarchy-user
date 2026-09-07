@@ -50,6 +50,17 @@ Item {
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
+  // The next/today mirror for external consumers. Owned mode — this service is
+  // the only writer. Written straight through FileView rather than a base64 +
+  // `bash -lc` hop through Qt.btoa(), which is deprecated and fired a console
+  // warning on every poll.
+  Kit.Store {
+    id: stateStore
+    dir: root.runtimeDir + "/omarchy-agenda/"
+    fileName: "state"
+    serialize: function (v) { return JSON.stringify(v) + "\n" }
+  }
+
   // Persisted so a shell reload doesn't re-fire notifications we already sent.
   PersistentProperties {
     id: persisted
@@ -86,11 +97,10 @@ Item {
   }
 
   function writeState(now) {
-    var json = JSON.stringify(Model.stateJson(root.agenda, now))
-    var dir = root.statePath.slice(0, root.statePath.lastIndexOf("/"))
-    // base64 hop so arbitrary event text can't break out of the shell quoting.
-    Quickshell.execDetached(["bash", "-lc",
-      "mkdir -p '" + dir + "' && printf %s '" + Qt.btoa(json) + "' | base64 -d > '" + root.statePath + "'"])
+    guard.run("writeState", function () {
+      stateStore.value = Model.stateJson(root.agenda, now)
+      stateStore.flush()
+    })
   }
 
   function sendNotification(ev) {
