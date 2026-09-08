@@ -83,11 +83,13 @@ Panel {
         // Voice on/off for the running stopwatch. Flips the CLI's marker file
         // via hostWidget.toggleVoice(); speak() re-reads it each interval, so
         // the change applies on the next announcement with no unit restart.
+        // Hidden while the bell is on — the bell rings regardless of this, so
+        // showing a "Muted" switch there would just be a contradiction.
         // Mouse-only (activeFocusOnTab off) to stay out of the panel's
         // Enter=start / X=cancel / Esc=close keyboard model.
         Toggle {
           id: voiceToggle
-          visible: hostWidget && hostWidget.active
+          visible: hostWidget && hostWidget.active && !hostWidget.chimeMode
           width: content.width
           activeFocusOnTab: false
           label: "Voice announcements"
@@ -102,6 +104,7 @@ Panel {
         // Bell instead of the spoken time. Shown even while idle so it can be
         // set as the default for the next stopwatch (persisted to config); a
         // click while one is running also flips it live via the CLI marker.
+        // Turning it on also clears any mute, so the bell is actually audible.
         // Mouse-only, same as the voice toggle.
         Toggle {
           id: bellToggle
@@ -111,18 +114,19 @@ Panel {
           readonly property bool chOn: hostWidget
             ? (hostWidget.active ? hostWidget.chimeMode : hostWidget.chimeDefault)
             : false
-          description: (hostWidget && hostWidget.active && hostWidget.voiceMuted)
-            ? "Muted — turn announcements back on to hear the bell"
-            : (chOn ? "A short bell at each interval, instead of speaking the time"
-                    : "Speak the elapsed time at each interval")
+          description: chOn
+            ? "A bell at each interval, instead of speaking the time"
+            : "Speak the elapsed time at each interval"
           checked: chOn
-          enabled: !(hostWidget && hostWidget.active && hostWidget.voiceMuted)
           foreground: root.barForeground
           onClicked: {
             if (!hostWidget) return
             var v = !chOn
             hostWidget.rememberChimeDefault(v)
-            if (hostWidget.active) hostWidget.setChimeMode(v)
+            if (hostWidget.active) {
+              hostWidget.setChimeMode(v)
+              if (v && hostWidget.voiceMuted) hostWidget.setVoiceMuted(false)
+            }
           }
         }
 

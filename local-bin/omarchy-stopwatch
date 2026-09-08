@@ -34,14 +34,18 @@ CHIME_FILE="$STATE_DIR/chime"
 CONFIG_FILE="$HOME/.local/state/omarchy/stopwatch-config.json"
 
 # Ring the first available desktop "bell" sound. Used by speak() when CHIME_FILE
-# is present, so a bell marks each interval instead of spoken TTS.
+# is present, so a bell marks each interval instead of spoken TTS. Ordered
+# loudest-first: `bell.oga` alone is a very soft UI tick that's easy to miss as
+# a once-a-minute cue. Override with $OMARCHY_STOPWATCH_BELL (a file path).
 play_bell() {
   local snd
   for snd in \
-    "/usr/share/sounds/freedesktop/stereo/bell.oga" \
+    "${OMARCHY_STOPWATCH_BELL:-}" \
+    "/usr/share/sounds/freedesktop/stereo/complete.oga" \
     "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga" \
-    "/usr/share/sounds/freedesktop/stereo/complete.oga"; do
-    if [[ -f "$snd" ]]; then
+    "/usr/share/sounds/freedesktop/stereo/bell.oga" \
+    "/usr/share/sounds/freedesktop/stereo/message.oga"; do
+    if [[ -n "$snd" && -f "$snd" ]]; then
       pw-play "$snd" 2>/dev/null || paplay "$snd" 2>/dev/null || true
       return 0
     fi
@@ -53,11 +57,15 @@ speak() {
   # Re-checked every call: flipping the bar's voice / bell switches mid-session
   # just creates or removes a marker file, and the effect lands on the next
   # announcement without restarting the systemd unit.
-  if [[ -f "$VOICE_MUTE_FILE" ]]; then
-    return 0
-  fi
+  #
+  # Bell mode is checked BEFORE mute: turning on the bell is an explicit opt-in
+  # to an audible interval cue, so it rings even if spoken announcements were
+  # silenced (otherwise "voice off + bell on" is a silent dead combo).
   if [[ -f "$CHIME_FILE" ]]; then
     play_bell
+    return 0
+  fi
+  if [[ -f "$VOICE_MUTE_FILE" ]]; then
     return 0
   fi
   local hash cache_file
