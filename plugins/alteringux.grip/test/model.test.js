@@ -261,6 +261,14 @@ test("addTask: blank text is rejected (returns the same state)", () => {
   assert.equal(Model.addTask(before, { text: "   " }, { id: "x", now: 1 }), before)
 })
 
+test("addTask: with no id in opts (the quick-add panel's call shape), rows get distinct ids", () => {
+  let t = tasksOf([])
+  t = Model.addTask(t, { text: "first" }, { now: 1 })
+  t = Model.addTask(t, { text: "second" }, { now: 1 })
+  const ids = t.tasks.map((x) => x.id)
+  assert.equal(new Set(ids).size, ids.length, "un-ided tasks must not collide on id")
+})
+
 test("completeTask / dropTask: by id, no-op on unknown id", () => {
   const t = tasksOf([task({ id: "a" }), task({ id: "b" })])
   assert.equal(Model.completeTask(t, "a").tasks.find((x) => x.id === "a").done, true)

@@ -302,9 +302,16 @@ function cloneTasks(tasks) {
 function addTask(tasks, input, opts) {
   var text = input && typeof input.text === "string" ? input.text.trim() : ""
   if (!text) return tasks
+  opts = opts || {}
   var next = cloneTasks(tasks)
+  // grip-cli.js's payload is external input (the bash side hands over whatever
+  // it parsed from argv/stdin) — an absent id used to fall through to
+  // String(undefined) === "undefined", silently colliding every un-ided task
+  // onto the same identity, so complete/drop would match all of them at once.
+  var hasId = opts.id !== undefined && opts.id !== null && String(opts.id).length > 0
+  var id = hasId ? String(opts.id) : ("task-" + coerceNumber(opts.now, 0) + "-" + next.tasks.length)
   next.tasks = next.tasks.concat([{
-    id: String(opts.id),
+    id: id,
     text: text,
     source: "typed",
     due: (input.due != null && isFinite(input.due)) ? input.due : null,
