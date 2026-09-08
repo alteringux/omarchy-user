@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.featherless",
+  "name": "Featherless",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Featherless.ai usage analytics: token breakdown by model, day, and hour, estimated costs, and all-time stats from your opencode sessions.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Featherless",
+    "description": "Token usage, cost estimates, and model analytics for Featherless.ai",
+    "category": "AI",
+    "allowMultiple": false
+  }
+}
