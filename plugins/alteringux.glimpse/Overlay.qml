@@ -40,6 +40,9 @@ Item {
     root.clicks = []
     root.scoreResult = null
     root.comparing = false
+    countdownFill.fraction = 1.0
+    countdownAnim.duration = root.round ? Math.max(500, root.round.exposureMs) : 5000
+    countdownAnim.restart()
   }
 
   function toTest() { root.phase = "test" }
@@ -278,18 +281,17 @@ Item {
 
           Rectangle {
             id: countdownFill
+            property real fraction: 1.0
             height: parent.height
             radius: parent.radius
             color: Kit.Palette.info
-            width: parent.width
-            states: State {
-              name: "running"
-              when: root.phase === "study"
-              PropertyChanges { target: countdownFill; width: 0 }
-            }
-            transitions: Transition {
-              to: "running"
-              NumberAnimation { property: "width"; duration: root.round ? Math.max(500, root.round.exposureMs) : 5000; easing.type: Easing.Linear }
+            width: parent.width * fraction
+            NumberAnimation {
+              id: countdownAnim
+              target: countdownFill
+              property: "fraction"
+              to: 0.0
+              easing.type: Easing.Linear
             }
           }
         }
