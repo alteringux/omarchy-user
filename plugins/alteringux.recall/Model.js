@@ -566,16 +566,27 @@ function stats(cards, state) {
   }
 }
 
+// Bug fix: the unit bucket used to be chosen from the raw ms delta (e.g.
+// `overdue < HOUR`) and only then rounded for display. A delta a few ms
+// under an hour (or under a day) picked the minutes (or hours) bucket but
+// rounded up to the next unit's own threshold — "60m overdue" / "24h
+// overdue" instead of "1h overdue" / "1d overdue". Round first, then bucket
+// the rounded value, so a value that rounds up to the next unit displays in
+// that unit instead of at the top of the one below it.
 function formatDue(deltaMs, now) {
   if (deltaMs <= 0) {
     var overdue = -deltaMs
     if (overdue < MINUTE) return "due now"
-    if (overdue < HOUR) return Math.round(overdue / MINUTE) + "m overdue"
-    if (overdue < DAY) return Math.round(overdue / HOUR) + "h overdue"
+    var m = Math.round(overdue / MINUTE)
+    if (m < 60) return m + "m overdue"
+    var h = Math.round(overdue / HOUR)
+    if (h < 24) return h + "h overdue"
     return Math.round(overdue / DAY) + "d overdue"
   }
-  if (deltaMs < HOUR) return "in " + Math.round(deltaMs / MINUTE) + "m"
-  if (deltaMs < DAY) return "in " + Math.round(deltaMs / HOUR) + "h"
+  var m2 = Math.round(deltaMs / MINUTE)
+  if (m2 < 60) return "in " + m2 + "m"
+  var h2 = Math.round(deltaMs / HOUR)
+  if (h2 < 24) return "in " + h2 + "h"
   return "in " + Math.round(deltaMs / DAY) + "d"
 }
 

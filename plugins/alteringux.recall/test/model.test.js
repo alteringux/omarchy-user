@@ -383,6 +383,26 @@ test("buildChoices: prefers same-category distractors when there are enough", ()
   assert.ok(!r.options.includes("Other-cat"), "same-category distractors are preferred over other-category ones")
 })
 
+// ── due-time formatting ──────────────────────────────────────────────────
+
+test("formatDue: rounds up into the next unit instead of showing the top of the unit below (regression)", () => {
+  // 1ms under an hour used to round to "60m overdue" / "in 60m" instead of
+  // bucketing into hours; 1ms under a day used to do the same at "24h".
+  assert.equal(Model.formatDue(-(HOUR - 1), 0), "1h overdue")
+  assert.equal(Model.formatDue(-(DAY - 1), 0), "1d overdue")
+  assert.equal(Model.formatDue(HOUR - 1, 0), "in 1h")
+  assert.equal(Model.formatDue(DAY - 1, 0), "in 1d")
+})
+
+test("formatDue: ordinary values stay in their natural unit", () => {
+  assert.equal(Model.formatDue(0, 0), "due now")
+  assert.equal(Model.formatDue(-5 * MIN, 0), "5m overdue")
+  assert.equal(Model.formatDue(-3 * HOUR, 0), "3h overdue")
+  assert.equal(Model.formatDue(-2 * DAY, 0), "2d overdue")
+  assert.equal(Model.formatDue(5 * MIN, 0), "in 5m")
+  assert.equal(Model.formatDue(3 * HOUR, 0), "in 3h")
+})
+
 // ── stats ────────────────────────────────────────────────────────────────
 
 test("stats: retentionRate is null with no reviews yet, else success fraction", () => {

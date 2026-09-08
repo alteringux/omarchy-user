@@ -4,6 +4,7 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 import "ReminderFlowModel.js" as ReminderFlowModel
+import "../alteringux.kit" as Kit
 
 Item {
   id: root
@@ -32,18 +33,27 @@ Item {
   property int cardHeight: Math.min(contentMargin * 2 + headerHeight, panel.height - Style.gapsOut * 2)
   readonly property string promptText: root.step === "message" ? "Reminder message" : "Remind in minutes"
 
+  readonly property var guard: Kit.BugGuard.create("alteringux.reminders", function(argv) { Quickshell.execDetached(argv) })
+
   function open(payloadJson) {
-    var payload = ({})
-    try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
-    if (payload.fontFamily) root.fontFamily = payload.fontFamily
+    guard.run("open", function() {
+      var payload = ({})
+      try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
+      // Bug fix: this only ever assigned fontFamily when the payload carried
+      // one, so a font passed on one open() stuck around forever afterwards —
+      // including on a later open() with no payload, or after a theme/font
+      // change moved Style.font.menuFamily on. Every open now starts from the
+      // live default and overrides it only when the payload actually says to.
+      root.fontFamily = payload.fontFamily || Style.font.menuFamily
 
-    root.opened = true
-    root.step = "minutes"
-    root.minutes = ""
-    root.filterText = ""
-    root.repeat = false
+      root.opened = true
+      root.step = "minutes"
+      root.minutes = ""
+      root.filterText = ""
+      root.repeat = false
 
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    })
   }
 
   function close() {
@@ -65,36 +75,48 @@ Item {
     root.filterText = nextFilter
   }
 
+  // Feature: step back to the minutes prompt instead of only being able to
+  // dismiss the whole flow — the typed minutes come back into the field so
+  // they're easy to correct rather than retyped from scratch.
+  function backToMinutes() {
+    root.step = "minutes"
+    root.filterText = root.minutes
+    root.minutes = ""
+    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
   function submit() {
-    var selection = root.filterText
+    guard.run("submit", function() {
+      var selection = root.filterText
 
-    if (root.step === "minutes") {
-      var nextMinutes = ReminderFlowModel.validMinutes(selection)
+      if (root.step === "minutes") {
+        var nextMinutes = ReminderFlowModel.validMinutes(selection)
 
-      if (!selection.trim()) {
+        if (!selection.trim()) {
+          root.dismiss()
+          return
+        }
+
+        if (!nextMinutes) {
+          Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-notification-send", "Invalid reminder", "Enter the number of minutes"])
+          return
+        }
+
+        root.minutes = nextMinutes
+        root.step = "message"
+        root.filterText = ""
+        Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+        return
+      }
+
+      if (root.step === "message") {
+        var args = root.repeat
+          ? [root.remindBin].concat(ReminderFlowModel.repeatReminderArgs(root.minutes, selection))
+          : [root.omarchyPath + "/bin/omarchy-reminder"].concat(ReminderFlowModel.reminderArgs(root.minutes, selection))
         root.dismiss()
-        return
+        Quickshell.execDetached(args)
       }
-
-      if (!nextMinutes) {
-        Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-notification-send", "Invalid reminder", "Enter the number of minutes"])
-        return
-      }
-
-      root.minutes = nextMinutes
-      root.step = "message"
-      root.filterText = ""
-      Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-      return
-    }
-
-    if (root.step === "message") {
-      var args = root.repeat
-        ? [root.remindBin].concat(ReminderFlowModel.repeatReminderArgs(root.minutes, selection))
-        : [root.omarchyPath + "/bin/omarchy-reminder"].concat(ReminderFlowModel.reminderArgs(root.minutes, selection))
-      root.dismiss()
-      Quickshell.execDetached(args)
-    }
+    })
   }
 
   PanelWindow {
@@ -138,6 +160,7 @@ Item {
         Keys.onPressed: function(event) {
           if (event.key === Qt.Key_Escape) {
             if (root.filterText) root.setFilter("")
+            else if (root.step === "message") root.backToMinutes()
             else root.dismiss()
             event.accepted = true
           } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
