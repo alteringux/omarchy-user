@@ -288,8 +288,15 @@ var ACHIEVEMENTS = [
     check: function (s, nowMs) { return ageDays(s, nowMs) >= 3 } },
   { id: "best_friend", name: "Best Friend", description: "Adopted for 7 days.",
     check: function (s, nowMs) { return ageDays(s, nowMs) >= 7 } },
+  // Reads the persisted `nightOwlEver` flag, not the current wall-clock hour
+  // against `lastInteractionMs` -- that reading only held while the most
+  // recent interaction happened to fall between midnight and 5am, so
+  // interacting again in daylight silently un-unlocked an already-earned
+  // trophy. Every other achievement here is monotonic in a counter or age;
+  // this one needs its own sticky flag (set once in withInteraction below)
+  // to keep that same guarantee.
   { id: "night_owl", name: "Night Owl", description: "Interact with it between midnight and 5am.",
-    check: function (s) { var h = new Date(numOr(s.lastInteractionMs, 0)).getHours(); return h >= 0 && h < 5 } },
+    check: function (s) { return !!s.nightOwlEver } },
   { id: "streak", name: "Can't Stop", description: "Hit a poke streak of " + POKE_STREAK_ANNOY + " in a row.",
     check: function (s) { return (s.pokeStreak || 0) >= POKE_STREAK_ANNOY } }
 ]
@@ -406,6 +413,7 @@ function defaultState() {
     bornMs: now,
     shiny: false,
     agedUp: false,
+    nightOwlEver: false,
     accessoryId: null,
     screenWatchEnabled: false,
     screenLookFreqMin: 20,
@@ -442,6 +450,7 @@ function parseState(raw) {
   if (typeof obj.roamMode === "string" && ROAM_MODES.indexOf(obj.roamMode) >= 0) out.roamMode = obj.roamMode
   if (typeof obj.shiny === "boolean") out.shiny = obj.shiny
   if (typeof obj.agedUp === "boolean") out.agedUp = obj.agedUp
+  if (typeof obj.nightOwlEver === "boolean") out.nightOwlEver = obj.nightOwlEver
   if (obj.accessoryId === null) out.accessoryId = null
   else if (typeof obj.accessoryId === "string") {
     for (var i = 0; i < ACCESSORIES.length; i++) {
@@ -479,6 +488,8 @@ function withInteraction(state, nowMs) {
   var next = Object.assign({}, state)
   next.lastInteractionMs = nowMs
   if (!next.manualSleep && next.energy > 20) next.asleep = false
+  var hour = new Date(nowMs).getHours()
+  if (hour >= 0 && hour < 5) next.nightOwlEver = true
   return next
 }
 

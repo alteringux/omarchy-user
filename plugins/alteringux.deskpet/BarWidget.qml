@@ -110,6 +110,10 @@ BarWidget {
     function mute(): void { root.setMuted(!root.state.muted) }
     function next(): void { root.nextPet() }
     function prev(): void { root.prevPet() }
+    // toggleSleep() was only reachable from the panel's Sleep/Wake button --
+    // every other mutating verb here (feed/play/poke/mute) already has an IPC
+    // twin for scripting + Hyprland keybindings, this one didn't.
+    function sleep(): void { root.toggleSleep() }
     function roam(mode: string): void { root.setRoamMode(mode) }
     function screenwatch(): void { root.setScreenWatchEnabled(!root.state.screenWatchEnabled) }
     function open(): void { root.open() }
