@@ -107,10 +107,7 @@ Item {
             font.family: root.fontFamily
             font.pixelSize: Math.max(1, root.fontSize - 1)
             font.bold: true
-            // Was Style.space(1) — nearly touching the title that follows,
-            // out of step with the source label's own Style.space(3) and the
-            // bullet's Style.space(4). Matches the rest of the row's rhythm.
-            rightPadding: Style.space(4)
+            rightPadding: Style.space(1)
             renderType: Text.NativeRendering
             verticalAlignment: Text.AlignVCenter
           }
