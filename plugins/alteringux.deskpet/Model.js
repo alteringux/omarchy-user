@@ -196,6 +196,20 @@ var PETS = [
     lowBattery: "Low battery means the wheel slows down. We are all the wheel.",
     longIdle: "The wheel got quiet while you were away. I kept time for you.",
     milestone: "A hamster can only be patted so many times before it hides in the hay."
+  },
+  {
+    id: "sloth", name: "Sloth", glyph: "🦥", tone: "positive",
+    tagline: "Slow is smooth. Smooth is done.",
+    voice: function (s) { return s + " *very slowly*"; },
+    greet: ["*appears to have been here the whole time.* Hello. You moved so fast.", "*one long, slow yawn.* Welcome back."],
+    poke: ["*processes the pat... eventually.*", "*nods, on a delay.* Good pat."],
+    feed: ["*accepts the snack with the urgency of a glacier.*"],
+    play: ["*reaches one arm halfway toward the ball. Will finish next cycle.*"],
+    sleepy: "*was already asleep. Has been asleep.*",
+    wake: "*unfolds, joint by joint, over several minutes.*",
+    lowBattery: "Low battery is... a restful period. Your laptop and I are in the same boat.",
+    longIdle: "Time passed while you were gone. I watched it go by, at a reasonable pace.",
+    milestone: "That many pats... that will take me a while to count."
   }
 ]
 
