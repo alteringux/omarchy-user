@@ -129,6 +129,24 @@ function iconFor(state) {
   return "\uf132";
 }
 
+// Label for an arbitrary interval: the matching preset's label, else a plain
+// "Nm" / formatCountdown fallback. Was hand-rolled in Panel.qml as
+// formatCountdown(sec).replace(" 00s", "m"), which only strips the string
+// " 00s" — for any exact-minute value formatCountdown already renders
+// zero-padded ("2m 00s"), so the replace left a stray trailing "m" behind
+// ("2mm"). Only presets are offered as buttons today, but a hand-edited
+// vpnrotate-config.json can set any clamped value, and this is also the
+// fallback the panel falls through to for those.
+function prettyInterval(sec) {
+  var presets = intervalPresets()
+  for (var i = 0; i < presets.length; i++)
+    if (presets[i].sec === sec) return presets[i].label
+  var s = Math.max(0, Math.floor(sec))
+  var r = s % 60
+  if (r === 0) return Math.floor(s / 60) + "m"
+  return formatCountdown(s)
+}
+
 // One-line human summary for the panel header / tooltip.
 function summaryLine(state) {
   if (!state) return "Not connected";
@@ -153,6 +171,7 @@ if (typeof module !== "undefined") {
     shortAgo: shortAgo,
     secondsUntilNextRotation: secondsUntilNextRotation,
     formatCountdown: formatCountdown,
+    prettyInterval: prettyInterval,
     barLabel: barLabel,
     iconFor: iconFor,
     summaryLine: summaryLine

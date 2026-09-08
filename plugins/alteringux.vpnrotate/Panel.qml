@@ -26,12 +26,7 @@ Panel {
   readonly property var guard: Kit.BugGuard.create("alteringux.vpnrotate", function (argv) { Quickshell.execDetached(argv) })
 
   readonly property var presets: Model.intervalPresets()
-
-  function prettyInterval(sec) {
-    for (var i = 0; i < presets.length; i++)
-      if (presets[i].sec === sec) return presets[i].label
-    return Model.formatCountdown(sec).replace(" 00s", "m")
-  }
+  readonly property string killSwitchError: hostWidget ? hostWidget.killSwitchError : ""
 
   KeyboardPanel {
     id: panel
@@ -109,7 +104,7 @@ Panel {
           width: content.width
           height: Style.space(6)
           radius: height / 2
-          color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.18)
+          color: Util.alpha(root.barForeground, 0.18)
           visible: root.cfg.autoRotate && root.connected && root.secsToRotate >= 0
 
           Rectangle {
@@ -156,7 +151,7 @@ Panel {
         Text {
           width: content.width
           text: "Each rotation drops open connections for a few seconds while the tunnel re-handshakes."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -170,7 +165,7 @@ Panel {
           activeFocusOnTab: false
           label: "Auto-rotate"
           description: root.cfg.autoRotate
-            ? ("Switches server every " + root.prettyInterval(root.cfg.intervalSec))
+            ? ("Switches server every " + Model.prettyInterval(root.cfg.intervalSec))
             : "Off — rotate manually with the button above"
           checked: root.cfg.autoRotate
           foreground: root.barForeground
@@ -204,7 +199,7 @@ Panel {
         Text {
           width: content.width
           text: "A new interval takes effect on the next cycle. Proton's free tier shares a small IP pool, so this beats simple per-IP limits but not blocks on the whole VPN range."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -225,11 +220,21 @@ Panel {
           onClicked: if (root.hostWidget) root.hostWidget.toggleKillSwitch()
         }
 
+        Text {
+          width: content.width
+          visible: root.killSwitchError.length > 0
+          text: root.killSwitchError
+          color: Kit.Palette.negative
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
         PanelSeparator {}
 
         Text {
           text: "Enter: connect/disconnect  ·  Del: disconnect  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

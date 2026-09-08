@@ -77,6 +77,20 @@ test("formatCountdown renders m + zero-padded s", () => {
   assert.strictEqual(Model.formatCountdown(0), "0s");
 });
 
+test("prettyInterval: preset seconds use the preset label", () => {
+  assert.strictEqual(Model.prettyInterval(600), "10m");
+  assert.strictEqual(Model.prettyInterval(60), "1m");
+});
+
+test("prettyInterval: an exact-minute non-preset value renders 'Nm', not 'Nmm'", () => {
+  assert.strictEqual(Model.prettyInterval(120), "2m");
+  assert.strictEqual(Model.prettyInterval(180), "3m");
+});
+
+test("prettyInterval: a non-exact-minute non-preset value falls back to formatCountdown", () => {
+  assert.strictEqual(Model.prettyInterval(90), "1m 30s");
+});
+
 // ── shortAgo ─────────────────────────────────────────────────────────────
 test("shortAgo buckets by magnitude", () => {
   assert.strictEqual(Model.shortAgo(0, 100), "");
