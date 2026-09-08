@@ -1,6 +1,6 @@
 // Pure date and format math for the clock widget and its calendar panel.
 // Everything here is locale- and Qt-free so it can be unit tested under node
-// (test/shell.d/clock-test.sh); the QML owns month/weekday naming through
+// (test/model.test.js); the QML owns month/weekday naming through
 // Qt.locale().
 
 var MS_PER_DAY = 86400000
