@@ -25,9 +25,9 @@ Panel {
   // of treating them as panel shortcuts. See docs/adr/0003.
   property int inlineEditors: 0
 
-  // "soon" tint — a warm amber, matching the alteringux.timers "running long"
-  // colour. The theme palette has no dedicated warning role.
-  readonly property color soonColor: "#d29922"
+  // "soon" tint — the shared warning amber (alteringux.timers' "running
+  // long" colour lives here too now: Kit.Palette.warning, not a re-hardcoded hex).
+  readonly property color soonColor: Kit.Palette.warning
 
   // Month the calendar is showing, and the day picked in it ("" = none yet).
   property int viewYear: (new Date()).getFullYear()
