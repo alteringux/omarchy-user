@@ -26,6 +26,10 @@ Item {
   readonly property var promptCardIds: (hostWidget && hostWidget.stateValue.prompt) ? hostWidget.stateValue.prompt.cardIds : []
   readonly property bool showIntro: root.round === null && root.promptKind !== ""
   readonly property string roundKey: root.round ? root.round.id : ""
+  // A verb already in flight (see BarWidget.qml's pendingVerb queue) — every
+  // button below that calls into hostWidget disables while true, so a fast
+  // double-click can't fire the same grade/ack/start twice in a row.
+  readonly property bool busy: !!(hostWidget && hostWidget.busy)
 
   // ---- round-local state ------------------------------------------------
   property string phase: "study"                 // study | blank | test | review
@@ -62,7 +66,7 @@ Item {
   }
 
   function gradeRound(g) {
-    if (!root.hostWidget || !root.scoreResult) return
+    if (!root.hostWidget || !root.scoreResult || root.busy) return
     var acc = Math.round(root.scoreResult.accuracy * 10000) / 10000
     root.hostWidget.finishRound(g, acc, JSON.stringify(root.clicks))
   }
@@ -161,6 +165,7 @@ Item {
               text: "Start"
               foreground: Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.startFromIntro()
             }
             Button {
@@ -168,12 +173,14 @@ Item {
               text: "Not now"
               foreground: Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.dismissIntro()
             }
             Button {
               text: root.takeover ? "10 min" : "Snooze 1h"
               foreground: Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.snoozeIntro(root.takeover ? 10 : 60)
             }
           }
@@ -277,7 +284,7 @@ Item {
           height: Style.space(4)
           radius: 2
           visible: root.phase === "study"
-          color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.15)
+          color: Util.alpha(Color.bar.text, 0.15)
 
           Rectangle {
             id: countdownFill
@@ -346,8 +353,8 @@ Item {
               height: Style.space(28)
               radius: Style.cornerRadius
               color: root.comparing
-                ? Qt.rgba(Kit.Palette.info.r, Kit.Palette.info.g, Kit.Palette.info.b, 0.25)
-                : Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.08)
+                ? Util.alpha(Kit.Palette.info, 0.25)
+                : Util.alpha(Color.bar.text, 0.08)
               Text {
                 id: cmpLabel
                 anchors.centerIn: parent
@@ -369,6 +376,7 @@ Item {
               text: "Again"
               foreground: root.scoreResult && root.scoreResult.grade === "again" ? Kit.Palette.negative : Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.gradeRound("again")
             }
             Button {
@@ -376,6 +384,7 @@ Item {
               text: "Hard"
               foreground: root.scoreResult && root.scoreResult.grade === "hard" ? Kit.Palette.warning : Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.gradeRound("hard")
             }
             Button {
@@ -383,6 +392,7 @@ Item {
               text: "Good"
               foreground: root.scoreResult && root.scoreResult.grade === "good" ? Kit.Palette.info : Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.gradeRound("good")
             }
             Button {
@@ -390,6 +400,7 @@ Item {
               text: "Easy"
               foreground: root.scoreResult && root.scoreResult.grade === "easy" ? Kit.Palette.positive : Color.bar.text
               bordered: true
+              enabled: !root.busy
               onClicked: root.gradeRound("easy")
             }
           }

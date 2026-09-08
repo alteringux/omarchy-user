@@ -28,6 +28,7 @@ Panel {
   readonly property bool importing: !!(hostWidget && hostWidget.importing)
   readonly property var catalog: (hostWidget && hostWidget.catalog) ? hostWidget.catalog : null
   readonly property var sessions: (root.catalog && root.catalog.recent) ? root.catalog.recent : []
+  readonly property string lastError: hostWidget ? hostWidget.lastError : ""
 
   function open() {
     root.controller.show()
@@ -120,6 +121,16 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          Text {
+            width: parent.width
+            visible: root.lastError.length > 0
+            text: root.lastError
+            color: Kit.Palette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Rectangle { width: parent.width; height: Style.spacing.hairline; color: root.barForeground; opacity: 0.12 }
 
           Kit.MetaText { width: implicitWidth; content: "RECENT"; foreground: root.barForeground }
@@ -162,7 +173,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: modelData.summary || ""
-                  color: Qt.darker(root.barForeground, 1.4)
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
@@ -228,7 +239,7 @@ Panel {
                 ? (root.catalog.totalSessions + " sessions · " + root.catalog.built + " replays"
                    + (root.catalog.stale > 0 ? " · " + root.catalog.stale + " stale" : ""))
                 : (root.scanning ? "scanning…" : "—")
-              color: Qt.darker(root.barForeground, 1.4)
+              color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -309,7 +320,7 @@ Panel {
                   Text {
                     text: modelData.built ? "▶" : (modelData.stale ? "~" : "·")
                     color: modelData.built ? Kit.Palette.positive
-                      : (modelData.stale ? Kit.Palette.warning : Qt.darker(root.barForeground, 1.5))
+                      : (modelData.stale ? Kit.Palette.warning : Kit.Palette.faint)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                     width: Style.space(12)
@@ -332,7 +343,7 @@ Panel {
                     return when + "  ·  " + modelData.toolUses + " tools  ·  " + proj
                       + (modelData.stale ? "  ·  replay stale" : "")
                   }
-                  color: Qt.darker(root.barForeground, 1.5)
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
