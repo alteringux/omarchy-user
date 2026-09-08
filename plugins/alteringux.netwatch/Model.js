@@ -378,8 +378,13 @@ function report(state, range, now) {
     }
   } else if (range === "month") {
     var mk = monthKey(d)
-    var daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
-    for (var day = 1; day <= daysInMonth; day++) {
+    // MTD per the doc comment above: stop at today, not the last day of the
+    // month. The loop used to run through daysInMonth regardless of `now`,
+    // so the mini bar chart in Panel.qml padded out with empty columns for
+    // days that hadn't happened yet, and "peak day" could tie against one of
+    // them (all-zero series still finds day 1 as the initial peak).
+    var lastDay = Math.min(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(), d.getDate())
+    for (var day = 1; day <= lastDay; day++) {
       var key = mk + "-" + pad2(day)
       var mb = s.buckets.daily[key] || { rx: 0, tx: 0 }
       series.push({ label: pad2(day), rx: mb.rx, tx: mb.tx })

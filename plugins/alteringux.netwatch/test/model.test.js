@@ -194,6 +194,14 @@ test("report(today) returns 24 hourly points and finds the peak hour", () => {
   assert.equal(rep.total.rx, 9_500_000)
 })
 
+test("report(month) stops at today, not the last day of the month", () => {
+  // T0 is 2026-06-15: a 30-day month with 15 days still to come.
+  const state = Model.defaultState()
+  const rep = Model.report(state, "month", T0)
+  assert.equal(rep.series.length, 15)
+  assert.equal(rep.series[rep.series.length - 1].label, "15")
+})
+
 test("parseConfig clamps hostile hand-edits", () => {
   const c = Model.parseConfig('{"sampleIntervalSec":-4,"monthlyQuotaGB":"lots","ratesRingSize":0}')
   assert.equal(c.sampleIntervalSec, 1)
