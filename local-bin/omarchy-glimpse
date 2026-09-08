@@ -1,0 +1,613 @@
+#!/usr/bin/env bash
+# omarchy-glimpse — a visual / photographic-memory trainer. Wallhaven scene
+# photos, a brief exposure, then recall. First mode: Spot the Change — study
+# scene A, blank, then altered scene B; click where it changed.
+#
+# Sole writer of ~/.local/state/omarchy/glimpse-cards.json (the scheduled
+# scene pool + SM-2 schedule) and glimpse-state.json (round / session /
+# streak runtime). glimpse-config.json (cadence + Wallhaven + difficulty
+# knobs) is seeded once and meant to be hand-edited. Scene images are cached
+# under ~/.cache/omarchy/glimpse/ and are regenerable — a scheduled scene's
+# altered A/B pair is reproduced deterministically from the base image + a
+# per-card seed, so the cache can be cleared without losing the pool.
+#
+# A `systemd --user` transient unit (this script, `__run`) ticks once a
+# minute while enabled: rolls the daily counters, tops the pool up, and asks
+# the shared engine (Model.js via glimpse-cli.js) whether a scheduled scene
+# is due — raising a soft check-in, or a fullscreen takeover once it's badly
+# overdue or you keep dismissing. The alteringux.glimpse bar widget is a thin
+# view: it watches the files, runs the round overlay, and calls the verbs
+# below. See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-glimpse next-round [--drill|--scheduled] [--card <id>] [--level N]
+#                                    build a round and put it on screen (prints round JSON)
+#   omarchy-glimpse finish <again|hard|good|easy> <accuracy> [--clicks <json>]
+#                                    end the on-screen round: grade the scene (scheduled)
+#                                    or ramp the drill level, then clear it
+#   omarchy-glimpse score <truth-json> <clicks-json>   score clicks against truth (JSON)
+#   omarchy-glimpse abandon          clear the on-screen round without grading
+#   omarchy-glimpse checkin          raise a scheduled check-in now (keybind target)
+#   omarchy-glimpse ack <checkin|takeover> [--snooze <min>]   dismiss the prompt
+#   omarchy-glimpse fetch [n]        cache n fresh Wallhaven scenes (default 4)
+#   omarchy-glimpse promote [n]      turn n cached scenes into scheduled pool cards
+#   omarchy-glimpse list             the scheduled pool, soonest-due first
+#   omarchy-glimpse drop <id>        remove a scene card from the pool
+#   omarchy-glimpse get | get-state | get-config     raw JSON
+#   omarchy-glimpse status           live { enabled, prompt, round, dueCount, ... }
+#   omarchy-glimpse stats            pool size, due count, drill level, streak, accuracy
+#   omarchy-glimpse vision-check [<image>]   smoke-test llm-vision on a cached scene
+#   omarchy-glimpse pause <dur>      mute check-ins for a while (2h / 30m / 90)
+#   omarchy-glimpse resume           end a pause early
+#   omarchy-glimpse on | off         enable / disable (starts off)
+#
+# Env: OMARCHY_STATE_DIR          override the state dir (tests)
+#      OMARCHY_GLIMPSE_DIR        override the plugin dir (Model.js / glimpse-cli.js)
+#      OMARCHY_GLIMPSE_CACHE_DIR  override the image cache dir
+#      OMARCHY_GLIMPSE_NO_DAEMON=1  skip all systemd calls (tests)
+#      OMARCHY_GLIMPSE_QUIET=1      skip notify-send (tests)
+#      OMARCHY_GLIMPSE_NO_NET=1     never call curl (tests) — fetch/promote become no-ops
+#      OMARCHY_GLIMPSE_TICK_SECONDS override the 60s daemon cadence (tests)
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+GLIMPSE_DIR="${OMARCHY_GLIMPSE_DIR:-$HOME/.config/omarchy/plugins/alteringux.glimpse}"
+CACHE_DIR="${OMARCHY_GLIMPSE_CACHE_DIR:-$HOME/.cache/omarchy/glimpse}"
+CONFIG_FILE="$STATE_DIR/glimpse-config.json"
+STATE_FILE="$STATE_DIR/glimpse-state.json"
+CARDS_FILE="$STATE_DIR/glimpse-cards.json"
+ENGINE="$GLIMPSE_DIR/glimpse-cli.js"
+UNIT="omarchy-glimpse"
+TICK_SECONDS="${OMARCHY_GLIMPSE_TICK_SECONDS:-60}"
+
+DEFAULT_CONFIG='{"version":1,"enabled":false,"checkinGapHours":20,"overdueTakeoverDays":3,"dismissTakeoverStreak":3,"poolSize":24,"wallhaven":{"queries":["interior room","living room","kitchen","office desk","workshop","street scene","city street","town square","market","cafe interior","landscape","mountain village","harbour","park","bookshelf","cluttered desk","hotel lobby","train station","library interior"],"categories":"100","purity":"100","ratios":"16x9,16x10","atleast":"1600x900"},"visionQuestions":false,"visionModel":"","exposureMaxMs":7000,"exposureMinMs":2500,"blankMs":650}'
+DEFAULT_STATE='{"version":1,"prompt":null,"round":null,"session":{"type":"drill","level":3,"rounds":0,"hits":0,"misses":0,"startedAt":0},"dismissStreak":0,"lastPromptMs":0,"lastRoundMs":0,"roundsToday":0,"roundsTodayDate":"","pauseUntilMs":0,"streakDays":0,"lastActiveDate":"","lifetime":{"rounds":0,"accuracySum":0}}'
+
+mkdir -p "$STATE_DIR" "$CACHE_DIR"
+
+die()    { echo "omarchy-glimpse: $*" >&2; exit 1; }
+now_ms() { date +%s%3N; }
+have()   { command -v "$1" >/dev/null 2>&1; }
+
+have jq     || die "jq not found"
+have node   || die "node not found"
+have magick || die "ImageMagick (magick) not found"
+[ -f "$ENGINE" ] || die "engine not found at $ENGINE (set OMARCHY_GLIMPSE_DIR)"
+
+# ── file IO ────────────────────────────────────────────────────────────────
+write_json() {   # $1 = file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-glimpse: refusing to write invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  printf '%s\n' "$DEFAULT_CONFIG" | write_json "$CONFIG_FILE"
+}
+read_config() { seed_config; jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"; }
+read_state()  { { [ -f "$STATE_FILE" ] && jq -e . "$STATE_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_STATE"; }
+read_cards()  { { [ -f "$CARDS_FILE" ] && jq -e . "$CARDS_FILE" 2>/dev/null; } || printf '%s' '{"version":1,"cards":[]}'; }
+
+put_state() { write_json "$STATE_FILE"; }
+put_cards() { write_json "$CARDS_FILE"; }
+state_set() { read_state | jq "$1" | put_state; }
+
+engine() { node "$ENGINE" "$1"; }
+
+# ── side effects ─────────────────────────────────────────────────────────
+notify() {   # $1 = urgency, $2 = title, $3 = body
+  [ "${OMARCHY_GLIMPSE_QUIET:-0}" = 1 ] && return 0
+  have notify-send || return 0
+  notify-send -a "Glimpse" -u "$1" "$2" "$3" 2>/dev/null || true
+}
+pulse_prompt() {   # $1 = checkin|takeover
+  have omarchy-pulse || return 0
+  local lvl label
+  case "$1" in
+    takeover) lvl=critical; label="A memory round is badly overdue" ;;
+    *)        lvl=urgent;   label="Memory round due" ;;
+  esac
+  omarchy-pulse attention alteringux.glimpse --label "$label" --level "$lvl" \
+    --action "omarchy-shell alteringux.glimpse checkin" --action-label "Start" >/dev/null 2>&1 || true
+}
+pulse_clear() { have omarchy-pulse && omarchy-pulse clear alteringux.glimpse >/dev/null 2>&1 || true; }
+
+# ── daemon lifecycle ────────────────────────────────────────────────────
+daemon_active() {
+  [ "${OMARCHY_GLIMPSE_NO_DAEMON:-0}" = 1 ] && return 1
+  systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null
+}
+ensure_daemon() {
+  [ "${OMARCHY_GLIMPSE_NO_DAEMON:-0}" = 1 ] && return 0
+  daemon_active && return 0
+  systemd-run --user --unit="$UNIT" --collect \
+    --description="Omarchy glimpse trainer" -- "$0" __run >/dev/null 2>&1 || true
+}
+stop_daemon() {
+  [ "${OMARCHY_GLIMPSE_NO_DAEMON:-0}" = 1 ] && return 0
+  systemctl --user stop "${UNIT}.service" 2>/dev/null || true
+}
+
+# ── duration parsing ───────────────────────────────────────────────────
+dur_to_min() {
+  local raw="${1:-}"
+  case "$raw" in
+    *h) echo $(( ${raw%h} * 60 )) ;;
+    *m) echo "${raw%m}" ;;
+    ''|*[!0-9]*) die "bad duration: '$raw' (try 2h, 30m, 90)" ;;
+    *) echo "$raw" ;;
+  esac
+}
+
+# ── image cache ────────────────────────────────────────────────────────
+base_path()  { echo "$CACHE_DIR/$1.base.jpg"; }
+scene_ids_cached() { ls -1 "$CACHE_DIR" 2>/dev/null | sed -n 's/\.base\.jpg$//p'; }
+
+# Download + normalise one Wallhaven scene by id. No-op if the base already
+# exists. Returns non-zero (quietly) on any network / tool failure.
+ensure_scene() {   # $1 = wallhaven scene id
+  local id="$1" base src url
+  base="$(base_path "$id")"
+  [ -f "$base" ] && return 0
+  [ "${OMARCHY_GLIMPSE_NO_NET:-0}" = 1 ] && return 1
+  url="$(curl -sS --max-time 20 -A "omarchy-glimpse" "https://wallhaven.cc/api/v1/w/$id" 2>/dev/null \
+        | jq -r '.data.path // empty' 2>/dev/null)"
+  [ -n "$url" ] || return 1
+  src="$CACHE_DIR/$id.src"
+  curl -sS --max-time 40 --max-filesize 20000000 -A "omarchy-glimpse" -o "$src" "$url" 2>/dev/null || { rm -f "$src"; return 1; }
+  magick "$src" -auto-orient -resize '1600x1000>' -strip -colorspace sRGB -quality 88 "$base" 2>/dev/null \
+    || { rm -f "$src" "$base"; return 1; }
+  rm -f "$src"
+  [ -f "$base" ]
+}
+
+cmd_fetch() {
+  local want="${1:-4}" cfg q cats purity ratios atleast added=0 ids id
+  [ "${OMARCHY_GLIMPSE_NO_NET:-0}" = 1 ] && { echo "network disabled (OMARCHY_GLIMPSE_NO_NET)"; return 0; }
+  have curl || die "curl not found"
+  cfg="$(read_config)"
+  mapfile -t QUERIES < <(jq -r '.wallhaven.queries[]' <<<"$cfg")
+  q="${QUERIES[$(( RANDOM % ${#QUERIES[@]} ))]}"
+  cats="$(jq -r '.wallhaven.categories' <<<"$cfg")"
+  purity="$(jq -r '.wallhaven.purity' <<<"$cfg")"
+  ratios="$(jq -r '.wallhaven.ratios' <<<"$cfg")"
+  atleast="$(jq -r '.wallhaven.atleast' <<<"$cfg")"
+
+  ids="$(curl -sS --max-time 25 -A "omarchy-glimpse" -G "https://wallhaven.cc/api/v1/search" \
+    --data-urlencode "q=$q" --data-urlencode "categories=$cats" --data-urlencode "purity=$purity" \
+    --data-urlencode "ratios=$ratios" --data-urlencode "atleast=$atleast" --data-urlencode "sorting=random" \
+    2>/dev/null | jq -r '.data[]?.id' 2>/dev/null)" || die "wallhaven search failed"
+  [ -n "$ids" ] || die "wallhaven returned no results for \"$q\""
+
+  while read -r id; do
+    [ -n "$id" ] || continue
+    [ "$added" -ge "$want" ] && break
+    if ensure_scene "$id"; then
+      added=$((added + 1))
+      echo "cached $id"
+    fi
+  done <<<"$ids"
+  echo "fetched $added scene(s) for \"$q\""
+}
+
+# ── the ImageMagick alteration ────────────────────────────────────────
+# From a base image, write <out>.a.jpg (the untouched normalised scene) and
+# <out>.b.jpg (the scene with `count` local changes), and print the changed
+# regions as a JSON array of normalised rects [{x,y,w,h,kind}]. Deterministic
+# for a given (base, count, subtlety, seed): bash $RANDOM is seeded and every
+# magick op is deterministic, so a scheduled card reproduces the same B and
+# the same truth every review without persisting either.
+alter_image() {   # $1 base  $2 out-prefix  $3 count  $4 subtlety  $5 seed
+  local base="$1" out="$2" count="$3" sub="$4" seed="$5"
+  [ -f "$base" ] || return 1
+  local dims W H
+  dims="$(magick identify -format '%w %h' "$base" 2>/dev/null)" || return 1
+  W="${dims% *}"; H="${dims#* }"
+  cp -f "$base" "$out.a.jpg"
+  cp -f "$base" "$out.b.jpg"
+
+  RANDOM="$(( seed % 32768 ))"
+  local prims=(recolor brighten darken blur patch)
+  local placed_x=() placed_y=() placed_w=() placed_h=()
+  local margin_x=$(( W / 20 )) margin_y=$(( H / 20 ))
+  # Patch side: 4%..12% of width, smaller as subtlety climbs.
+  local frac=$(( 130 - 10 * sub ))          # 120..50 (per-mille)
+  [ "$frac" -lt 45 ] && frac=45
+  local pw=$(( W * frac / 1000 )) ph
+  [ "$pw" -lt 40 ] && pw=40
+  ph=$pw
+
+  local truth="[]" i tries rx ry ok j prim srcx srcy geom srcgeom hue br
+  for (( i = 0; i < count; i++ )); do
+    tries=0; ok=0
+    while [ "$tries" -lt 25 ]; do
+      tries=$((tries + 1))
+      rx=$(( margin_x + (RANDOM % (W - 2*margin_x - pw > 1 ? W - 2*margin_x - pw : 1)) ))
+      ry=$(( margin_y + (RANDOM % (H - 2*margin_y - ph > 1 ? H - 2*margin_y - ph : 1)) ))
+      ok=1
+      for (( j = 0; j < ${#placed_x[@]}; j++ )); do
+        if [ $(( rx < placed_x[j] + placed_w[j] && rx + pw > placed_x[j] && ry < placed_y[j] + placed_h[j] && ry + ph > placed_y[j] )) -eq 1 ]; then
+          ok=0; break
+        fi
+      done
+      [ "$ok" -eq 1 ] && break
+    done
+    [ "$ok" -eq 1 ] || continue
+    placed_x+=("$rx"); placed_y+=("$ry"); placed_w+=("$pw"); placed_h+=("$ph")
+
+    prim="${prims[$(( RANDOM % ${#prims[@]} ))]}"
+    geom="${pw}x${ph}+${rx}+${ry}"
+    case "$prim" in
+      recolor)
+        hue=$(( 100 + (55 - 5 * sub) * ( (RANDOM % 2) == 0 ? 1 : -1 ) ))
+        magick "$out.b.jpg" -region "$geom" -modulate 100,150,"$hue" +region "$out.b.jpg" 2>/dev/null || true ;;
+      brighten)
+        br=$(( 55 - 5 * sub )); [ "$br" -lt 12 ] && br=12
+        magick "$out.b.jpg" -region "$geom" -brightness-contrast "${br}x8" +region "$out.b.jpg" 2>/dev/null || true ;;
+      darken)
+        br=$(( 55 - 5 * sub )); [ "$br" -lt 12 ] && br=12
+        magick "$out.b.jpg" -region "$geom" -brightness-contrast "-${br}x0" +region "$out.b.jpg" 2>/dev/null || true ;;
+      blur)
+        br=$(( 12 - sub )); [ "$br" -lt 3 ] && br=3
+        magick "$out.b.jpg" -region "$geom" -blur "0x${br}" +region "$out.b.jpg" 2>/dev/null || true ;;
+      patch)
+        # paint a copy of a nearby region over the target — an object appears / vanishes
+        srcx=$(( rx + pw + margin_x )); [ $(( srcx + pw )) -ge $(( W - margin_x )) ] && srcx=$(( rx - pw - margin_x ))
+        [ "$srcx" -lt "$margin_x" ] && srcx="$margin_x"
+        srcy="$ry"
+        srcgeom="${pw}x${ph}+${srcx}+${srcy}"
+        magick "$out.b.jpg" \( +clone -crop "$srcgeom" +repage \) -geometry "+${rx}+${ry}" -compose over -composite "$out.b.jpg" 2>/dev/null || true ;;
+    esac
+
+    truth="$(jq -c --argjson x "$rx" --argjson y "$ry" --argjson w "$pw" --argjson h "$ph" \
+      --argjson W "$W" --argjson H "$H" --arg kind "$prim" \
+      '. + [{x: ($x/$W), y: ($y/$H), w: ($w/$W), h: ($h/$H), kind: $kind}]' <<<"$truth")"
+  done
+
+  printf '%s\n' "$truth"
+}
+
+card_seed() { cksum <<<"$1" | awk '{print $1}'; }
+
+# ── build a round and put it on screen ────────────────────────────────
+cmd_next_round() {
+  local sessionType="drill" cardId="" level=""
+  while (($#)); do
+    case "$1" in
+      --drill)     sessionType="drill"; shift ;;
+      --scheduled) sessionType="scheduled"; shift ;;
+      --card)      cardId="${2:-}"; sessionType="scheduled"; shift 2 ;;
+      --level)     level="${2:-}"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  local cfg st cards now
+  cfg="$(read_config)"; st="$(read_state)"; cards="$(read_cards)"; now="$(now_ms)"
+
+  local sceneId count sub seed truth outpref
+  if [ "$sessionType" = "scheduled" ]; then
+    if [ -z "$cardId" ]; then
+      cardId="$(jq -n --argjson cards "$cards" --argjson now "$now" '{cards:$cards.cards, now:$now}' \
+        | engine due-ids | jq -r '.ids[0] // empty')"
+    fi
+    [ -n "$cardId" ] || die "no scheduled scene is due — try: omarchy-glimpse next-round --drill"
+    local card
+    card="$(jq -n --argjson cards "$cards" --arg id "$cardId" '{cards:$cards.cards, id:$id}' | engine card)"
+    [ "$card" != "null" ] || die "no such scene card: $cardId"
+    sceneId="$(jq -r '.sceneId' <<<"$card")"
+    count="$(jq -r '.changeCount' <<<"$card")"
+    [ -z "$level" ] && level="$(jq -r '.level' <<<"$card")"
+    sub="$level"
+    seed="$(card_seed "$cardId")"
+    outpref="$CACHE_DIR/card-$cardId"
+  else
+    [ -z "$level" ] && level="$(jq -r '.session.level' <<<"$st")"
+    local lp
+    lp="$(jq -n --argjson cfg "$cfg" --argjson level "$level" '{config:$cfg, level:$level}' | engine level-params)"
+    count="$(jq -r '.changeCount' <<<"$lp")"
+    sub="$(jq -r '.subtlety' <<<"$lp")"
+    mapfile -t POOL < <(scene_ids_cached)
+    if [ "${#POOL[@]}" -eq 0 ]; then
+      cmd_fetch 4 >/dev/null 2>&1 || true
+      mapfile -t POOL < <(scene_ids_cached)
+    fi
+    [ "${#POOL[@]}" -gt 0 ] || die "no scenes cached and fetch failed — check your connection"
+    sceneId="${POOL[$(( RANDOM % ${#POOL[@]} ))]}"
+    seed="$now"
+    outpref="$CACHE_DIR/drill-$sceneId"
+  fi
+
+  ensure_scene "$sceneId" || die "could not obtain scene image for $sceneId"
+  truth="$(alter_image "$(base_path "$sceneId")" "$outpref" "$count" "$sub" "$seed")" || die "alteration failed"
+  [ "$(jq 'length' <<<"$truth")" -gt 0 ] || die "alteration produced no changes"
+
+  local spec round
+  spec="$(jq -cn --arg cardId "${cardId:-}" --arg sceneId "$sceneId" \
+    --arg a "file://$outpref.a.jpg" --arg b "file://$outpref.b.jpg" --argjson truth "$truth" \
+    '{cardId: (if $cardId == "" then null else $cardId end), sceneId:$sceneId, imageA:$a, imageB:$b, truth:$truth}')"
+  round="$(jq -n --argjson spec "$spec" --arg st "$sessionType" --argjson level "$level" \
+    --argjson cfg "$cfg" --argjson now "$now" \
+    '{spec:$spec, sessionType:$st, level:$level, config:$cfg, now:$now}' | engine start-round)"
+
+  jq --argjson round "$round" --argjson now "$now" \
+    '.round = $round | .prompt = null | .lastRoundMs = $now' <<<"$st" | put_state
+  pulse_clear
+  printf '%s\n' "$round"
+}
+
+cmd_finish() {
+  local grade="${1:-}" accuracy="${2:-0}"; shift 2 || true
+  case "$grade" in again|hard|good|easy) ;; *) die "usage: omarchy-glimpse finish <again|hard|good|easy> <accuracy> [--clicks <json>]" ;; esac
+  local clicks="[]"
+  while (($#)); do
+    case "$1" in --clicks) clicks="${2:-[]}"; shift 2 ;; *) shift ;; esac
+  done
+
+  local st now cards round sessionType cardId
+  st="$(read_state)"; now="$(now_ms)"; cards="$(read_cards)"
+  round="$(jq -c '.round' <<<"$st")"
+  [ "$round" != "null" ] || { echo "no round on screen"; return 0; }
+  sessionType="$(jq -r '.round.sessionType' <<<"$st")"
+  cardId="$(jq -r '.round.cardId // empty' <<<"$st")"
+
+  if [ "$sessionType" = "scheduled" ] && [ -n "$cardId" ]; then
+    jq -n --argjson cards "$cards" --arg id "$cardId" --arg grade "$grade" \
+      --argjson accuracy "$accuracy" --argjson now "$now" \
+      '{cards:$cards.cards, id:$id, grade:$grade, accuracy:$accuracy, now:$now}' \
+      | engine grade | jq '{version:1, cards:.cards}' | put_cards
+  fi
+
+  local nextLevel
+  nextLevel="$(jq -n --argjson level "$(jq -r '.session.level' <<<"$st")" --arg grade "$grade" \
+    '{level:$level, grade:$grade}' | engine next-level | jq -r '.level')"
+
+  local hit=0
+  [ "$grade" = "good" ] || [ "$grade" = "easy" ] && hit=1
+
+  jq --argjson now "$now" --argjson acc "$accuracy" --argjson nl "$nextLevel" --argjson hit "$hit" \
+    --arg stype "$sessionType" \
+    '.round = null
+     | .prompt = null
+     | .dismissStreak = 0
+     | .lastRoundMs = $now
+     | .roundsToday = (.roundsToday + 1)
+     | .lifetime.rounds = (.lifetime.rounds + 1)
+     | .lifetime.accuracySum = (.lifetime.accuracySum + $acc)
+     | .session.rounds = (.session.rounds + 1)
+     | .session.hits = (.session.hits + $hit)
+     | .session.misses = (.session.misses + (1 - $hit))
+     | (if $stype == "drill" then .session.level = $nl else . end)' <<<"$st" | put_state
+  pulse_clear
+  echo "finished ($grade, accuracy $accuracy)"
+}
+
+cmd_score() {
+  local truth="${1:-[]}" clicks="${2:-[]}"
+  jq -n --argjson truth "$truth" --argjson clicks "$clicks" '{truth:$truth, clicks:$clicks}' | engine score
+}
+
+cmd_abandon() {
+  state_set '.round = null'
+  echo "round abandoned"
+}
+
+cmd_checkin() {
+  local cfg st ids
+  cfg="$(read_config)"
+  [ "$(jq -r '.enabled' <<<"$cfg")" = "true" ] || die "glimpse is off — run: omarchy-glimpse on"
+  st="$(read_state)"
+  if [ "$(jq -r '.prompt' <<<"$st")" != "null" ] || [ "$(jq -r '.round' <<<"$st")" != "null" ]; then
+    echo "something is already on screen"; return 0
+  fi
+  ids="$(jq -n --argjson cards "$(read_cards)" --argjson now "$(now_ms)" '{cards:$cards.cards, now:$now}' \
+    | engine due-ids | jq -c '.ids')"
+  if [ "$ids" = "[]" ]; then echo "nothing due"; return 0; fi
+  jq --argjson id "$(jq -r '.[0]' <<<"$ids")" --argjson now "$(now_ms)" \
+    '.prompt = {kind:"checkin", cardIds:[$id], reason:"manual"} | .lastPromptMs = $now' <<<"$st" | put_state
+  notify normal "👁 Glimpse check-in" "A scheduled memory round is ready."
+  pulse_prompt checkin
+}
+
+cmd_ack() {
+  local kind="${1:-}"; shift || true
+  case "$kind" in checkin|takeover) ;; *) die "usage: omarchy-glimpse ack <checkin|takeover> [--snooze <min>]" ;; esac
+  local snooze=""
+  while (($#)); do
+    case "$1" in --snooze) snooze="$(dur_to_min "${2:-}")"; shift 2 ;; *) die "unknown option: $1" ;; esac
+  done
+  local now pause_expr streak_expr
+  now="$(now_ms)"
+  pause_expr=".pauseUntilMs = .pauseUntilMs"
+  [ -n "$snooze" ] && pause_expr=".pauseUntilMs = ($now + $snooze * 60000)"
+  if [ "$kind" = "takeover" ]; then streak_expr=".dismissStreak = 0"; else streak_expr=".dismissStreak = (.dismissStreak + 1)"; fi
+  read_state | jq --argjson now "$now" ".prompt = null | .lastPromptMs = \$now | $streak_expr | $pause_expr" | put_state
+  pulse_clear
+  echo "ack $kind"
+}
+
+# Turn cached-but-unused scenes into scheduled pool cards, at most `n`.
+cmd_promote() {
+  local want="${1:-1}" cards used id added=0
+  cards="$(read_cards)"
+  used=" $(jq -r '[.cards[].sceneId] | join(" ")' <<<"$cards") "
+  while read -r id; do
+    [ -n "$id" ] || continue
+    [ "$added" -ge "$want" ] && break
+    case "$used" in *" $id "*) continue ;; esac
+    local newid count level seed
+    newid="s$(now_ms)$(( RANDOM % 900 + 100 ))"
+    level=3; count=2; seed="$(card_seed "$newid")"
+    ensure_scene "$id" || continue
+    alter_image "$(base_path "$id")" "$CACHE_DIR/card-$newid" "$count" "$level" "$seed" >/dev/null || continue
+    cards="$(jq -c --arg id "$newid" --arg scene "$id" --argjson lvl "$level" --argjson cc "$count" --argjson now "$(now_ms)" \
+      '{version:1, cards: (.cards + [{id:$id, sceneId:$scene, mode:"change", level:$lvl, changeCount:$cc, truth:[], createdAt:$now, ease:2.5, intervalDays:0, dueAt:$now, reps:0, lapses:0, lastGrade:null, shownAt:null, bestAccuracy:0}])}' <<<"$cards")"
+    used="$used$id "
+    added=$((added + 1))
+    echo "promoted scene $id -> $newid"
+  done < <(scene_ids_cached)
+  [ "$added" -gt 0 ] && printf '%s\n' "$cards" | put_cards
+  echo "promoted $added scene(s) into the pool"
+}
+
+cmd_list() {
+  jq -n --argjson cards "$(read_cards)" --argjson now "$(now_ms)" '
+    ($cards.cards | sort_by(.dueAt))[]
+    | "\(.id)  scene:\(.sceneId)  lvl\(.level)  \(.changeCount) changes  " +
+      (if .dueAt <= $now then "due now" else "due in \(((.dueAt - $now) / 3600000) | floor)h" end) +
+      (if .reps > 0 then "  reps:\(.reps)" else "  (new)" end)
+  ' -r
+}
+
+cmd_drop() {
+  local id="${1:-}"; [ -n "$id" ] || die "usage: omarchy-glimpse drop <id>"
+  jq -n --argjson cards "$(read_cards)" --arg id "$id" '{cards:$cards.cards, id:$id}' \
+    | engine drop | jq '{version:1, cards:.cards}' | put_cards
+  rm -f "$CACHE_DIR/card-$id".*.jpg
+  echo "dropped $id"
+}
+
+cmd_status() {
+  local decision
+  decision="$(jq -n --argjson config "$(read_config)" --argjson state "$(read_state)" \
+              --argjson cards "$(read_cards)" --argjson now "$(now_ms)" \
+              '{config:$config, state:$state, cards:$cards.cards, now:$now}' | engine decide)"
+  jq -n --argjson d "$decision" --argjson st "$(read_state)" --argjson cfg "$(read_config)" \
+    --argjson stats "$(jq -n --argjson cards "$(read_cards)" --argjson state "$(read_state)" --argjson now "$(now_ms)" \
+      '{cards:$cards.cards, state:$state, now:$now}' | engine stats)" \
+    '{enabled: $cfg.enabled, prompt: $st.prompt, round: ($st.round != null), wouldPrompt: $d.prompt,
+      reason: $d.reason, dueCount: $stats.dueCount, poolSize: $stats.poolSize,
+      drillLevel: $stats.drillLevel, streakDays: $stats.streakDays, pauseUntilMs: $st.pauseUntilMs}'
+}
+
+cmd_stats() {
+  jq -n --argjson cards "$(read_cards)" --argjson state "$(read_state)" --argjson now "$(now_ms)" \
+    '{cards:$cards.cards, state:$state, now:$now}' | engine stats
+}
+
+cmd_vision_check() {
+  local img="${1:-}"
+  have llm-vision || die "llm-vision not found on PATH"
+  if [ -z "$img" ]; then
+    local id; id="$(scene_ids_cached | head -1)"
+    [ -n "$id" ] || die "no cached scenes — run: omarchy-glimpse fetch"
+    img="$(base_path "$id")"
+  fi
+  [ -f "$img" ] || die "no such image: $img"
+  local model; model="$(jq -r '.visionModel // ""' <<<"$(read_config)")"
+  local args=(--image "$img" --json --max-tokens 500)
+  [ -n "$model" ] && args+=(--model "$model")
+  echo "asking llm-vision about $img ..."
+  llm-vision "${args[@]}" 'List 3 concrete, countable details a person could be quizzed on after a brief look at this scene. Return {"details":["...","...","..."]}.'
+}
+
+cmd_pause() {
+  local min; min="$(dur_to_min "${1:-}")"
+  [ "$min" -gt 0 ] 2>/dev/null || die "usage: omarchy-glimpse pause <2h|30m|90>"
+  local until; until=$(( $(now_ms) + min * 60000 ))
+  state_set ".pauseUntilMs = $until | .prompt = null"
+  pulse_clear
+  notify normal "😴 Glimpse paused" "No check-ins for ${min}m."
+  echo "paused ${min}m"
+}
+cmd_resume() { state_set ".pauseUntilMs = 0"; echo "resumed"; }
+
+cmd_on() {
+  read_config | jq '.enabled = true' | write_json "$CONFIG_FILE"
+  [ "${OMARCHY_GLIMPSE_NO_NET:-0}" = 1 ] || cmd_fetch 4 >/dev/null 2>&1 || true
+  cmd_promote 4 >/dev/null 2>&1 || true
+  ensure_daemon
+  do_tick
+  notify normal "👁 Glimpse is on" "Scene-memory check-ins will start. Drill anytime: SUPER+SHIFT+ALT+G. Pause: omarchy-glimpse pause 2h"
+  echo "on"
+}
+cmd_off() {
+  read_config | jq '.enabled = false' | write_json "$CONFIG_FILE"
+  state_set ".prompt = null"
+  stop_daemon
+  pulse_clear
+  notify normal "👁 Glimpse is off" "No more check-ins until you turn it back on."
+  echo "off"
+}
+
+# ── the tick ───────────────────────────────────────────────────────────
+do_tick() {
+  local cfg st decision want kind ids reason now
+  cfg="$(read_config)"
+  [ "$(jq -r '.enabled' <<<"$cfg")" = "true" ] || return 0
+  st="$(read_state)"
+
+  st="$(jq -n --argjson state "$st" --argjson now "$(now_ms)" '{state:$state, now:$now}' | engine roll-daily)"
+  put_state <<<"$st"
+
+  # top the pool up, gently: at most one promotion per tick
+  local pool poolSize
+  pool="$(jq '.cards | length' <<<"$(read_cards)")"
+  poolSize="$(jq -r '.poolSize' <<<"$cfg")"
+  if [ "$pool" -lt "$poolSize" ]; then
+    ( cmd_promote 1 >/dev/null 2>&1 || cmd_fetch 3 >/dev/null 2>&1 || true ) &
+  fi
+
+  decision="$(jq -n --argjson config "$cfg" --argjson state "$st" --argjson cards "$(read_cards)" --argjson now "$(now_ms)" \
+              '{config:$config, state:$state, cards:$cards.cards, now:$now}' | engine decide)"
+  want="$(jq -r '.prompt // "none"' <<<"$decision")"
+
+  if [ "$want" != "none" ] && [ "$(jq -r '.prompt' <<<"$st")" = "null" ] && [ "$(jq -r '.round' <<<"$st")" = "null" ]; then
+    kind="$(jq -r '.prompt.kind' <<<"$decision")"
+    ids="$(jq -c '.prompt.cardIds' <<<"$decision")"
+    reason="$(jq -r '.prompt.reason' <<<"$decision")"
+    now="$(now_ms)"
+    jq --argjson ids "$ids" --arg reason "$reason" --arg kind "$kind" --argjson now "$now" \
+      '.prompt = {kind:$kind, cardIds:$ids, reason:$reason} | .lastPromptMs = $now' <<<"$st" | put_state
+    if [ "$kind" = "takeover" ]; then
+      notify critical "👁 Glimpse — overdue" "A scene review is badly overdue."
+    else
+      notify normal "👁 Glimpse check-in" "A scene review is ready."
+    fi
+    pulse_prompt "$kind"
+  fi
+}
+
+run_loop() {
+  do_tick
+  while :; do
+    sleep "$TICK_SECONDS"
+    [ "$(jq -r '.enabled' <<<"$(read_config)")" = "true" ] || break
+    do_tick
+  done
+}
+
+seed_config
+
+case "${1:-status}" in
+  __run)          run_loop ;;
+  next-round)     shift; cmd_next_round "$@" ;;
+  finish)         shift; cmd_finish "$@" ;;
+  score)          shift; cmd_score "$@" ;;
+  abandon)        cmd_abandon ;;
+  checkin)        cmd_checkin ;;
+  ack)            shift; cmd_ack "$@" ;;
+  fetch)          shift; cmd_fetch "$@" ;;
+  promote)        shift; cmd_promote "$@" ;;
+  list|ls)        cmd_list ;;
+  drop|rm)        shift; cmd_drop "$@" ;;
+  get)            read_cards | jq . ;;
+  get-state)      read_state | jq . ;;
+  get-config)     read_config | jq . ;;
+  status)         cmd_status ;;
+  stats)          cmd_stats ;;
+  tick)           do_tick ;;
+  vision-check)   shift; cmd_vision_check "$@" ;;
+  pause)          shift; cmd_pause "$@" ;;
+  resume)         cmd_resume ;;
+  on)             cmd_on ;;
+  off)            cmd_off ;;
+  -h|--help|help) sed -n '2,58p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) echo "omarchy-glimpse: unknown command '${1}' (try --help)" >&2; exit 2 ;;
+esac
