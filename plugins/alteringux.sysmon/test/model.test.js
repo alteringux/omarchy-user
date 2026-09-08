@@ -79,3 +79,51 @@ test("isStale compares against a threshold, defaulting no-data to stale", () => 
   assert.equal(Model.isStale({ updatedAt: 1000 }, 20000, 15000), true)
   assert.equal(Model.isStale({ updatedAt: 1000 }, 5000, 15000), false)
 })
+
+test("parseState carries a clamped history ring, empty when absent or malformed", () => {
+  assert.deepEqual(Model.parseState(JSON.stringify({})).history, [])
+  const s = Model.parseState(JSON.stringify({
+    history: [
+      { ts: 1, cpu: 150, mem: 40, temp: 55 },
+      { ts: 2, cpu: 10, mem: -5, temp: null },
+      null
+    ]
+  }))
+  assert.deepEqual(s.history, [
+    { ts: 1, cpu: 100, mem: 40, temp: 55 },
+    { ts: 2, cpu: 10, mem: 0, temp: null },
+    { ts: 0, cpu: 0, mem: 0, temp: null }
+  ])
+})
+
+test("historySeries drops null/absent samples for the requested key", () => {
+  const h = [
+    { ts: 1, cpu: 10, mem: 20, temp: null },
+    { ts: 2, cpu: 30, mem: 40, temp: 50 },
+    { ts: 3, cpu: 50, mem: 60, temp: 60 }
+  ]
+  assert.deepEqual(Model.historySeries(h, "cpu"), [10, 30, 50])
+  assert.deepEqual(Model.historySeries(h, "temp"), [50, 60])
+  assert.deepEqual(Model.historySeries([], "cpu"), [])
+})
+
+test("historyStats reports min/avg/max/current over a key, zeroed when empty", () => {
+  const h = [
+    { ts: 1, cpu: 10, mem: 0, temp: null },
+    { ts: 2, cpu: 20, mem: 0, temp: null },
+    { ts: 3, cpu: 60, mem: 0, temp: null }
+  ]
+  assert.deepEqual(Model.historyStats(h, "cpu"), { min: 10, max: 60, avg: 30, cur: 60, n: 3 })
+  assert.deepEqual(Model.historyStats(h, "temp"), { min: 0, max: 0, avg: 0, cur: 0, n: 0 })
+})
+
+test("sparkline returns the last n points for a key and a floored max", () => {
+  const h = [10, 12, 8, 40, 5].map((v, i) => ({ ts: i, cpu: v, mem: 0, temp: null }))
+  const s = Model.sparkline(h, "cpu", 3, 100)
+  assert.deepEqual(s.values, [8, 40, 5])
+  assert.equal(s.max, 100)
+  assert.equal(s.n, 3)
+
+  const dyn = Model.sparkline(h, "cpu", 10, 1)
+  assert.equal(dyn.max, 40)
+})

@@ -97,5 +97,31 @@ rm -f "$WORK/sysmon-state.json"
 [ -f "$WORK/sysmon-state.json" ] && ok "get samples on first run when no state file exists" \
   || bad "get seeds state" "missing"
 
+# ── history ring: sample appends {ts,cpu,mem,temp}, capped ────────────────
+rm -f "$WORK/sysmon-state.json" "$WORK/sysmon-sample.json"
+write_stat "200 0 200 900 0 0 0 0 0 0"
+"$CLI" sample; "$CLI" sample; "$CLI" sample
+hlen="$(state '.history | length')"
+[ "$hlen" = "3" ] && ok "each sample appends one history entry" || bad "history length" "$hlen"
+hshape="$(state '.history[-1] | [has("cpu"), has("mem"), has("ts")] | all')"
+[ "$hshape" = "true" ] && ok "history entries carry ts/cpu/mem" \
+  || bad "history entry shape" "$(state '.history[-1]')"
+
+# ── top --json: top-5 by cpu and by mem from a ps fixture ────────────────
+printf '1 firefox 42.5 8.3\n2 node 12.0 3.1\n3 Xorg 5.5 1.2\n4 chrome 30.0 22.0\n' > "$WORK/ps"
+top_json="$(OMARCHY_SYSMON_PS_OUTPUT="$(cat "$WORK/ps")" "$CLI" top --json)"
+[ "$(printf '%s' "$top_json" | jq -r '.byCpu[0].name')" = "firefox" ] \
+  && ok "top --json ranks byCpu by %cpu" || bad "top byCpu" "$top_json"
+[ "$(printf '%s' "$top_json" | jq -r '.byMem[0].name')" = "chrome" ] \
+  && ok "top --json ranks byMem by %mem" || bad "top byMem" "$top_json"
+
+# ── sensors: only tempN_input leaves, voltage/current/fan dropped ────────
+printf '%s' '{"coretemp-isa-0000":{"Package id 0":{"temp1_input":68.0}},"applesmc-isa-0300":{"Exhaust":{"fan1_input":4476.0},"TA0V":{"in0_input":15.5}}}' > "$WORK/sensors.json"
+sensors_json="$(OMARCHY_SYSMON_SENSORS_JSON="$(cat "$WORK/sensors.json")" "$CLI" sensors)"
+[ "$(printf '%s' "$sensors_json" | jq -r 'length')" = "1" ] \
+  && ok "sensors keeps only tempN_input leaves" || bad "sensors filter" "$sensors_json"
+[ "$(printf '%s' "$sensors_json" | jq -r '.[0].celsius')" = "68" ] \
+  && ok "sensors reports the leaf temperature" || bad "sensors value" "$sensors_json"
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

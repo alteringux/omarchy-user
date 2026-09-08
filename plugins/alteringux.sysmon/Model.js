@@ -17,7 +17,8 @@ function defaultState() {
     swap: { pct: 0, totalKb: 0, usedKb: 0 },
     temp: null,
     load: { one: 0, five: 0, fifteen: 0 },
-    uptimeSec: 0
+    uptimeSec: 0,
+    history: []
   }
 }
 
@@ -68,8 +69,57 @@ function parseState(raw) {
       five: num(load.five, 0),
       fifteen: num(load.fifteen, 0)
     },
-    uptimeSec: num(parsed.uptimeSec, 0)
+    uptimeSec: num(parsed.uptimeSec, 0),
+    history: Array.isArray(parsed.history)
+      ? parsed.history.map(function (h) {
+          h = h || {}
+          return {
+            ts: num(h.ts, 0),
+            cpu: clampPct(h.cpu),
+            mem: clampPct(h.mem),
+            temp: (h.temp === null || h.temp === undefined) ? null : num(h.temp, null)
+          }
+        })
+      : []
   }
+}
+
+// ── history projections: sparkline points + min/avg/max/current ─────────
+// `key` is "cpu", "mem", or "temp". Missing/non-finite samples are dropped,
+// so a machine with no temp sensor yields an empty temp series, not zeros.
+
+function historySeries(history, key) {
+  if (!Array.isArray(history)) return []
+  var out = []
+  for (var i = 0; i < history.length; i++) {
+    var v = history[i] ? history[i][key] : null
+    if (v !== null && v !== undefined && isFinite(v)) out.push(Number(v))
+  }
+  return out
+}
+
+function historyStats(history, key) {
+  var s = historySeries(history, key)
+  if (s.length === 0) return { min: 0, max: 0, avg: 0, cur: 0, n: 0 }
+  var min = s[0], max = s[0], sum = 0
+  for (var i = 0; i < s.length; i++) {
+    var v = s[i]
+    if (v < min) min = v
+    if (v > max) max = v
+    sum += v
+  }
+  return { min: min, max: max, avg: sum / s.length, cur: s[s.length - 1], n: s.length }
+}
+
+// Last `n` samples plus the max across them (floored at `floor`, so a flat
+// low-usage series still renders against a sane ceiling rather than its own
+// noise). Returns { values, max, n }.
+function sparkline(history, key, n, floor) {
+  var s = historySeries(history, key)
+  if (n && s.length > n) s = s.slice(s.length - n)
+  var max = (floor === undefined || floor === null) ? 1 : floor
+  for (var i = 0; i < s.length; i++) if (s[i] > max) max = s[i]
+  return { values: s, max: max, n: s.length }
 }
 
 // ── thresholds: "warning" from ~70/~75, "critical" from ~90/~85 ──────────
@@ -144,6 +194,9 @@ try {
     formatGb: formatGb,
     formatUptime: formatUptime,
     barLabel: barLabel,
-    isStale: isStale
+    isStale: isStale,
+    historySeries: historySeries,
+    historyStats: historyStats,
+    sparkline: sparkline
   }
 } catch (e) {}

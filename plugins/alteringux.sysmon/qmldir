@@ -1,0 +1,9 @@
+# Shared pieces for the split system monitor (cpumon / memmon / tempmon).
+#
+# No `module` line: this directory is pulled in by RELATIVE PATH
+# (`import "../alteringux.sysmon" as Sysmon`) from a sibling plugin, the same
+# way alteringux.kit is. Only the shared panel components are listed here;
+# Model.js is imported directly as `import "../alteringux.sysmon/Model.js"`
+# because it must be re-evaluated per consumer, not registered as a singleton.
+TrendChart 1.0 TrendChart.qml
+StatGrid 1.0 StatGrid.qml

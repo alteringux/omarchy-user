@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.tempmon",
+  "name": "Temperature Monitor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live package temperature on the bar with its own panel: current reading against warn/critical thresholds, a 10-minute trend sparkline with min/avg/max stats, and a per-sensor breakdown from `sensors`. Shares the ~/.local/bin/omarchy-sysmon sampler with cpumon and memmon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Temperature Monitor",
+    "description": "CPU temperature with per-sensor and trend breakdown",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

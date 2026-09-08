@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.cpumon",
+  "name": "CPU Monitor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live CPU load on the bar with its own panel: overall + per-core usage, load average, uptime, a 10-minute trend sparkline with min/avg/max stats, and the top processes by CPU. Shares the ~/.local/bin/omarchy-sysmon sampler with memmon and tempmon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "CPU Monitor",
+    "description": "CPU % with a per-core and trend breakdown",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
