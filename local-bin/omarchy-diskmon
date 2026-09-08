@@ -1,0 +1,237 @@
+#!/usr/bin/env bash
+# omarchy-diskmon — disk-usage sampler for the alteringux.diskmon bar widget.
+# Sole writer of diskmon-state.json (docs/adr/0006-cli-first-plugins.md). The
+# widget is a thin view: Kit.Store watches the state file; its Timer calls
+# `sample` on a cadence, same shape as omarchy-sysmon / omarchy-netwatch.
+#
+#   omarchy-diskmon sample              read `df`, write diskmon-state.json
+#   omarchy-diskmon get                 print diskmon-state.json (sampling first if missing)
+#   omarchy-diskmon status              alias for get
+#   omarchy-diskmon list [--json]       every non-virtual mount and its usage
+#   omarchy-diskmon largest [PATH] [--json]
+#                                       top-10 immediate subdirs of PATH by size (`du`)
+#                                       PATH defaults to config.largestPath ($HOME)
+#   omarchy-diskmon watch [--interval S]   foreground loop: sample; sleep
+#   omarchy-diskmon config              print diskmon-config.json (seeding it first)
+#   omarchy-diskmon reset               wipe state (keeps config)
+#
+# Rationale for a standalone CLI rather than folding into omarchy-sysmon: disk
+# usage doesn't need a delta between two samples the way CPU% does — one `df`
+# call is already the answer — so it doesn't share sysmon's cumulative-counter
+# machinery or its flock-coalesced sampler. It gets its own state file instead
+# of overloading sysmon-state.json with an unrelated shape.
+#
+# Env (fixture overrides for test/cli.test.sh, all default to the real
+# commands):
+#   OMARCHY_STATE_DIR            state dir (default ~/.local/state/omarchy)
+#   OMARCHY_DISKMON_DF_OUTPUT    literal `df -Pk -T` output, skips calling df
+#   OMARCHY_DISKMON_DU_OUTPUT    literal `du -k --max-depth=1` output for `largest`
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+STATE_FILE="$STATE_DIR/diskmon-state.json"
+CONFIG_FILE="$STATE_DIR/diskmon-config.json"
+HISTORY_CAP=300
+
+DEFAULT_CONFIG='{
+  "watchMount": "/",
+  "warnPct": 80,
+  "critPct": 92,
+  "largestPath": "'"$HOME"'",
+  "excludeFstypes": ["tmpfs", "devtmpfs", "squashfs", "overlay", "proc", "sysfs", "cgroup2", "efivarfs", "devpts", "pstore", "bpf", "tracefs", "securityfs", "debugfs", "mqueue", "hugetlbfs", "configfs", "autofs", "binfmt_misc"]
+}'
+
+die() { echo "omarchy-diskmon: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now_ms() { date +%s%3N; }
+ensure_dir() { mkdir -p "$STATE_DIR"; }
+
+have jq || die "needs jq on PATH"
+
+put_file() { # put_file <path> ; content on stdin, atomic
+  local f="$1" tmp
+  ensure_dir
+  tmp="$(mktemp "${f}.XXXXXX")"
+  cat >"$tmp"
+  mv -f "$tmp" "$f"
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  ensure_dir
+  local tmp
+  tmp="$(mktemp "${CONFIG_FILE}.XXXXXX")"
+  printf '%s\n' "$DEFAULT_CONFIG" | jq . > "$tmp"
+  mv -f "$tmp" "$CONFIG_FILE"
+}
+
+read_config() {
+  seed_config
+  jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"
+}
+
+# ── df -> one JSON object per real mount ─────────────────────────────────
+# `df -Pk -T` columns: Filesystem Type 1024-blocks Used Available Capacity Mounted-on
+df_raw() {
+  if [ -n "${OMARCHY_DISKMON_DF_OUTPUT:-}" ]; then
+    printf '%s\n' "$OMARCHY_DISKMON_DF_OUTPUT"
+  else
+    df -Pk -T 2>/dev/null
+  fi
+}
+
+mounts_json() {
+  local cfg exclude
+  cfg="$(read_config)"
+  exclude="$(printf '%s' "$cfg" | jq -c '.excludeFstypes // []')"
+
+  df_raw | awk 'NR > 1 {
+    source = $1; fstype = $2; total = $3; used = $4; avail = $5
+    pct = $6; sub(/%$/, "", pct)
+    target = $7
+    for (i = 8; i <= NF; i++) target = target " " $i
+    gsub(/\\/, "\\\\", source); gsub(/"/, "\\\"", source)
+    gsub(/\\/, "\\\\", target); gsub(/"/, "\\\"", target)
+    printf "{\"source\":\"%s\",\"fstype\":\"%s\",\"totalKb\":%s,\"usedKb\":%s,\"availKb\":%s,\"pct\":%s,\"target\":\"%s\"}\n", \
+      source, fstype, total + 0, used + 0, avail + 0, pct + 0, target
+  }' | jq -s --argjson exclude "$exclude" '
+    [ .[] | select(.totalKb > 0) | select([.fstype] | inside($exclude) | not) ]
+  '
+}
+
+# ── sample: df snapshot + primary-mount history ring ─────────────────────
+cmd_sample() {
+  ensure_dir
+  local cfg watch_mount warn_pct crit_pct mounts primary prev_hist updated
+  cfg="$(read_config)"
+  watch_mount="$(printf '%s' "$cfg" | jq -r '.watchMount // "/"')"
+  warn_pct="$(printf '%s' "$cfg" | jq -r '.warnPct // 80')"
+  crit_pct="$(printf '%s' "$cfg" | jq -r '.critPct // 92')"
+  mounts="$(mounts_json)"
+  updated="$(now_ms)"
+
+  primary="$(printf '%s' "$mounts" | jq --arg m "$watch_mount" '
+    ([.[] | select(.target == $m)] | .[0]) //
+    (sort_by(-.pct) | .[0]) // null
+  ')"
+
+  prev_hist="$(jq -c '.history // []' "$STATE_FILE" 2>/dev/null || true)"
+  [ -z "$prev_hist" ] && prev_hist='[]'
+
+  jq -n \
+    --argjson updatedAt "$updated" \
+    --argjson mounts "$mounts" \
+    --argjson primary "$primary" \
+    --argjson prevHist "$prev_hist" \
+    --argjson cap "$HISTORY_CAP" \
+    --argjson warnPct "$warn_pct" \
+    --argjson critPct "$crit_pct" \
+    '
+    def level(p): if p >= $critPct then "critical" elif p >= $warnPct then "warning" else "normal" end;
+    ($primary // {target: null, source: null, fstype: null, totalKb: 0, usedKb: 0, availKb: 0, pct: 0}) as $p
+    | ($p + {level: level($p.pct // 0)}) as $primaryWithLevel
+    | {
+      version: 1,
+      updatedAt: $updatedAt,
+      primary: $primaryWithLevel,
+      mounts: $mounts,
+      history: (
+        ($prevHist + [{ts: $updatedAt, pct: ($p.pct // 0)}])
+        | if (length > $cap) then .[(length - $cap):] else . end
+      )
+    }' | put_file "$STATE_FILE"
+}
+
+cmd_get() {
+  [ -f "$STATE_FILE" ] || cmd_sample
+  jq -e . "$STATE_FILE" 2>/dev/null || echo '{}'
+}
+
+cmd_list() {
+  local as_json=0
+  [ "${1:-}" = "--json" ] && as_json=1
+  local mounts
+  mounts="$(mounts_json)"
+  if [ "$as_json" -eq 1 ]; then
+    printf '%s\n' "$mounts"
+  else
+    printf '%s\n' "$mounts" | jq -r '
+      sort_by(-.pct)[]
+      | "\(.pct)%\t\(.target)\t\(.source)\t\(.fstype)"' | column -t -s $'\t'
+  fi
+}
+
+cmd_watch() {
+  local interval=5
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  while true; do
+    cmd_sample
+    sleep "$interval"
+  done
+}
+
+# ── largest: top-10 immediate subdirs of PATH by size ────────────────────
+du_raw() { # du_raw <path>
+  if [ -n "${OMARCHY_DISKMON_DU_OUTPUT:-}" ]; then
+    printf '%s\n' "$OMARCHY_DISKMON_DU_OUTPUT"
+  else
+    du -k --max-depth=1 "$1" 2>/dev/null
+  fi
+}
+
+cmd_largest() {
+  local path="" as_json=0
+  for a in "$@"; do
+    case "$a" in
+      --json) as_json=1 ;;
+      *) path="$a" ;;
+    esac
+  done
+  [ -z "$path" ] && path="$(read_config | jq -r '.largestPath // env.HOME')"
+
+  local parsed
+  parsed="$(du_raw "$path" | awk -v self="$path" '
+    { kb = $1; $1=""; p=$0; sub(/^[ \t]+/, "", p)
+      if (p == self) next
+      gsub(/\\/, "\\\\", p); gsub(/"/, "\\\"", p)
+      printf "{\"path\":\"%s\",\"kb\":%s}\n", p, kb + 0
+    }' | jq -s 'sort_by(-.kb) | .[0:10]')"
+  [ -z "$parsed" ] && parsed='[]'
+
+  if [ "$as_json" -eq 1 ]; then
+    printf '%s\n' "$parsed"
+  else
+    printf '%s\n' "$parsed" | jq -r '.[] | "\(.kb / 1048576 * 100 | round / 100) GB\t\(.path)"' | column -t -s $'\t'
+  fi
+}
+
+cmd_config() { read_config | jq . ; }
+
+cmd_reset() {
+  ensure_dir
+  rm -f "$STATE_FILE"
+  cmd_sample
+}
+
+main() {
+  local verb="${1:-status}"
+  shift || true
+  case "$verb" in
+    sample) cmd_sample ;;
+    get|status) cmd_get ;;
+    list) cmd_list "$@" ;;
+    largest) cmd_largest "$@" ;;
+    watch) cmd_watch "$@" ;;
+    config) cmd_config ;;
+    reset) cmd_reset ;;
+    -h|--help|help) sed -n '2,20p' "$0" ;;
+    *) die "unknown verb: $verb" ;;
+  esac
+}
+
+main "$@"
