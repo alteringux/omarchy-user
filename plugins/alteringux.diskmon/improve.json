@@ -1,0 +1,11 @@
+{
+  "tool": "diskmon",
+  "displayName": "Diskmon",
+  "criticModel": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+  "pluginDir": "plugins/alteringux.diskmon",
+  "testCmd": "node --test {{dir}}/test/model.test.js",
+  "sources": [
+    "local-bin/omarchy-diskmon",
+    "plugins/alteringux.diskmon/Model.js"
+  ]
+}

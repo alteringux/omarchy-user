@@ -224,13 +224,28 @@ Panel {
                   spacing: Style.space(8)
 
                   Text {
-                    width: drow.width - dropBtn.width - catLabel2.width - parent.spacing * 3
+                    width: drow.width - dropBtn.width - catLabel2.width - dueBadge.width - parent.spacing * 4
                     anchors.verticalCenter: parent.verticalCenter
                     text: drow.card.front
                     elide: Text.ElideRight
                     color: root.barForeground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
+                  }
+
+                  // Feature: each due row now shows how overdue/soon it is,
+                  // not just its front text + category — using the fixed
+                  // formatDue() (see Model.js) so a card sitting right at an
+                  // hour/day boundary reads "1h overdue" rather than "60m
+                  // overdue". Kit.MetaText is the kit's dim tracked-caption
+                  // "status tag" treatment, so this reads as a tag rather
+                  // than a hand-rolled dim Text.
+                  Kit.MetaText {
+                    id: dueBadge
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: implicitWidth
+                    content: Model.formatDue(drow.card.dueAt - root.nowMs, root.nowMs)
+                    foreground: root.barForeground
                   }
 
                   Text {

@@ -1,0 +1,11 @@
+{
+  "tool": "reposwatch",
+  "displayName": "Reposwatch",
+  "criticModel": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+  "pluginDir": "plugins/alteringux.reposwatch",
+  "testCmd": "node --test {{dir}}/test/model.test.js",
+  "sources": [
+    "local-bin/omarchy-reposwatch",
+    "plugins/alteringux.reposwatch/Model.js"
+  ]
+}

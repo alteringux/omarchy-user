@@ -34,6 +34,12 @@ BarWidget {
     id: stateStore
     fileName: "dashboard.json"
     watch: true
+    // Every bin/ writer (refresh/note/track) replaces the file via
+    // mktemp+mv, which swaps the inode FileView's watchChanges is holding —
+    // so after the very first external write, the watch goes dead and
+    // onFileChanged never fires again without this idle poll. Same
+    // watch-on-create blind spot Kit.Store's own header documents.
+    pollMs: 5000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -106,6 +112,31 @@ BarWidget {
     onLoaded: {
       root.injectPanel()
       Qt.callLater(root.injectPanel)
+    }
+  }
+
+  // The one alteringux.* bar-widget plugin with no IPC surface at all — every
+  // sibling (stocks, score, conductor, ...) exposes at least open/close/status
+  // for scripting + the other plugins' bottombar host. Mirrors stocks' shape.
+  IpcHandler {
+    target: "alteringux.dashboard"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+    function refresh(): void { root.runRefresh() }
+    function status(): string {
+      return guard.call("ipc.status", function() {
+        return JSON.stringify({
+          refreshing: root.refreshing,
+          hasUpdates: root.hasUpdates,
+          news: root.state.news.items.length,
+          system: root.state.system.items.length,
+          notes: root.state.notes.items.length,
+          newsUpdatedAt: root.state.news.updatedAt,
+          systemUpdatedAt: root.state.system.updatedAt
+        })
+      }, "{}")
     }
   }
 

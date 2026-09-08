@@ -48,6 +48,18 @@ yesterday="$(date -d yesterday +%F)"
 "$CLI" toggle
 [ "$(sj .running)" = "true" ] && ok "toggle while paused resumes" || bad "resume" "$(sj .running)"
 
+# ── resume verb on an already-running session is a no-op ────────────────
+# Regression: cmd_resume used to unconditionally re-stamp savedAtMs to now
+# while leaving remainingMs anchored to the old savedAtMs, silently gifting
+# the phase whatever time had elapsed since that anchor.
+before_rem="$(sj .remainingMs)"
+before_saved="$(sj .savedAtMs)"
+sleep 1.1
+"$CLI" resume
+[ "$(sj .running)" = "true" ] && ok "resume on a running session stays running" || bad "resume-running state" "$(sj .running)"
+[ "$(sj .remainingMs)" = "$before_rem" ] && ok "resume on a running session doesn't touch remainingMs" || bad "resume-running remainingMs" "$before_rem -> $(sj .remainingMs)"
+[ "$(sj .savedAtMs)" = "$before_saved" ] && ok "resume on a running session doesn't re-stamp savedAtMs" || bad "resume-running savedAtMs" "$before_saved -> $(sj .savedAtMs)"
+
 # ── skip: transition without crediting ─────────────────────────────────
 echo '{"version":1,"sessions":[]}' > "$HIST"
 "$CLI" skip

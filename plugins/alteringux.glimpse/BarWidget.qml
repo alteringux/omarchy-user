@@ -75,14 +75,32 @@ BarWidget {
   }
 
   // ---- the CLI bridge --------------------------------------------------
+  // A verb fired while one was already running used to fall back to
+  // Quickshell.execDetached() — a second, untracked `omarchy-glimpse`
+  // process racing the first one's read-modify-write of glimpse-state.json
+  // (and never reloading the stores on its own completion, so its effect
+  // could sit unreflected until the next poll). Grading a round twice in a
+  // quick double-click is the easy way to hit this: two concurrent `finish`
+  // calls scoring the same round against the SM-2 schedule. Queue instead —
+  // one pending slot, last call wins, always serialized through actionProc.
+  readonly property bool busy: actionProc.running
+  property var pendingVerb: null
+
   Process {
     id: actionProc
     running: false
-    onExited: { stateStore.reload(); cardsStore.reload(); configStore.reload() }
+    onExited: {
+      stateStore.reload(); cardsStore.reload(); configStore.reload()
+      if (root.pendingVerb) {
+        var next = root.pendingVerb
+        root.pendingVerb = null
+        root.runVerb(next)
+      }
+    }
   }
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
-      if (actionProc.running) { Quickshell.execDetached([root.scriptPath].concat(args)); return }
+      if (actionProc.running) { root.pendingVerb = args; return }
       actionProc.command = [root.scriptPath].concat(args)
       actionProc.running = true
     })
@@ -126,7 +144,8 @@ BarWidget {
           enabled: root.configValue.enabled, prompt: root.promptKind,
           round: root.roundActive, dueCount: root.dueCount,
           drillLevel: root.stateValue.session ? root.stateValue.session.level : 3,
-          streakDays: root.stateValue.streakDays
+          streakDays: root.stateValue.streakDays,
+          busy: root.busy
         })
       }, "{}")
     }

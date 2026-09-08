@@ -92,9 +92,12 @@ Panel {
             if (root.chunkText.length > 0) base += "  ·  " + root.chunkText
             return base
           }
-          color: root.barForeground
+          // Supplementary detail, not the primary status (that's the
+          // PanelHead meta line above) — the hint-role treatment, matching
+          // cliamp's analogous position/total line (ADR-0005).
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
           elide: Text.ElideRight
         }
 

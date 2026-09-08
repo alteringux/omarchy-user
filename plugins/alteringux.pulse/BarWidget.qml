@@ -92,6 +92,19 @@ BarWidget {
     })
   }
 
+  // The single "do this next" pick, fired the same way whether it came from
+  // the panel's button or a script -- Panel.qml's own header comment already
+  // promises "every control calls the same hostWidget function so there's
+  // one implementation shared with the IPC path"; this was the one control
+  // that didn't yet (its onClicked duplicated the source-branch logic
+  // inline). Panel.qml's button now calls this too.
+  function runNextAction() {
+    var na = root.summary.nextAction
+    if (!na) return
+    if (na.source === "attention") root.actOn(na.plugin)
+    else root.runAction(na.action)
+  }
+
   // ---- IPC (Hyprland keybindings) --------------------------------
   IpcHandler {
     target: "alteringux.pulse"
@@ -100,6 +113,9 @@ BarWidget {
     function open(): void { root.open() }
     function close(): void { root.close() }
     function read(): void { root.markRead() }
+    // Fire the current "do this next" pick without opening the panel --
+    // useful bound to a keybinding once you've learned what it usually is.
+    function next(): void { root.runNextAction() }
     function status(): string {
       return root.guard.call("ipc.status", function () {
         var s = root.summary

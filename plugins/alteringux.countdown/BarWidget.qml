@@ -44,6 +44,39 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.countdown", function(argv) { Quickshell.execDetached(argv) })
 
+  // Ids already notified that their countdown reached "Today", so the 30s
+  // tick below fires the notification exactly once per countdown per day
+  // rather than nagging every tick. In-memory only (reset on a shell
+  // restart) — a missed notification across a restart is an acceptable
+  // trade-off for not persisting yet another small state file.
+  property var _dueNotified: ({})
+
+  // Fire a one-shot "Today" notification for any entry that just rolled over
+  // to daysRemaining === 0, skipping ids already recorded in _dueNotified.
+  // Uses execDetached (not a shared Process) so two countdowns landing on
+  // the same day each get their own notify-send instead of one clobbering
+  // the other's command mid-launch. Also drops any recorded id that's no
+  // longer due (rolled past, or the entry was removed) so the map can't grow
+  // unbounded across a long uptime — that keeps a re-added countdown reusing
+  // the same id notifiable again too.
+  function checkDueNotifications() {
+    guard.run("checkDueNotifications", function () {
+      var list = root.entries
+      var stillDue = {}
+      for (var i = 0; i < list.length; i++) {
+        var e = list[i]
+        if (Model.daysRemaining(e.targetEpoch, root.nowMs) !== 0) continue
+        stillDue[e.id] = true
+        if (root._dueNotified[e.id]) continue
+        Quickshell.execDetached([
+          "notify-send", "-a", "Countdown", "-u", "normal",
+          e.label || "Countdown", "Today"
+        ])
+      }
+      root._dueNotified = stillDue
+    })
+  }
+
   // ---- persistence: both files are now written only by
   // ~/.local/bin/omarchy-countdowns (docs/adr/0006-cli-first-plugins.md).
   // Kit.Store runs in watch mode — it re-reads + re-parses as the CLI rewrites
@@ -129,10 +162,11 @@ BarWidget {
     interval: 30000
     repeat: true
     running: true
-    onTriggered: root.nowMs = Date.now()
+    onTriggered: { root.nowMs = Date.now(); root.checkDueNotifications() }
   }
 
   onOpenedChanged: if (opened) nowMs = Date.now()
+  onStateLoadedChanged: if (stateLoaded) root.checkDueNotifications()
 
   // ---- IPC ------------------------------------------------------
   IpcHandler {

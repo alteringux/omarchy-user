@@ -74,6 +74,23 @@ function canUndo(state) {
   return !!(state && Array.isArray(state.history) && state.history.length > 0)
 }
 
+// Count of history entries whose timestamp falls on the same local calendar
+// day as `nowMs` (defaults to Date.now()). Powers the panel's small "N today"
+// tally next to the History caption. Entries with a missing/unparsable
+// timestamp are skipped rather than counted or thrown on.
+function countToday(history, nowMs) {
+  var list = Array.isArray(history) ? history : []
+  var now = new Date(nowMs === undefined ? Date.now() : nowMs)
+  var y = now.getFullYear(), m = now.getMonth(), d = now.getDate()
+  var n = 0
+  for (var i = 0; i < list.length; i++) {
+    var t = new Date(list[i] && list[i].timestamp)
+    if (isNaN(t.getTime())) continue
+    if (t.getFullYear() === y && t.getMonth() === m && t.getDate() === d) n++
+  }
+  return n
+}
+
 // Exposed only for the Node test harness under test/; QML's JS import
 // mechanism has no `module` global, so this is a no-op there.
 if (typeof module !== "undefined") {
@@ -83,6 +100,7 @@ if (typeof module !== "undefined") {
     parseConfig: parseConfig,
     parseState: parseState,
     formatScore: formatScore,
-    canUndo: canUndo
+    canUndo: canUndo,
+    countToday: countToday
   }
 }

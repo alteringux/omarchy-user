@@ -69,12 +69,17 @@ Panel {
           foreground: root.barForeground
         }
 
+        // The live readout, promoted to a hero figure (like the countdown
+        // cards' days-remaining number, or timers' elapsed line) instead of
+        // flat body text — it's the one thing this panel exists to show while
+        // a stopwatch is running, and the accent/warning colour repeats the
+        // running/paused distinction the badge glyphs already carry.
         Text {
           visible: hostWidget && hostWidget.active
           text: hostWidget ? ((hostWidget.paused ? "Paused: " : "Running: ") + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
-          color: root.barForeground
+          color: (hostWidget && hostWidget.paused) ? Kit.Palette.warning : Color.accent
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.heading
           font.bold: true
           width: content.width
           wrapMode: Text.WordWrap
@@ -133,6 +138,19 @@ Panel {
         Text {
           visible: hostWidget && !hostWidget.active && hostWidget.lastSessionSummary.length > 0
           text: hostWidget ? ("Last session: " + hostWidget.lastSessionSummary) : ""
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          width: content.width
+          wrapMode: Text.WordWrap
+        }
+
+        // "N sessions today, HH:MM total" — an at-a-glance daily total from
+        // the same history log the last-session comparison already reads,
+        // shown only once idle and once there's something to report.
+        Text {
+          visible: hostWidget && !hostWidget.active && hostWidget.todaySummary.length > 0
+          text: hostWidget ? hostWidget.todaySummary : ""
           color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption

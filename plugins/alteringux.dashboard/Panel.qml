@@ -99,8 +99,7 @@ Panel {
           width: parent.width
           text: "✨ " + root.state.digest.text
           wrapMode: Text.WordWrap
-          color: root.barForeground
-          opacity: 0.75
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           font.italic: true
@@ -133,8 +132,7 @@ Panel {
               }
               Text {
                 text: Model.formatRelative(root.state.news.updatedAt)
-                color: root.barForeground
-                opacity: 0.5
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -143,8 +141,7 @@ Panel {
             Text {
               visible: root.state.news.items.length === 0
               text: root.refreshing ? "Fetching headlines…" : "No headlines yet — click Refresh."
-              color: root.barForeground
-              opacity: 0.55
+              color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -176,8 +173,7 @@ Panel {
                 Text {
                   visible: !!modelData.meta
                   text: modelData.meta || ""
-                  color: root.barForeground
-                  opacity: 0.5
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -217,8 +213,7 @@ Panel {
               Text {
                 visible: root.state.system.items.length === 0
                 text: root.state.system.updatedAt ? "Up to date" : "Checking…"
-                color: root.barForeground
-                opacity: 0.6
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -277,8 +272,7 @@ Panel {
                 visible: root.state.notes.items.length === 0
                 text: "Empty. Push a line via:\nomarchy-dashboard-note \"text\""
                 wrapMode: Text.WordWrap
-                color: root.barForeground
-                opacity: 0.55
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -300,8 +294,7 @@ Panel {
                   }
                   Text {
                     text: Model.formatRelative(modelData.at)
-                    color: root.barForeground
-                    opacity: 0.5
+                    color: Kit.Palette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                   }
@@ -315,7 +308,7 @@ Panel {
 
         Text {
           text: "Enter: refresh  ·  X: clear notes  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

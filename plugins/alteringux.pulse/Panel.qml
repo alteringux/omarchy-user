@@ -43,6 +43,14 @@ Panel {
     return Kit.Palette.info
   }
 
+  // toneFor(level) at a given alpha, without every call site re-destructuring
+  // .r/.g/.b out of the same color three times over (the "do this next"
+  // border below used to call toneFor(...) three times for one color).
+  function toneRgba(level, alpha) {
+    var c = root.toneFor(level)
+    return Qt.rgba(c.r, c.g, c.b, alpha)
+  }
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -78,7 +86,7 @@ Panel {
           color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
           border.width: 1
           border.color: root.summary.nextAction
-            ? Qt.rgba(root.toneFor(root.summary.nextAction.level).r, root.toneFor(root.summary.nextAction.level).g, root.toneFor(root.summary.nextAction.level).b, 0.5)
+            ? root.toneRgba(root.summary.nextAction.level, 0.5)
             : "transparent"
           implicitHeight: nextRow.implicitHeight + Style.space(16)
 
@@ -120,13 +128,7 @@ Panel {
               text: root.summary.nextAction ? root.summary.nextAction.actionLabel : ""
               foreground: root.barForeground
               bordered: true
-              onClicked: {
-                if (!root.hostWidget || !root.summary.nextAction) return
-                if (root.summary.nextAction.source === "attention")
-                  root.hostWidget.actOn(root.summary.nextAction.plugin)
-                else
-                  root.hostWidget.runAction(root.summary.nextAction.action)
-              }
+              onClicked: if (root.hostWidget) root.hostWidget.runNextAction()
             }
           }
         }
@@ -288,7 +290,16 @@ Panel {
                   }
 
                   Text {
-                    width: evRow.width - Style.space(64) - timeLabel.width - evOpen.width - parent.spacing * 3
+                    // evOpen only shows on hover, and a Row skips an
+                    // invisible child's gap along with the child itself --
+                    // unconditionally subtracting its width AND a flat 3
+                    // gaps' worth of spacing (right for the 4-child hovered
+                    // case) starved this label by one phantom button-width
+                    // and one phantom gap for the far more common unhovered,
+                    // 3-child case, eliding messages more than it needed to.
+                    width: evRow.width - Style.space(64) - timeLabel.width
+                      - (evOpen.visible ? evOpen.width + parent.spacing : 0)
+                      - parent.spacing * 2
                     anchors.verticalCenter: parent.verticalCenter
                     text: evDel.ev.message
                     elide: Text.ElideRight

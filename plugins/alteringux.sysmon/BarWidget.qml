@@ -37,6 +37,19 @@ BarWidget {
     || Model.tempLevel(stat.temp) === "critical"
   readonly property bool anyWarning: (cpuHot || memHot || tempHot) && !anyCritical
 
+  // Model.isStale is tested (test/model.test.js) but was never wired into
+  // either widget. A hung sampler left the bar showing a confident, silently
+  // ageing number. 3 missed ticks is the same "gone quiet" threshold netwatch
+  // already uses for its own staleness label.
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+
+  readonly property string tooltipText: stateLoaded
+    ? "CPU " + Model.formatPct(root.stat.cpu.pct)
+      + "  ·  MEM " + Model.formatPct(root.stat.memory.pct)
+      + (root.stat.temp !== null ? "  ·  " + Model.formatTemp(root.stat.temp) : "")
+      + (root.stale ? "  ·  stale" : "")
+    : "Loading…"
+
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon"
 
   // ---- persistence: sysmon-state.json is written only by omarchy-sysmon
@@ -58,7 +71,13 @@ BarWidget {
 
   function sampleNow() {
     guard.run("sampleNow", function () {
-      if (sampleProc.running) return
+      // A busy sampleProc used to make this a silent no-op. If the CLI ever
+      // hung, or just overran one 2s tick, every future tick and every
+      // middle-click sample request dropped forever, with the bar frozen on
+      // whatever it last read. netwatch already fires a detached one-off in
+      // that case, since the write to sysmon-state.json is the point, not
+      // this Process's own exit. Mirror it here.
+      if (sampleProc.running) { Quickshell.execDetached([root.scriptPath, "sample"]); return }
       sampleProc.command = [root.scriptPath, "sample"]
       sampleProc.running = true
     })
@@ -78,7 +97,14 @@ BarWidget {
 
     function status(): string {
       return guard.call("ipc.status", function () {
-        return JSON.stringify(root.stat || {})
+        // Copy rather than mutate root.stat. When stateLoaded it *is*
+        // stateStore.value, and stamping a field onto it in place would leak
+        // into the Kit.Store-held object.
+        var out = {}
+        var s = root.stat || {}
+        for (var k in s) out[k] = s[k]
+        out.stale = root.stale
+        return JSON.stringify(out)
       }, "{}")
     }
     function sample(): void { root.sampleNow() }
@@ -123,6 +149,10 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.displayText
+    tooltipText: root.tooltipText
+    dimmed: root.stale
+    active: root.anyWarning || root.anyCritical
+    activeColor: root.anyCritical ? Kit.Palette.negative : Kit.Palette.warning
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

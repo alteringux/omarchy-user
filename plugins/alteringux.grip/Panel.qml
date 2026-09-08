@@ -77,11 +77,11 @@ Panel {
           width: parent.width
           height: Style.space(34)
           radius: Style.cornerRadius
-          color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.08)
+          color: Util.alpha(root.barForeground, 0.08)
           border.width: 1
           border.color: quickAddInput.activeFocus
             ? Color.bar.active
-            : Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.2)
+            : Util.alpha(root.barForeground, 0.2)
 
           TextInput {
             id: quickAddInput
@@ -101,7 +101,7 @@ Panel {
               verticalAlignment: Text.AlignVCenter
               visible: quickAddInput.text.length === 0
               text: "Add a task — Enter to save"
-              color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.4)
+              color: Util.alpha(root.barForeground, 0.4)
               font: quickAddInput.font
             }
           }
@@ -149,7 +149,7 @@ Panel {
                 height: Style.space(30)
                 radius: Style.cornerRadius
                 color: rowHover.containsMouse
-                  ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
+                  ? Util.alpha(root.barForeground, 0.06)
                   : "transparent"
 
                 required property var modelData
@@ -175,7 +175,7 @@ Panel {
                     radius: Style.space(4)
                     color: "transparent"
                     border.width: 1
-                    border.color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.5)
+                    border.color: Util.alpha(root.barForeground, 0.5)
 
                     MouseArea {
                       anchors.fill: parent
@@ -186,7 +186,7 @@ Panel {
                   }
 
                   Text {
-                    width: del.width - tick.width - dueLabel.width - parent.spacing * 2
+                    width: del.width - tick.width - dueLabel.width - dropBtn.width - parent.spacing * 3
                     anchors.verticalCenter: parent.verticalCenter
                     text: (del.task.hard ? "! " : "") + del.task.text
                     elide: Text.ElideRight
@@ -204,6 +204,26 @@ Panel {
                     color: del.overdue ? Kit.Palette.negative : Kit.Palette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
+                  }
+
+                  // Drop without completing — the row had no way to remove a
+                  // task you didn't want to track in the first place, only to
+                  // tick it off. Hover-revealed so the open list stays quiet.
+                  Text {
+                    id: dropBtn
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: rowHover.containsMouse
+                    text: "✕"
+                    color: Kit.Palette.faint
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.bodySmall
+
+                    MouseArea {
+                      anchors.fill: parent
+                      anchors.margins: -Style.space(6)
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: if (root.hostWidget) root.hostWidget.dropTask(del.task.id)
+                    }
                   }
                 }
               }

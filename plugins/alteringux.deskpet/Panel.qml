@@ -388,11 +388,13 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          // Explanatory sentence, not a status tag -- ADR-0005's hint role
+          // (Kit.Palette.faint at caption size), not the meta treatment.
           Text {
             text: "Right-click the pet on your desktop to open this panel too. Esc: close"
-            color: Qt.darker(root.barForeground, 1.4)
+            color: Kit.Palette.faint
             font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
             width: content.width
           }

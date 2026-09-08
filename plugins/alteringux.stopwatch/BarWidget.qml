@@ -54,10 +54,26 @@ BarWidget {
   // contains itself. Snapshotting on the idle→active edge (and keeping the
   // snapshot fresh while idle) gives resetState() a clean baseline.
   property var historySnapshot: ({ version: 1, sessions: [] })
+  // True once historySnapshot holds a real read of historyStore for the
+  // *current* active session (as opposed to the placeholder default above).
+  // Needed because stateStore and historyStore load independently: if the
+  // shell starts with a stopwatch already running, applyState's idle->active
+  // edge can fire before historyStore's own first read completes, seeding
+  // historySnapshot from the empty placeholder. historyStore.onExternallyChanged
+  // still fires for that first real read (Kit.Store always emits once), but its
+  // own `!root.active` guard would otherwise ignore it because active flipped
+  // true already — this flag lets it land the real snapshot anyway, once.
+  property bool historySnapshotReady: false
   // Set when a session just ended, comparing it against past sessions with
   // the same label. Self-improving in the sense that the baseline it's
   // judged against keeps shifting as more sessions accumulate.
   property string lastSessionSummary: ""
+  // "N sessions today, HH:MM total" for the idle panel — hidden (empty) once
+  // nothing's been logged yet today. Recomputes whenever historyData changes;
+  // a session ending is what actually moves this number, so a same-day
+  // midnight rollover with no new session leaves it stale until the next one
+  // (matches the coarse-refresh precedent elsewhere in this widget).
+  readonly property string todaySummary: Model.formatTodaySummary(Model.historyToday(root.historyData, Date.now()))
 
   readonly property string displayText: {
     if (!root.active) return "  Stopwatch"
@@ -90,7 +106,14 @@ BarWidget {
       }
       // Idle -> active edge: freeze the baseline this session will be judged
       // against, before the CLI can fold this session into historyData.
-      if (!root.active) root.historySnapshot = root.historyData
+      // historySnapshotReady only latches true once that baseline actually
+      // came from a completed historyStore read (see the property comment);
+      // false here lets the store's own first-load event still land the real
+      // snapshot below if this fires before that read completes.
+      if (!root.active) {
+        root.historySnapshot = root.historyData
+        root.historySnapshotReady = historyStore.loaded
+      }
       root.startEpoch = state.start_epoch
       root.label = state.label || ""
       root.intervalMinutes = state.interval_minutes || 5
@@ -116,6 +139,7 @@ BarWidget {
       root.label = ""
       root.elapsedSeconds = 0
       root.pausedEpoch = 0
+      root.historySnapshotReady = false
     })
   }
 
@@ -218,8 +242,15 @@ BarWidget {
     parse: function (raw) { return Model.parseHistory(raw) }
     // While idle, keep the pre-session snapshot tracking real history so the
     // next session starts from an up-to-date baseline. Once active, the
-    // snapshot is frozen (see applyState).
-    onExternallyChanged: function (value) { if (!root.active) root.historySnapshot = value }
+    // snapshot is frozen (see applyState) UNLESS it hasn't actually landed a
+    // real read yet — the load-order race applyState's comment describes —
+    // in which case this first real read is that snapshot, taken once.
+    onExternallyChanged: function (value) {
+      if (!root.active || !root.historySnapshotReady) {
+        root.historySnapshot = value
+        root.historySnapshotReady = true
+      }
+    }
   }
 
   // Panel config: the last announce-interval the user chose. Plugin-owned

@@ -31,6 +31,15 @@ Panel {
   readonly property var runState: hostWidget && hostWidget.runState ? hostWidget.runState : ({ nodes: {}, envelopes: [] })
   readonly property var envelopes: runState && runState.envelopes ? runState.envelopes : []
   readonly property var nodes: doc && doc.nodes ? doc.nodes : []
+  // Every canvas edit (move/rename/add/remove/toggleEdge) reassigns `doc` to a
+  // freshly cloned object, so the node Repeater below destroys and recreates
+  // every delegate on each edit — there's no stable per-node identity to diff
+  // against. A delegate destroyed mid-edit skips InlineEdit's own
+  // commit()/cancel(), so its onEditingChanged decrement never fires and
+  // inlineEditors is left stuck above 0 forever, permanently blocking Esc /
+  // close on the whole panel. Reset it here, at the one moment we know every
+  // live editor is about to die anyway.
+  onNodesChanged: root.inlineEditors = 0
   readonly property var edges: root.guard.call("edges", function () { return Model.edgeList(root.doc) }, [])
   readonly property var canvasBounds: root.guard.call("bounds", function () { return Model.bounds(root.doc) }, ({ w: 400, h: 300 }))
 
@@ -122,6 +131,16 @@ Panel {
         anchors.fill: parent
         spacing: Style.spacing.panelGap
 
+        // Deferred by docs/adr/0005-panel-text-hierarchy.md pending concurrent
+        // work on this plugin; prepended now per the pomodoro precedent it
+        // names. The toolbar row below keeps its own PanelSectionHeader —
+        // PanelHero's single trailingControl can't hold four buttons.
+        Kit.PanelHead {
+          title: "Flow"
+          meta: root.doc.id || ""
+          foreground: root.barForeground
+        }
+
         // ---- header: title + tabs + run ------------------------------------
         RowLayout {
           width: content.width
@@ -159,6 +178,18 @@ Panel {
           width: content.width
           text: "last run: " + root.runState.error
           color: Kit.Palette.negative
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
+        // Model.parseRunState already carries finishedAt; nothing showed it.
+        // A silent stale "last run: (no output)" gives no clue how old that
+        // output is.
+        Text {
+          visible: !root.runState.error && !!root.runState.finishedAt
+          width: content.width
+          text: "last run: " + root.runState.finishedAt
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -656,7 +687,7 @@ Panel {
               }
               Text {
                 width: parent.width
-                text: "Enter to save this field · drag a node to move (snaps + saves) · double-click a label to rename"
+                text: "Enter to save this field · drag a node to move (snaps + saves) · click a label to rename"
                 color: Qt.darker(root.barForeground, 1.4)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption

@@ -193,17 +193,42 @@ BarWidget {
   function toggleAutoRotate() { root.setAutoRotate(!root.cfg.autoRotate) }
   function setIntervalSec(sec) { root.patchConfig({ intervalSec: Model.clampInterval(sec) }) }
 
+  // The underlying `protonvpn-cli` killswitch verb can fail (older CLI
+  // version, missing permission) and protonvpn-rotate reports that with a
+  // non-zero exit — execDetached() throws that away, so a failed call used
+  // to leave the toggle showing "on" (and its reassuring "no leak" copy)
+  // while the tunnel was in fact wide open. Run it as a tracked Process and
+  // only persist the config flip once the script confirms it landed.
+  property string killSwitchError: ""
+
+  Process {
+    id: killSwitchProc
+    running: false
+    property bool pendingOn: false
+    onExited: function (code) {
+      if (code === 0) {
+        root.killSwitchError = ""
+        root.patchConfig({ killSwitch: killSwitchProc.pendingOn })
+      } else {
+        root.killSwitchError = "kill switch " + (killSwitchProc.pendingOn ? "on" : "off") + " failed — check protonvpn-cli"
+      }
+    }
+  }
+
+  function runKillSwitch(on) {
+    if (killSwitchProc.running) return
+    killSwitchProc.pendingOn = !!on
+    killSwitchProc.command = [root.scriptPath, "killswitch", on ? "on" : "off"]
+    killSwitchProc.running = true
+  }
+
   function setKillSwitch(on) {
-    guard.run("setKillSwitch", function () {
-      root.patchConfig({ killSwitch: !!on })
-      Quickshell.execDetached([root.scriptPath, "killswitch", on ? "on" : "off"])
-    })
+    guard.run("setKillSwitch", function () { root.runKillSwitch(on) })
   }
   function toggleKillSwitch() { root.setKillSwitch(!root.cfg.killSwitch) }
 
   Component.onCompleted: {
-    if (root.cfg.killSwitch)
-      Quickshell.execDetached([root.scriptPath, "killswitch", "on"])
+    if (root.cfg.killSwitch) root.runKillSwitch(true)
   }
 
   // ── IPC (read-only status + the same verbs the panel exposes) ───────────
@@ -234,6 +259,7 @@ BarWidget {
           autoRotate: root.cfg.autoRotate,
           intervalSec: root.cfg.intervalSec,
           killSwitch: root.cfg.killSwitch,
+          killSwitchError: root.killSwitchError,
           secondsToRotate: root.secsToRotate
         })
       }, "{}")

@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -85,6 +86,17 @@ Item {
       : "rm -f " + ownFlagPath])
   }
 
+  // A recheck request that lands while hiddenProbe is already in flight used
+  // to be dropped silently (setting `running = true` on an already-running
+  // Process is a no-op), leaving `hidden` stale until the next 3s tick. Track
+  // the request instead of the raw flag so nothing gets lost.
+  property bool hiddenProbeDirty: false
+
+  function requestHiddenProbe() {
+    if (hiddenProbe.running) { root.hiddenProbeDirty = true; return }
+    hiddenProbe.running = true
+  }
+
   Process {
     id: hiddenProbe
     running: false
@@ -98,23 +110,29 @@ Item {
       root.ownHidden = p[0] === "yes"
       root.topBarHidden = p[1] === "yes"
     } }
+    onExited: {
+      if (root.hiddenProbeDirty) {
+        root.hiddenProbeDirty = false
+        hiddenProbe.running = true
+      }
+    }
   }
 
   FileView {
     path: root.togglesDir
     watchChanges: true
     printErrors: false
-    onFileChanged: hiddenProbe.running = true
+    onFileChanged: root.requestHiddenProbe()
   }
 
   Timer {
     interval: 3000
     repeat: true
     running: true
-    onTriggered: if (!hiddenProbe.running) hiddenProbe.running = true
+    onTriggered: root.requestHiddenProbe()
   }
 
-  Component.onCompleted: hiddenProbe.running = true
+  Component.onCompleted: root.requestHiddenProbe()
 
   IpcHandler {
     target: "alteringux.bottombar"
@@ -123,6 +141,10 @@ Item {
     function show(): void { root.setHidden(false) }
     function hide(): void { root.setHidden(true) }
     function toggle(): void { root.setHidden(!root.ownHidden) }
+    // Force an immediate re-check of both hide flags instead of waiting up
+    // to 3s for the next poll tick — useful right after a script flips
+    // bar-off/bottombar-off and wants the change to show without delay.
+    function reload(): void { root.requestHiddenProbe() }
     function status(): string {
       return root.guard.call("ipc.status", function () {
         return JSON.stringify({
@@ -184,23 +206,66 @@ Item {
           Component {
             id: widgetSlot
 
-            Loader {
+            Item {
+              id: slot
               required property var modelData
+              readonly property bool failed: hostLoader.status === Loader.Error
               height: parent ? parent.height : root.barSize
-              width: item ? Math.max(1, item.implicitWidth) : 0
-              asynchronous: false
-              source: modelData.src
+              // A failed widget used to collapse to a 1px sliver with no
+              // visual trace — indistinguishable from "not configured" and
+              // only discoverable via the status() IPC call. Give it a
+              // small, tappable marker instead so a crashed hosted widget is
+              // visible right in the bar.
+              width: slot.failed ? errorMark.width : (hostLoader.item ? Math.max(1, hostLoader.item.implicitWidth) : 0)
 
-              onLoaded: {
-                if (!item) return
-                if ("bar" in item) item.bar = shim
-                root.noteWidget(modelData.id, true)
+              Loader {
+                id: hostLoader
+                anchors.fill: parent
+                asynchronous: false
+                source: slot.modelData.src
+
+                onLoaded: {
+                  if (!item) return
+                  if ("bar" in item) item.bar = shim
+                  root.noteWidget(slot.modelData.id, true)
+                }
+                // Loader has no dedicated "load failed" signal — Loader.Error
+                // is one of the four Loader.status values, so watch for it
+                // via onStatusChanged instead (an onLoadingFailed handler
+                // doesn't exist on this type and is a hard QML load-time
+                // error).
+                onStatusChanged: if (status === Loader.Error) root.noteWidget(slot.modelData.id, false)
               }
-              // Loader has no dedicated "load failed" signal — Loader.Error
-              // is one of the four Loader.status values, so watch for it via
-              // onStatusChanged instead (an onLoadingFailed handler doesn't
-              // exist on this type and is a hard QML load-time error).
-              onStatusChanged: if (status === Loader.Error) root.noteWidget(modelData.id, false)
+
+              Rectangle {
+                id: errorMark
+                visible: slot.failed
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(14)
+                height: Style.space(14)
+                radius: width / 2
+                color: "transparent"
+                border.width: 1
+                border.color: Kit.Palette.negative
+
+                Text {
+                  anchors.centerIn: parent
+                  text: "!"
+                  color: Kit.Palette.negative
+                  font.family: Style.font.family
+                  font.bold: true
+                  font.pixelSize: Style.space(10)
+                }
+
+                ToolTip.visible: errorMarkArea.containsMouse
+                ToolTip.text: slot.modelData.id + " failed to load"
+
+                MouseArea {
+                  id: errorMarkArea
+                  anchors.fill: parent
+                  hoverEnabled: true
+                }
+              }
             }
           }
 
