@@ -274,13 +274,17 @@ Panel {
                     onClicked: card.showCreatedAt = !card.showCreatedAt
                   }
                 }
+                // Hint line — Kit.Palette.faint per docs/adr/0005 in the
+                // neutral case, instead of hand-rolled opacity-on-barForeground;
+                // the running-long case keeps the full-opacity warning tint
+                // since that's a state colour, not the dim hint role.
                 Text {
                   visible: !!card.labelBaseline
                   text: card.labelBaseline
                     ? ((card.runningLong ? "over its usual ~" : "usually ~") + Model.formatElapsed(card.labelBaseline.median))
                     : ""
-                  color: card.runningLong ? root.longColor : root.barForeground
-                  opacity: card.runningLong ? 0.9 : 0.5
+                  color: card.runningLong ? root.longColor : Kit.Palette.faint
+                  opacity: card.runningLong ? 0.9 : 1.0
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }

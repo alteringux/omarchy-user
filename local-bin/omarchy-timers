@@ -60,28 +60,41 @@ def elapsed($now):
 def is_paused: rs == 0;
 '
 
+# Locked so two verbs invoked back-to-back (the bar widget's own execDetached
+# fallback fires one of these while the queued one is still running) can't
+# race a read-modify-write of the same file: without this, both reads see the
+# same "before" state and the second write silently clobbers the first.
+# Mirrors omarchy-countdowns' state_jq / record_add.
 state_jq() {   # [extra jq args...] <program> — $now in scope; input = current state; writes back
   local prog="${!#}"
   local args=("${@:1:$#-1}")
-  read_state | jq --argjson now "$(now_ms)" "${args[@]}" "$JQ_LIB $prog" | write_json "$STATE_FILE"
+  (
+    flock 9
+    read_state | jq --argjson now "$(now_ms)" "${args[@]}" "$JQ_LIB $prog" | write_json "$STATE_FILE"
+  ) 9>"$STATE_FILE.lock"
 }
 
-# Fold one entry (JSON on $entry) into the completion log, newest first, capped.
+# Fold one entry (JSON on $entry) into the completion log, newest first,
+# capped. Locked like state_jq, against the history file's own
+# concurrent-write race.
 record_completion() {
   local entry="$1"
-  read_history | jq \
-    --argjson now "$(now_ms)" \
-    --argjson cap "$HISTORY_CAP" \
-    --argjson entry "$entry" \
-    "$JQ_LIB"'
-      ($entry.createdAt | if type == "number" and . > 0 then . else $now end) as $started
-      | .completed = ([{
-          label: ($entry.label | if type == "string" then (. | gsub("^\\s+|\\s+$";"")) else "" end),
-          startedAt: $started,
-          endedAt: $now,
-          durationMs: ($entry | elapsed($now))
-        }] + (.completed // []))[0:$cap]
-    ' | write_json "$HISTORY_FILE"
+  (
+    flock 9
+    read_history | jq \
+      --argjson now "$(now_ms)" \
+      --argjson cap "$HISTORY_CAP" \
+      --argjson entry "$entry" \
+      "$JQ_LIB"'
+        ($entry.createdAt | if type == "number" and . > 0 then . else $now end) as $started
+        | .completed = ([{
+            label: ($entry.label | if type == "string" then (. | gsub("^\\s+|\\s+$";"")) else "" end),
+            startedAt: $started,
+            endedAt: $now,
+            durationMs: ($entry | elapsed($now))
+          }] + (.completed // []))[0:$cap]
+      ' | write_json "$HISTORY_FILE"
+  ) 9>"$HISTORY_FILE.lock"
 }
 
 cmd="${1:-get}"
@@ -158,9 +171,12 @@ case "$cmd" in
     trimmed="$(printf '%s' "$label" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
     [ -n "$trimmed" ] || exit 0
     lc="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
-    read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
-      .completed = ([ .completed[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
-    ' | write_json "$HISTORY_FILE"
+    (
+      flock 9
+      read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
+        .completed = ([ .completed[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
+      ' | write_json "$HISTORY_FILE"
+    ) 9>"$HISTORY_FILE.lock"
     ;;
 
   -h | --help | help)
