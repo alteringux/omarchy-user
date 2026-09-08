@@ -493,6 +493,37 @@ test("levelInfo: caps its title at the last tier past the title list length", ()
   assert.equal(huge.title, Model.LEVEL_TITLES[Model.LEVEL_TITLES.length - 1])
 })
 
+test("didLevelUp: true only when the derived level actually crosses a threshold", () => {
+  assert.equal(Model.didLevelUp(state({ totalPokes: 14 }), state({ totalPokes: 15 })), true)
+  assert.equal(Model.didLevelUp(state({ totalPokes: 14 }), state({ totalPokes: 14 })), false)
+  assert.equal(Model.didLevelUp(state({ totalPokes: 15 }), state({ totalPokes: 16 })), false)
+})
+
+test("didLevelUp: feeds and plays count toward the level too", () => {
+  assert.equal(Model.didLevelUp(state({ totalPokes: 10, totalFeeds: 4 }), state({ totalPokes: 10, totalFeeds: 5 })), true)
+  assert.equal(Model.didLevelUp(state({ totalFeeds: 29 }), state({ totalFeeds: 29, totalPlays: 1 })), true)
+})
+
+test("pickLevelUpLine: interpolates level and title, wrapped in the pet's voice", () => {
+  const pet = Model.petById("cat")
+  const expected = Model.LEVEL_UP_LINE.replace("{level}", "2").replace("{title}", Model.LEVEL_TITLES[1])
+  assert.equal(Model.pickLevelUpLine(pet, 2), pet.voice(expected))
+})
+
+test("pickLevelUpLine: clamps missing or zero levels to 1", () => {
+  const pet = Model.petById("cat")
+  const level1 = pet.voice(Model.LEVEL_UP_LINE.replace("{level}", "1").replace("{title}", Model.LEVEL_TITLES[0]))
+  assert.equal(Model.pickLevelUpLine(pet, 0), level1)
+  assert.equal(Model.pickLevelUpLine(pet, undefined), level1)
+})
+
+test("pickLevelUpLine: caps the title at the last one for huge levels", () => {
+  const pet = Model.petById("cat")
+  const last = Model.LEVEL_TITLES[Model.LEVEL_TITLES.length - 1]
+  const expected = Model.LEVEL_UP_LINE.replace("{level}", "999").replace("{title}", last)
+  assert.equal(Model.pickLevelUpLine(pet, 999), pet.voice(expected))
+})
+
 // ── wardrobe ───────────────────────────────────────────────────────────────
 
 test("isAccessoryUnlocked: false for an unknown id, false until its achievement unlocks", () => {
