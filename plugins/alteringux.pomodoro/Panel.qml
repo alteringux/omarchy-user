@@ -22,7 +22,8 @@ Panel {
   readonly property var config: hostWidget ? hostWidget.config : Model.defaultConfig()
   readonly property var stats: hostWidget ? hostWidget.stats : Model.defaultStats()
   readonly property string today: Model.todayDateString()
-  readonly property var todayBucket: stats.daily && stats.daily[today] ? stats.daily[today] : { completed: 0, focusedMs: 0 }
+  // Same bucket BarWidget.todayBucket derives, reused rather than recomputed.
+  readonly property var todayBucket: hostWidget ? hostWidget.todayBucket : { completed: 0, focusedMs: 0 }
   readonly property var weekly: Model.weeklyTotals(stats, today)
   readonly property real allTimeFocusedMs: Model.allTimeFocusedMs(stats)
 
@@ -293,11 +294,14 @@ Panel {
 
       PanelSeparator {}
 
+      // Hint / tertiary line — Style.font.caption + Kit.Palette.faint per the
+      // panel text-hierarchy ramp (docs/adr/0005), not the meta-tag treatment
+      // (this is a full sentence, not a glanceable status).
       Text {
         text: "Enter: start/pause  ·  X: skip  ·  R: reset  ·  Esc: close"
-        color: Qt.darker(root.barForeground, 1.4)
+        color: Kit.Palette.faint
         font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: Style.font.caption
       }
     }
     }

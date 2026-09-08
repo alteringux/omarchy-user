@@ -352,6 +352,11 @@ cmd_resume() {
   local sess
   sess="$(read_session)"
   [ "$(jq -r '.phase' <<<"$sess")" = "IDLE" ] && { cmd_toggle; return; }
+  # Already running: a no-op, not a re-stamp. Without this guard, calling
+  # `resume` on a session that's already live resets savedAtMs to now while
+  # leaving remainingMs anchored to the OLD savedAtMs — silently gifting the
+  # phase however many ms elapsed since that anchor, every time it's called.
+  [ "$(jq -r '.running' <<<"$sess")" = "true" ] && { printf '%s' "$sess" | put_session; return 0; }
   jq --argjson n "$(now_ms)" '.running = true | .ready = false | .savedAtMs = $n' <<<"$sess" | put_session
   ensure_daemon
 }

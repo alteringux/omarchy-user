@@ -109,6 +109,38 @@ function parseChimeMode(raw) {
   return !!raw && raw.trim() === "chime"
 }
 
+// Sessions logged today (local calendar day), for an at-a-glance "so far
+// today" summary on the idle panel. `ended_at` is stored UTC ISO-8601 by the
+// CLI's log_session; comparing via the Date object's local getters (not the
+// raw string) is what makes this a *local* day, consistent with every other
+// day boundary in this plugin's family. Returns null when nothing logged
+// today yet, so callers can hide the summary line entirely.
+function historyToday(history, nowMs) {
+  if (!history || !Array.isArray(history.sessions)) return null
+  var now = new Date(isFinite(nowMs) && nowMs > 0 ? nowMs : Date.now())
+  var y = now.getFullYear(), m = now.getMonth(), d = now.getDate()
+  var count = 0
+  var totalSeconds = 0
+  for (var i = 0; i < history.sessions.length; i++) {
+    var s = history.sessions[i]
+    if (!s) continue
+    var ended = new Date(s.ended_at)
+    if (isNaN(ended.getTime())) continue
+    if (ended.getFullYear() === y && ended.getMonth() === m && ended.getDate() === d) {
+      count += 1
+      totalSeconds += (typeof s.elapsed_seconds === "number" && s.elapsed_seconds > 0) ? s.elapsed_seconds : 0
+    }
+  }
+  return count > 0 ? { count: count, totalSeconds: totalSeconds } : null
+}
+
+// "3 sessions today, 42:10 total" — "" (hidden) when `today` is null.
+function formatTodaySummary(today) {
+  if (!today || today.count <= 0) return ""
+  var noun = today.count === 1 ? "session" : "sessions"
+  return today.count + " " + noun + " today, " + formatElapsed(today.totalSeconds) + " total"
+}
+
 // Reads the frozen-at epoch the CLI's `pause` stamps into the state file.
 // A positive number means the stopwatch is paused and its elapsed count
 // should be shown as (paused_epoch - start_epoch), not (now - start_epoch).
@@ -130,6 +162,8 @@ if (typeof module !== "undefined") {
     sanitizeInterval: sanitizeInterval,
     parseVoiceMuted: parseVoiceMuted,
     parseChimeMode: parseChimeMode,
-    pausedEpochOf: pausedEpochOf
+    pausedEpochOf: pausedEpochOf,
+    historyToday: historyToday,
+    formatTodaySummary: formatTodaySummary
   }
 }

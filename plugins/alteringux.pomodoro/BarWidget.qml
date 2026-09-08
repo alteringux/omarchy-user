@@ -38,6 +38,16 @@ BarWidget {
   // shows a suggestion, it never changes workMinutes on its own.
   readonly property var workSuggestion: root.historyLoaded ? Model.suggestedWorkMinutes(root.history, root.config.workMinutes) : null
 
+  // Today's completed count + current streak, from the same stats bucket the
+  // panel's STATISTICS section already reads — exposed on the widget too so
+  // IPC status() can report them (a keybinding or another plugin querying
+  // `alteringux.pomodoro status` shouldn't have to shell out to the CLI
+  // separately just for the numbers the panel already shows).
+  readonly property var todayBucket: root.statsLoaded && root.stats.daily && root.stats.daily[Model.todayDateString()]
+    ? root.stats.daily[Model.todayDateString()] : { completed: 0, focusedMs: 0 }
+  readonly property int completedToday: root.todayBucket.completed || 0
+  readonly property int streak: root.statsLoaded ? (root.stats.streak || 0) : 0
+
   // ---- Timer state: derived from the watched pomodoro-session.json, which is
   // written only by ~/.local/bin/omarchy-pomodoro — its `__run` systemd --user
   // daemon owns the 1s countdown, phase transitions, transition sounds,
@@ -190,7 +200,7 @@ BarWidget {
     function toggle(): void { root.togglePanel() }
     function status(): string {
       return guard.call("ipc.status", function() {
-        return JSON.stringify({ phase: root.phase, remainingMs: root.remainingMs, running: root.running, ready: root.ready, elapsedReadyMs: root.elapsedReadyMs })
+        return JSON.stringify({ phase: root.phase, remainingMs: root.remainingMs, running: root.running, ready: root.ready, elapsedReadyMs: root.elapsedReadyMs, completedToday: root.completedToday, streak: root.streak })
       }, "{}")
     }
   }
