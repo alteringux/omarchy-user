@@ -93,6 +93,21 @@ notify() {   # $1 = urgency (normal|critical), $2 = title, $3 = body
   notify-send -a "Grip" -u "$1" "$2" "$3" 2>/dev/null || true
 }
 
+# Mirror the on-screen prompt into the shared alteringux.pulse feed, so the
+# Pulse bell widget reddens and offers the check-in too. Best-effort — a
+# missing or failing omarchy-pulse must never break a grip run.
+pulse_prompt() {   # $1 = checkin|takeover
+  command -v omarchy-pulse >/dev/null 2>&1 || return 0
+  local lvl label
+  if [ "$1" = "takeover" ]; then lvl=critical; label="Deal with this now"; else lvl=urgent; label="Check-in due"; fi
+  omarchy-pulse attention alteringux.grip --label "$label" --level "$lvl" \
+    --action "omarchy-shell alteringux.grip checkin" --action-label "Check in" >/dev/null 2>&1 || true
+}
+pulse_clear() {
+  command -v omarchy-pulse >/dev/null 2>&1 || return 0
+  omarchy-pulse clear alteringux.grip >/dev/null 2>&1 || true
+}
+
 top_lines() {   # top 3 open task texts, newline-joined
   jq -n --argjson tasks "$(read_tasks)" --argjson now "$(now_ms)" '{tasks:$tasks, now:$now, n:3}' \
     | engine top \
@@ -213,6 +228,7 @@ cmd_checkin() {
   fi
   jq --argjson now "$(now_ms)" '.prompt = {kind:"checkin", since:$now}' <<<"$st" | put_state
   notify normal "󰄲  Grip check-in" "$(top_lines)"
+  pulse_prompt checkin
 }
 
 cmd_ack() {
@@ -248,6 +264,7 @@ cmd_ack() {
 
   read_state | jq --argjson now "$now" \
     ".prompt = null | .lastPromptMs = \$now | $streak_expr | $pause_expr" | put_state
+  pulse_clear
   echo "ack $kind"
 }
 
@@ -256,6 +273,7 @@ cmd_pause() {
   [ "$min" -gt 0 ] 2>/dev/null || die "usage: omarchy-grip pause <2h|30m|90>"
   local until; until=$(( $(now_ms) + min * 60000 ))
   state_set ".pauseUntilMs = $until | .prompt = null"
+  pulse_clear
   notify normal "󰒲  Grip paused" "No nudges for ${min}m."
   echo "paused ${min}m"
 }
@@ -276,6 +294,7 @@ cmd_on() {
 cmd_off() {
   state_set ".enabled = false | .prompt = null"
   stop_daemon
+  pulse_clear
   notify normal "󰅖  Grip is off" "No more nudges until you turn it back on."
   echo "off"
 }
@@ -311,8 +330,10 @@ do_tick() {
     jq --arg kind "$want" --argjson now "$(now_ms)" '.prompt = {kind:$kind, since:$now}' <<<"$st" | put_state
     if [ "$want" = "takeover" ]; then
       notify critical "󱐋  Grip — deal with this" "$(top_lines)"
+      pulse_prompt takeover
     else
       notify normal "󰄲  Grip check-in" "$(top_lines)"
+      pulse_prompt checkin
     fi
   fi
 }

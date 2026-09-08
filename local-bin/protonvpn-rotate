@@ -85,6 +85,22 @@ write_state() {
 }
 EOF
   mv -f "$tmp" "$STATE_FILE"
+  notify_pulse "$error"
+}
+
+# Cross-plugin signal: surface a connection error on the shared alteringux.pulse
+# attention feed so other plugins' bar icons (and the pulse bell) can react to
+# it via Kit.PulseTint, not just this widget's own local state. Clears itself
+# once write_state stops being called with an error.
+notify_pulse() {
+  local error="${1:-}"
+  command -v omarchy-pulse >/dev/null 2>&1 || return 0
+  if [ -n "$error" ]; then
+    omarchy-pulse attention alteringux.vpnrotate --label "$error" --level critical \
+      >/dev/null 2>&1 || true
+  else
+    omarchy-pulse clear alteringux.vpnrotate >/dev/null 2>&1 || true
+  fi
 }
 
 json_escape() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
