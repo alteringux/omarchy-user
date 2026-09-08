@@ -97,7 +97,15 @@ BarWidget {
         }
       }
     }
-    onExited: root.visCooldown = true   // don't respawn in a tight loop if cliamp just quit
+    // Only throttle a respawn when visstream itself died while we still
+    // expect it to be running (root.playing still true) — a genuine
+    // crash-loop guard. An ordinary stop/pause already flips `running` to
+    // false via the `playing` term above, so it doesn't need this cooldown;
+    // unconditionally setting visCooldown here on every exit (the previous
+    // behaviour) froze the spectrum on idle bands for up to 1.5s after any
+    // stop/pause immediately followed by resume, even though cliamp itself
+    // was already back to playing.
+    onExited: if (root.playing) root.visCooldown = true
   }
 
   Timer {
@@ -328,6 +336,13 @@ BarWidget {
         onClicked: function (mouse) {
           if (mouse.button === Qt.MiddleButton) root.next()
           else root.togglePanel()
+        }
+        // Scroll the bar strip to nudge volume up/down without opening the
+        // panel — mirrors the panel's own +/-2 dB buttons.
+        onWheel: function (wheel) {
+          if (!root.running) return
+          root.nudgeVolume(wheel.angleDelta.y > 0 ? 2 : -2)
+          wheel.accepted = true
         }
       }
 

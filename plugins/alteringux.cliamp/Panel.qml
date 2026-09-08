@@ -248,14 +248,11 @@ Panel {
         }
 
         // Visualiser mode.
-        Text {
+        Kit.MetaText {
           visible: root.running
           width: content.width
-          text: "Visualiser"
-           color: root.barForeground
-           opacity: 0.6
-           font.family: Style.font.family
-           font.pixelSize: Style.font.bodySmall
+          content: "Visualiser"
+          foreground: root.barForeground
         }
 
         Dropdown {
