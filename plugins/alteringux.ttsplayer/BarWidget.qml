@@ -121,7 +121,12 @@ BarWidget {
         root.playedIndex = 0
         root.paused = false
         root.muted = false
-        if (wasActive && root.loopEnabled && replay && replay.text)
+        // Skip the loop auto-restart while an explicit restartFromTop() is
+        // already in flight — its own `stop` is exactly what just cleared
+        // current.json here, and its restartTimer will call replay() itself.
+        // Without this guard both timers fire replay() for the same reading,
+        // launching two overlapping piper-tts processes on the shared queue.
+        if (wasActive && root.loopEnabled && replay && replay.text && !root._explicitRestart)
           loopTimer.restart()
         return
       }
@@ -268,6 +273,10 @@ BarWidget {
     })
   }
 
+  // Guards against the natural Loop restart double-firing alongside an
+  // explicit restart. See the comment in applyState()'s null branch.
+  property bool _explicitRestart: false
+
   // Stop the current reading and re-speak it from the top, picking up the
   // current speed + pinned voice. Backs both the panel's "Restart now" button
   // and an instant voice change.
@@ -275,6 +284,7 @@ BarWidget {
     guard.run("restartFromTop", function () {
       var r = root.lastReading
       if (!r || !r.text) return
+      root._explicitRestart = true
       Quickshell.execDetached([root.ctlPath, "stop"])
       restartTimer.restart()
     })
@@ -287,7 +297,10 @@ BarWidget {
     id: restartTimer
     interval: 350
     repeat: false
-    onTriggered: root.replay()
+    onTriggered: {
+      root._explicitRestart = false
+      root.replay()
+    }
   }
 
   IpcHandler {
@@ -370,6 +383,12 @@ BarWidget {
     text: root.icon
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    onPressed: function (b) { root.togglePanel() }
+    // Middle/right click mirror cliamp's and score's bar-widget shortcuts:
+    // a quick mute/stop without opening the panel first.
+    onPressed: function (b) {
+      if (b === Qt.MiddleButton) root.toggleMute()
+      else if (b === Qt.RightButton) root.stopPlayback()
+      else root.togglePanel()
+    }
   }
 }

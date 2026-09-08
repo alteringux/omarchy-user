@@ -1,8 +1,10 @@
 import QtQuick
+import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
+import "Model.js" as Model
 import "../alteringux.kit" as Kit
 
 Panel {
@@ -160,18 +162,37 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          Text {
-            text: "HISTORY"
-            color: Qt.darker(root.bar.foreground, 1.5)
-            font.family: root.bar.fontFamily
-            font.pixelSize: Style.font.caption
-            font.letterSpacing: 1
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            Kit.MetaText {
+              // Override MetaText's own default (width: parent.width) — that
+              // default assumes it's the sole child of a width-anchored
+              // container; here it shares a Row with the "N today" tally, so
+              // it must size to its own text instead of claiming the whole
+              // row and pushing the tally off past the edge.
+              width: implicitWidth
+              content: "History"
+              foreground: root.bar.foreground
+            }
+
+            // Small same-day tally, purely derived from the history array
+            // already on hand — no extra persistence.
+            Text {
+              readonly property int todayCount: Model.countToday(root.history)
+              visible: todayCount > 0
+              text: todayCount + " today"
+              color: Kit.Palette.faint
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.caption
+            }
           }
 
           Repeater {
             model: root.history.slice(-10).reverse()
 
-            Row {
+            RowLayout {
               required property var modelData
               width: parent.width
               spacing: Style.space(8)
@@ -185,7 +206,7 @@ Panel {
                   : Kit.Palette.warning
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
-                width: Style.space(40)
+                Layout.preferredWidth: Style.space(40)
               }
 
               Text {
@@ -197,7 +218,15 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
               }
 
-              Item { width: parent.width - x; height: 1 }
+              // Fills the remaining width so the timestamp pins to the right
+              // edge. The previous `Item { width: parent.width - x }` filled
+              // all the way to the row's right edge on its own, then the
+              // timestamp Text was appended AFTER it — pushing the timestamp
+              // past the visible row and off the panel entirely. Layout.fillWidth
+              // on a genuine RowLayout spacer is the pattern already used
+              // elsewhere in these plugins (dashboard, stocks, flow) for
+              // exactly this "pin trailing content right" case.
+              Item { Layout.fillWidth: true }
 
               Text {
                 text: {
