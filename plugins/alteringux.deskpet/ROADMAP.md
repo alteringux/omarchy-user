@@ -10,4 +10,4 @@ One small, tested increment per auto-improve run. Check items off as they land; 
 
 ## Queued
 - [x] **A mood ring on the bar icon** — `Model.moodFace(mood)` maps the computed mood to a face (ecstatic/content → 🙂, meh → 😐, hungry → 😋, grumpy → 🙁; asleep and unknown → none, since the 󰒲 sleep glyph already holds that slot) and `BarWidget.qml` appends it after the pet glyph in `displayText`, so the pet's state is readable without opening the panel. Tests: every mood gets its face, asleep/unknown stays blank.
-- [ ] **A second age-up** — a deeper milestone at 500 pats: a different accessory and one special line, reusing the `ageUp` path and `agedUp` persistence (add `agedUp2` or extend the existing flag).
+- [x] **A second age-up** — a deeper milestone at 500 pats: a different accessory and one special line, reusing the `ageUp` path and `agedUp` persistence (add `agedUp2` or extend the existing flag).
