@@ -84,3 +84,36 @@ test("canUndo reflects history presence", () => {
   assert.strictEqual(Model.canUndo({ score: 1, history: [{ action: "increment", value: 1, timestamp: 0 }] }), true)
   assert.strictEqual(Model.canUndo(null), false)
 })
+
+test("countToday counts only entries timestamped today", () => {
+  const now = new Date(2026, 8, 8, 10, 0, 0).getTime() // 2026-09-08 10:00 local
+  const todayEarlier = new Date(2026, 8, 8, 0, 30, 0).getTime()
+  const yesterday = new Date(2026, 8, 7, 23, 59, 0).getTime()
+  const history = [
+    { action: "increment", value: 1, timestamp: yesterday },
+    { action: "increment", value: 1, timestamp: todayEarlier },
+    { action: "decrement", value: 1, timestamp: now }
+  ]
+  assert.strictEqual(Model.countToday(history, now), 2)
+})
+
+test("countToday skips entries with a missing or unparsable timestamp", () => {
+  const now = new Date(2026, 8, 8, 10, 0, 0).getTime()
+  const history = [
+    { action: "increment", value: 1, timestamp: now },
+    { action: "increment", value: 1 },
+    { action: "increment", value: 1, timestamp: "not a date" }
+  ]
+  assert.strictEqual(Model.countToday(history, now), 1)
+})
+
+test("countToday returns 0 for empty / non-array history", () => {
+  assert.strictEqual(Model.countToday([], Date.now()), 0)
+  assert.strictEqual(Model.countToday(null, Date.now()), 0)
+  assert.strictEqual(Model.countToday(undefined, Date.now()), 0)
+})
+
+test("countToday defaults nowMs to the current time", () => {
+  const history = [{ action: "increment", value: 1, timestamp: Date.now() }]
+  assert.strictEqual(Model.countToday(history), 1)
+})
