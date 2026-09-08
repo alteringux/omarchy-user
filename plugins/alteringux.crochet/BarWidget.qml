@@ -119,6 +119,10 @@ BarWidget {
     }
     function run(pattern: string): void { root.runPattern(pattern) }
     function test(): void { root.runTests() }
+    // `patterns` in status() only reflects the last on-demand scan (only
+    // triggered by opening the panel) — this lets a script force a rescan
+    // without going through the UI first.
+    function scan(): void { root.refreshPatterns() }
     function openPreview(): void { root.openPreview() }
     function openProject(): void { root.openProject() }
     function openDoc(): void { root.openDoc() }

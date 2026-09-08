@@ -192,7 +192,15 @@ Item {
     // Qt.callLater avoids "QV4::Object::insertMember" crashes when a
     // Repeater is mid-incubation while we mutate its model.
     Qt.callLater(function() {
-      removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
+      // Unqualified, this silently threw "removePopupsByOriginalId is not
+      // defined" inside the deferred callback -- a plain JS function
+      // expression passed to Qt.callLater doesn't carry the enclosing Item's
+      // function-property scope the way a QML id does, so it needs the
+      // explicit `service.` qualifier that `popupModel` below doesn't. The
+      // dedup this call does (dropping the superseded popup for a
+      // replaces_id update) silently never ran, leaving a stale duplicate
+      // toast on screen next to the new one.
+      service.removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
       popupModel.insert(0, snapshot)
       // An update that arrived while the insert was deferred found no row to
       // write to, and a property that already changed will not change again.
@@ -390,7 +398,7 @@ Item {
       }
     } catch (e) {
       // Notification already torn down by the server — fall through to focus.
-      console.warn("invoke default failed:", e)
+      console.warn("notifications: invoke default failed:", e)
     }
     // Chat apps (Slack, Discord, Vesktop, etc.) rarely register a "default"
     // libnotify action — they just expect clicking the notification to

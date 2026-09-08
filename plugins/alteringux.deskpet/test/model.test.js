@@ -421,19 +421,34 @@ test("ACHIEVEMENTS: every description that names a threshold has it interpolated
 })
 
 test("unlockedAchievementIds: empty for a fresh pet, grows monotonically with counters", () => {
-  // Pin lastInteractionMs to a fixed daytime moment -- night_owl's check reads
-  // the wall-clock hour, so leaving it defaulted to "now" would make this
-  // test flaky depending on what time it happens to run.
-  const noon = new Date(2026, 0, 1, 12, 0, 0).getTime()
-  const fresh = state({ totalPokes: 0, totalFeeds: 0, totalPlays: 0, pokeStreak: 0, bornMs: 0, lastInteractionMs: noon })
+  // night_owl reads the persisted nightOwlEver flag (false by default here),
+  // not the wall-clock hour, so this no longer depends on what time it runs.
+  const fresh = state({ totalPokes: 0, totalFeeds: 0, totalPlays: 0, pokeStreak: 0, bornMs: 0 })
   assert.deepEqual(Model.unlockedAchievementIds(fresh, 0), [])
 
-  const oneOfEach = state({ totalPokes: 1, totalFeeds: 1, totalPlays: 1, bornMs: 0, lastInteractionMs: noon })
+  const oneOfEach = state({ totalPokes: 1, totalFeeds: 1, totalPlays: 1, bornMs: 0 })
   const ids = Model.unlockedAchievementIds(oneOfEach, 0)
   assert.ok(ids.includes("first_pet"))
   assert.ok(ids.includes("first_feed"))
   assert.ok(ids.includes("first_play"))
   assert.ok(!ids.includes("pat_pat_pat")) // needs 50, not 1
+})
+
+test("night_owl: sticks once earned instead of flipping back with the wall-clock hour", () => {
+  const nightHour = new Date(2026, 0, 1, 3, 0, 0).getTime()  // 3am
+  const dayHour = new Date(2026, 0, 1, 14, 0, 0).getTime()   // 2pm
+
+  const awake = state({ nightOwlEver: false })
+  assert.ok(!Model.unlockedAchievementIds(awake, dayHour).includes("night_owl"))
+
+  const afterNightPoke = Model.poke(awake, nightHour)
+  assert.equal(afterNightPoke.nightOwlEver, true)
+  assert.ok(Model.unlockedAchievementIds(afterNightPoke, nightHour).includes("night_owl"))
+
+  // A later daytime interaction must not clear the flag already earned.
+  const afterDayPoke = Model.poke(afterNightPoke, dayHour)
+  assert.equal(afterDayPoke.nightOwlEver, true)
+  assert.ok(Model.unlockedAchievementIds(afterDayPoke, dayHour).includes("night_owl"))
 })
 
 test("newlyUnlocked: reports only what crossed the line between prev and next", () => {

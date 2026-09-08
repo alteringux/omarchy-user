@@ -121,12 +121,19 @@ Panel {
               }
 
               Text {
-                visible: !!(root.lastRun && root.lastRun.ok && root.lastRun.stitches !== null)
+                // All three fields are independently nullable in the index
+                // (parseIndex nulls each on its own) — checking only
+                // `stitches` let a partial record through and rendered the
+                // literal string "null" for whichever field was missing.
+                visible: !!(root.lastRun && root.lastRun.ok
+                  && root.lastRun.stitches !== null
+                  && root.lastRun.rows !== null
+                  && root.lastRun.finalRowWidth !== null)
                 width: parent.width
                 text: root.lastRun
                   ? (root.lastRun.stitches + " stitches · " + root.lastRun.rows + " rows · final row width " + root.lastRun.finalRowWidth)
                   : ""
-                color: Qt.darker(root.barForeground, 1.4)
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -161,7 +168,7 @@ Panel {
             Text {
               id: scanLabel
               text: root.scanning ? "scanning…" : ""
-              color: Qt.darker(root.barForeground, 1.4)
+              color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
