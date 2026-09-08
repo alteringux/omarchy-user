@@ -1,22 +1,22 @@
 #!/bin/bash
 # Fetch a fresh Grand Theft Auto IV wallpaper from Wallhaven and stage it in the
-# gta-iv theme's user-backgrounds pool.
+# gta-6 theme's user-backgrounds pool.
 #
 # Wallhaven bans AI-generated content site-wide (https://wallhaven.cc/rules), so
 # everything pulled here is human-made / official Rockstar promo art. This script
 # only downloads -- it generates nothing.
 #
-# Driven by the gta-iv-wallpaper systemd user timer (every 6h). It ADDS to the
+# Driven by the gta-6-wallpaper systemd user timer (every 6h). It ADDS to the
 # rotation only; it does not change the live wallpaper. Move through the pool
 # with `omarchy theme bg next` or the background switcher.
 set -euo pipefail
 
-DEST="$HOME/.config/omarchy/backgrounds/gta-iv"
-LOG="$HOME/.local/state/omarchy/gta-iv-wallpaper.log"
+DEST="$HOME/.config/omarchy/backgrounds/gta-6"
+LOG="$HOME/.local/state/omarchy/gta-6-wallpaper.log"
 KEEP=15
 UA="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36"
 API="https://wallhaven.cc/api/v1/search"
-QUERIES=("gta iv" "grand theft auto iv" "gta 4 liberty city" "liberty city")
+QUERIES=("gta iv" "gta 6" "grand theft auto iv" "gta 4 liberty city")
 
 mkdir -p "$DEST" "$(dirname "$LOG")"
 
@@ -106,7 +106,7 @@ for f in "${old[@]:-}"; do
   rm -f "$f" && log "pruned $(basename "$f")"
 done
 
-# --- refresh switcher thumbnails if gta-iv is the active theme ----------
-if [[ "$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null)" == "gta-iv" ]]; then
+# --- refresh switcher thumbnails if gta-6 is the active theme ----------
+if [[ "$(cat "$HOME/.local/state/omarchy/current/theme.name" 2>/dev/null)" == "gta-6" ]]; then
   omarchy theme bg cache >/dev/null 2>&1 || true
 fi

@@ -1,4 +1,4 @@
--- GTA IV — Liberty City industrial grit. Loaded after Omarchy's default
+-- GTA 6 — Liberty City industrial grit. Loaded after Omarchy's default
 -- looknfeel, so this file owns the "tense, hard-edged" personality of the theme.
 -- Switch to any other theme to get the calm Omarchy defaults back.
 
