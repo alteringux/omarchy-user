@@ -16,9 +16,11 @@ var MIN = 60000
 var POKE_STREAK_WINDOW_MS = 4000
 var POKE_STREAK_ANNOY = 6
 
-// The "ages up a notch" milestone: the same 50-pat mark as the pat_pat_pat
-// achievement. See ageUp().
+// The "ages up a notch" milestones: the 50-pat mark (the same one the
+// pat_pat_pat achievement rides on) and, ten times past it, 500 pats.
+// See ageUp().
 var AGE_UP_POKE_THRESHOLD = 50
+var AGE_UP2_POKE_THRESHOLD = 500
 
 // ── the catalogue ───────────────────────────────────────────────────────────
 // Ten pets, each with a glyph, an accent tone (keyed to Kit.Palette), a short
@@ -280,6 +282,8 @@ var ACHIEVEMENTS = [
     check: function (s) { return (s.totalPlays || 0) >= 1 } },
   { id: "pat_pat_pat", name: "Pat Enthusiast", description: "Pet your companion 50 times.",
     check: function (s) { return (s.totalPokes || 0) >= 50 } },
+  { id: "pat_saint", name: "Pat Saint", description: "Pet your companion 500 times.",
+    check: function (s) { return (s.totalPokes || 0) >= 500 } },
   { id: "snack_master", name: "Snack Master", description: "Feed your companion 25 times.",
     check: function (s) { return (s.totalFeeds || 0) >= 25 } },
   { id: "playful", name: "Playful Spirit", description: "Play with your companion 25 times.",
@@ -327,6 +331,7 @@ var ACCESSORIES = [
   { id: "party_hat", glyph: "🎉", name: "Party Hat", unlockedBy: "dedicated" },
   { id: "sunglasses", glyph: "😎", name: "Sunglasses", unlockedBy: "pat_pat_pat" },
   { id: "top_hat", glyph: "🎩", name: "Top Hat", unlockedBy: "pat_pat_pat" },
+  { id: "halo", glyph: "😇", name: "Halo", unlockedBy: "pat_saint" },
   { id: "crown", glyph: "👑", name: "Crown", unlockedBy: "best_friend" },
   { id: "bowtie", glyph: "🎀", name: "Bow", unlockedBy: "snack_master" }
 ]
@@ -406,6 +411,7 @@ function defaultState() {
     bornMs: now,
     shiny: false,
     agedUp: false,
+    agedUp2: false,
     accessoryId: null,
     screenWatchEnabled: false,
     screenLookFreqMin: 20,
@@ -442,6 +448,7 @@ function parseState(raw) {
   if (typeof obj.roamMode === "string" && ROAM_MODES.indexOf(obj.roamMode) >= 0) out.roamMode = obj.roamMode
   if (typeof obj.shiny === "boolean") out.shiny = obj.shiny
   if (typeof obj.agedUp === "boolean") out.agedUp = obj.agedUp
+  if (typeof obj.agedUp2 === "boolean") out.agedUp2 = obj.agedUp2
   if (obj.accessoryId === null) out.accessoryId = null
   else if (typeof obj.accessoryId === "string") {
     for (var i = 0; i < ACCESSORIES.length; i++) {
@@ -514,16 +521,23 @@ function poke(state, nowMs) {
 
 function isAnnoyedPoke(state) { return (state.pokeStreak || 0) > 0 && (state.pokeStreak % POKE_STREAK_ANNOY) === 0 }
 
-// The "ages up a notch" milestone: the first poke across
+// The "ages up a notch" milestones: the first poke across
 // AGE_UP_POKE_THRESHOLD marks the pet as aged and puts the top hat on (it
-// unlocks via the same pat_pat_pat achievement that shares the 50-pat mark).
-// Idempotent -- once aged, later pokes never re-equip over an accessory the
-// user chose in the meantime.
+// unlocks via the same pat_pat_pat achievement that shares the 50-pat mark);
+// the first poke across AGE_UP2_POKE_THRESHOLD, on a pet that's already aged,
+// marks it aged a second time and swaps the top hat for a halo (it unlocks
+// via pat_saint). Idempotent -- once a stage is passed, later pokes never
+// re-equip over an accessory the user chose in the meantime. If both
+// thresholds are crossed in the same poke, the second stage wins.
 function ageUp(state) {
   var next = Object.assign({}, state)
   if (!next.agedUp && (next.totalPokes || 0) >= AGE_UP_POKE_THRESHOLD) {
     next.agedUp = true
     next.accessoryId = "top_hat"
+  }
+  if (next.agedUp && !next.agedUp2 && (next.totalPokes || 0) >= AGE_UP2_POKE_THRESHOLD) {
+    next.agedUp2 = true
+    next.accessoryId = "halo"
   }
   return next
 }
@@ -602,6 +616,10 @@ function pickPokeLine(pet, state, seed) {
 // competing with the pat_pat_pat trophy toast that crosses the same line.
 var AGE_UP_LINE = "Fifty pats in -- I've aged up a notch, and this top hat is staying."
 function pickAgeUpLine(pet) { return pet.voice(AGE_UP_LINE) }
+
+// The second, parallel special line — fired from Pet.qml's agedUp2 transition.
+var AGE_UP2_LINE = "Five hundred pats in -- I've aged up again, and this halo is staying."
+function pickAgeUp2Line(pet) { return pet.voice(AGE_UP2_LINE) }
 
 function pickFeedLine(pet, seed) { return pick(pet.feed, seed) }
 function pickPlayLine(pet, seed) { return pick(pet.play, seed) }
@@ -708,12 +726,14 @@ if (typeof module !== "undefined") {
     PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS, ZOOM_LINES: ZOOM_LINES, TIME_LINES: TIME_LINES,
     POKE_STREAK_WINDOW_MS: POKE_STREAK_WINDOW_MS, POKE_STREAK_ANNOY: POKE_STREAK_ANNOY,
     AGE_UP_POKE_THRESHOLD: AGE_UP_POKE_THRESHOLD, AGE_UP_LINE: AGE_UP_LINE,
+  AGE_UP2_POKE_THRESHOLD: AGE_UP2_POKE_THRESHOLD, AGE_UP2_LINE: AGE_UP2_LINE,
     ACHIEVEMENTS: ACHIEVEMENTS, ACCESSORIES: ACCESSORIES, LEVEL_TITLES: LEVEL_TITLES, ROAM_MODES: ROAM_MODES,
     clamp: clamp,
     allPets: allPets, petById: petById, petIndex: petIndex, nextPetId: nextPetId, prevPetId: prevPetId,
     defaultState: defaultState, parseState: parseState,
     applyDecay: applyDecay, feed: feed, play: play, poke: poke, isAnnoyedPoke: isAnnoyedPoke,
     ageUp: ageUp, pickAgeUpLine: pickAgeUpLine,
+  pickAgeUp2Line: pickAgeUp2Line,
     setSleep: setSleep, selectPet: selectPet, setPosition: setPosition, withInteraction: withInteraction,
     moodLabel: moodLabel, moodFace: moodFace, ageDays: ageDays, minutesIdle: minutesIdle,
     pickGreeting: pickGreeting, pickPokeLine: pickPokeLine, pickFeedLine: pickFeedLine,

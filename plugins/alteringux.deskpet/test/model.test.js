@@ -237,6 +237,51 @@ test("pickAgeUpLine: wraps AGE_UP_LINE in the pet's own voice()", () => {
   assert.equal(Model.pickAgeUpLine(pet), pet.voice(Model.AGE_UP_LINE))
 })
 
+test("ageUp: a no-op below AGE_UP2_POKE_THRESHOLD when already aged", () => {
+  const s = state({ totalPokes: Model.AGE_UP2_POKE_THRESHOLD - 1, agedUp: true, accessoryId: "top_hat" })
+  const next = Model.ageUp(s)
+  assert.equal(next.agedUp2, false)
+  assert.equal(next.accessoryId, "top_hat")
+})
+
+test("ageUp: crossing the second threshold marks it twice-aged and equips the halo", () => {
+  const s = state({ totalPokes: Model.AGE_UP2_POKE_THRESHOLD, agedUp: true, accessoryId: "top_hat" })
+  const next = Model.ageUp(s)
+  assert.equal(next.agedUp2, true)
+  assert.equal(next.accessoryId, "halo")
+})
+
+test("ageUp: the second stage is idempotent, and never re-equips over a user-chosen accessory", () => {
+  const already = state({ totalPokes: Model.AGE_UP2_POKE_THRESHOLD + 5, agedUp: true, agedUp2: true, accessoryId: "crown" })
+  const next = Model.ageUp(already)
+  assert.equal(next.agedUp2, true)
+  assert.equal(next.accessoryId, "crown")
+})
+
+test("ageUp: when both thresholds cross in one poke, the second stage wins", () => {
+  const s = state({ totalPokes: Model.AGE_UP2_POKE_THRESHOLD, agedUp: false, accessoryId: null })
+  const next = Model.ageUp(s)
+  assert.equal(next.agedUp, true)
+  assert.equal(next.agedUp2, true)
+  assert.equal(next.accessoryId, "halo")
+})
+
+test("poke: the 500th poke fires the second age-up exactly once", () => {
+  let s = state({ totalPokes: Model.AGE_UP2_POKE_THRESHOLD - 1, agedUp: true, agedUp2: false, accessoryId: "top_hat", lastTickMs: 0 })
+  s = Model.poke(s, 0) // the 500th poke
+  assert.equal(s.totalPokes, Model.AGE_UP2_POKE_THRESHOLD)
+  assert.equal(s.agedUp2, true)
+  assert.equal(s.accessoryId, "halo")
+  s = Model.poke(s, Model.POKE_STREAK_WINDOW_MS + 1) // a further poke must not re-fire
+  assert.equal(s.agedUp2, true)
+  assert.equal(s.accessoryId, "halo")
+})
+
+test("pickAgeUp2Line: wraps AGE_UP2_LINE in the pet's own voice()", () => {
+  const pet = Model.petById("cat")
+  assert.equal(Model.pickAgeUp2Line(pet), pet.voice(Model.AGE_UP2_LINE))
+})
+
 // ── mood / stats ─────────────────────────────────────────────────────────
 
 test("moodLabel: asleep beats every other signal", () => {

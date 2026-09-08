@@ -174,7 +174,11 @@ Item {
     var next = root.state
     if (prev && hostWidget) {
       var unlocked = Model.newlyUnlocked(prev, next, hostWidget.nowMs)
-      if (next.agedUp && !prev.agedUp) {
+      if (next.agedUp2 && !prev.agedUp2) {
+        root.say(Model.pickAgeUp2Line(root.pet), 7000)
+        spawnParticles("sparkle")
+        bounceAnim.restart()
+      } else if (next.agedUp && !prev.agedUp) {
         root.say(Model.pickAgeUpLine(root.pet), 7000)
         spawnParticles("sparkle")
         bounceAnim.restart()
