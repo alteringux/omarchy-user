@@ -159,3 +159,42 @@ test("pausedEpochOf returns the floored positive paused epoch", () => {
   assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175 }), 175)
   assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175.9 }), 175)
 })
+
+test("historyToday returns null when nothing was logged today", () => {
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime()
+  assert.strictEqual(Model.historyToday({ version: 1, sessions: [] }, now), null)
+  const yesterday = new Date(2026, 8, 7, 23, 0, 0).toISOString()
+  assert.strictEqual(Model.historyToday({ version: 1, sessions: [{ ended_at: yesterday, elapsed_seconds: 60 }] }, now), null)
+})
+
+test("historyToday sums only sessions ending on the local calendar day", () => {
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime()
+  const today1 = new Date(2026, 8, 8, 9, 0, 0).toISOString()
+  const today2 = new Date(2026, 8, 8, 10, 0, 0).toISOString()
+  const yesterday = new Date(2026, 8, 7, 23, 0, 0).toISOString()
+  const history = {
+    version: 1,
+    sessions: [
+      { ended_at: today1, elapsed_seconds: 60 },
+      { ended_at: today2, elapsed_seconds: 90 },
+      { ended_at: yesterday, elapsed_seconds: 999 }
+    ]
+  }
+  assert.deepStrictEqual(Model.historyToday(history, now), { count: 2, totalSeconds: 150 })
+})
+
+test("historyToday ignores malformed rows without throwing", () => {
+  const now = Date.now()
+  const history = { version: 1, sessions: [null, {}, { ended_at: "not a date" }] }
+  assert.strictEqual(Model.historyToday(history, now), null)
+})
+
+test("formatTodaySummary pluralises the session count and formats the total", () => {
+  assert.strictEqual(Model.formatTodaySummary({ count: 1, totalSeconds: 65 }), "1 session today, 01:05 total")
+  assert.strictEqual(Model.formatTodaySummary({ count: 3, totalSeconds: 3661 }), "3 sessions today, 1:01:01 total")
+})
+
+test("formatTodaySummary returns empty string for null / zero-count input", () => {
+  assert.strictEqual(Model.formatTodaySummary(null), "")
+  assert.strictEqual(Model.formatTodaySummary({ count: 0, totalSeconds: 0 }), "")
+})
