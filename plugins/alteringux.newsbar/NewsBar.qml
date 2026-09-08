@@ -135,13 +135,20 @@ Item {
     }
   }
 
+  // Guarded like every mutating entry point on the other alteringux.* plugins
+  // (runVerb() etc.) — this one previously ran bare, so a throw here (e.g. a
+  // future refactor leaving refreshScript unset) would escape uncaught from
+  // every caller, including the unguarded IPC `refresh()` handler, instead of
+  // being caught and reported through the shared bug-report pipeline.
   function runRefresh() {
-    if (refreshProc.running) {
-      root.refreshPending = true
-      return
-    }
-    refreshProc.command = ["bash", root.refreshScript]
-    refreshProc.running = true
+    guard.run("runRefresh", function () {
+      if (refreshProc.running) {
+        root.refreshPending = true
+        return
+      }
+      refreshProc.command = ["bash", root.refreshScript]
+      refreshProc.running = true
+    })
   }
 
   Timer {
@@ -222,12 +229,14 @@ Item {
   }
 
   function setHidden(value) {
-    var next = value === true
-    root.ownHidden = next
-    var cmd = next
-      ? "mkdir -p " + togglesDir + " && touch " + hiddenFlagPath
-      : "rm -f " + hiddenFlagPath
-    Quickshell.execDetached(["bash", "-c", cmd])
+    guard.run("setHidden", function () {
+      var next = value === true
+      root.ownHidden = next
+      var cmd = next
+        ? "mkdir -p " + togglesDir + " && touch " + hiddenFlagPath
+        : "rm -f " + hiddenFlagPath
+      Quickshell.execDetached(["bash", "-c", cmd])
+    })
   }
 
   // ------------------------------------------------------------- IPC
@@ -286,6 +295,15 @@ Item {
             anchors { left: parent.left; right: parent.right; top: parent.top }
             height: 1
             color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.12)
+          }
+
+          // Middle-click anywhere on the bar forces an immediate refresh,
+          // without waiting on IPC — mirrors cliamp/score's own middle-click
+          // bar shortcuts. MarqueeSegment's per-headline TapHandlers only
+          // accept the left button, so this still receives the middle one.
+          TapHandler {
+            acceptedButtons: Qt.MiddleButton
+            onTapped: root.runRefresh()
           }
 
           MarqueeSegment {
