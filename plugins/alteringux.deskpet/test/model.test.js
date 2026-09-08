@@ -252,6 +252,16 @@ test("moodLabel: ecstatic requires both happiness and fullness to be high", () =
   assert.equal(Model.moodLabel(state({ happiness: 90, fullness: 55 })), "content")
 })
 
+test("moodFace: one face per mood, blank for asleep and unknown", () => {
+  assert.equal(Model.moodFace("ecstatic"), "🙂")
+  assert.equal(Model.moodFace("content"), "🙂")
+  assert.equal(Model.moodFace("meh"), "😐")
+  assert.equal(Model.moodFace("hungry"), "😋")
+  assert.equal(Model.moodFace("grumpy"), "🙁")
+  assert.equal(Model.moodFace("asleep"), "")
+  assert.equal(Model.moodFace("nonsense"), "")
+})
+
 test("ageDays / minutesIdle compute from the reference clock, never negative", () => {
   const s = state({ bornMs: 0, lastInteractionMs: 0 })
   assert.equal(Model.ageDays(s, 3 * 24 * HOUR), 3)

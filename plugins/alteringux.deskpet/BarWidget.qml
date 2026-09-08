@@ -163,6 +163,7 @@ BarWidget {
     if (!root.state.enabled) return root.pet.glyph + " 󰈉"   // nf-md-eye_off, dimmed by hidden below
     var t = root.pet.glyph
     if (root.liveState.asleep) t += " 󰒲"                     // nf-md-sleep
+    else t += " " + Model.moodFace(root.mood)
     if (root.state.muted) t += " \uf027"                     // fa-volume_off, the hush mark
     return t
   }

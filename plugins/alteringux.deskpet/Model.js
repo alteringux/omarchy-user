@@ -565,6 +565,22 @@ function moodLabel(state) {
   return "content"
 }
 
+function moodFace(mood) {
+  switch (mood) {
+    case "ecstatic":
+    case "content":
+      return "🙂"
+    case "meh":
+      return "😐"
+    case "hungry":
+      return "😋"
+    case "grumpy":
+      return "🙁"
+    default:
+      return ""
+  }
+}
+
 function ageDays(state, nowMs) {
   return Math.max(0, Math.floor((nowMs - numOr(state.bornMs, nowMs)) / (24 * HOUR)))
 }
@@ -699,7 +715,7 @@ if (typeof module !== "undefined") {
     applyDecay: applyDecay, feed: feed, play: play, poke: poke, isAnnoyedPoke: isAnnoyedPoke,
     ageUp: ageUp, pickAgeUpLine: pickAgeUpLine,
     setSleep: setSleep, selectPet: selectPet, setPosition: setPosition, withInteraction: withInteraction,
-    moodLabel: moodLabel, ageDays: ageDays, minutesIdle: minutesIdle,
+    moodLabel: moodLabel, moodFace: moodFace, ageDays: ageDays, minutesIdle: minutesIdle,
     pickGreeting: pickGreeting, pickPokeLine: pickPokeLine, pickFeedLine: pickFeedLine,
     pickPlayLine: pickPlayLine, sleepyLine: sleepyLine, wakeLine: wakeLine, pickAmbientLine: pickAmbientLine,
     timePeriod: timePeriod, pickTimeLine: pickTimeLine,
