@@ -131,7 +131,7 @@ Panel {
                 height: Style.space(30)
                 radius: Style.cornerRadius
                 color: rowHover.containsMouse
-                  ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
+                  ? Util.alpha(root.barForeground, 0.06)
                   : "transparent"
 
                 required property var modelData
