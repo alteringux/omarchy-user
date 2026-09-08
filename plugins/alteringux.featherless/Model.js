@@ -104,3 +104,42 @@ function compositionPercents(comp) {
     { label: "Cache Write", value: Number(comp.cacheWrite || 0), pct: Number(comp.cacheWrite || 0) / total },
   ]
 }
+
+function modelCompositionPercents(m) {
+  if (!m) return []
+  var total = Number(m.input || 0) + Number(m.output || 0) +
+    Number(m.reasoning || 0) + Number(m.cacheRead || 0) + Number(m.cacheWrite || 0)
+  if (total === 0) return []
+  return [
+    { label: "Input", value: Number(m.input || 0), pct: Number(m.input || 0) / total },
+    { label: "Output", value: Number(m.output || 0), pct: Number(m.output || 0) / total },
+    { label: "Reasoning", value: Number(m.reasoning || 0), pct: Number(m.reasoning || 0) / total },
+    { label: "Cache Read", value: Number(m.cacheRead || 0), pct: Number(m.cacheRead || 0) / total },
+    { label: "Cache Write", value: Number(m.cacheWrite || 0), pct: Number(m.cacheWrite || 0) / total },
+  ]
+}
+
+function modelDayPeak(m) {
+  if (!m || !m.recentDays) return 0
+  var peak = 0
+  for (var i = 0; i < m.recentDays.length; i++) {
+    var t = Number(m.recentDays[i].totalTokens || 0)
+    if (t > peak) peak = t
+  }
+  return peak
+}
+
+function costPerPrompt(m) {
+  if (!m || !m.messages) return 0
+  return Number(m.cost || 0) / m.messages
+}
+
+function costPerMtok(m) {
+  if (!m || !m.total) return 0
+  return Number(m.cost || 0) / (m.total / 1e6)
+}
+
+function avgTokensPerPrompt(m) {
+  if (!m || !m.messages) return 0
+  return Math.round(Number(m.total || 0) / m.messages)
+}

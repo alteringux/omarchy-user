@@ -48,6 +48,19 @@ Panel {
     Util.alpha(root.fg, 0.35),
   ]
 
+  property string selectedModelId: ""
+
+  readonly property var selectedModel: {
+    if (!root.selectedModelId) return null
+    for (var i = 0; i < root.models.length; i++) {
+      if (root.models[i].id === root.selectedModelId) return root.models[i]
+    }
+    return null
+  }
+
+  function selectModel(id) { root.selectedModelId = id }
+  function clearSelection() { root.selectedModelId = "" }
+
   function alpha(c, a) { return Util.alpha(c, a) }
 
   KeyboardPanel {
@@ -61,7 +74,10 @@ Panel {
 
     PanelKeyCatcher {
       anchors.fill: parent
-      onCloseRequested: root.close()
+      onCloseRequested: {
+        if (root.selectedModelId) root.clearSelection()
+        else root.close()
+      }
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
 
       Kit.PanelScroll {
@@ -106,7 +122,7 @@ Panel {
           Column {
             width: parent.width
             spacing: Style.spacing.panelGap
-            visible: root.ready
+            visible: root.ready && !root.selectedModelId
 
             Rectangle {
               width: parent.width
@@ -130,7 +146,7 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     font.bold: true
-                    letterSpacing: 1.2
+                    font.letterSpacing: 1.2
                   }
                   Text {
                     text: Model.formatTokens(root.today.totalTokens || 0)
@@ -156,7 +172,7 @@ Panel {
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     font.bold: true
-                    letterSpacing: 1.2
+                    font.letterSpacing: 1.2
                   }
                   Text {
                     text: Model.formatTokens(root.allTime.totalTokens || 0)
@@ -267,11 +283,14 @@ Panel {
                   required property int index
 
                   readonly property real share: root.mPeak > 0 ? Model.clamp(Number(modelData.total || 0) / root.mPeak, 0, 1) : 0
+                  readonly property bool isSelected: root.selectedModelId === modelData.id
 
                   Rectangle {
                     anchors.fill: parent
                     radius: Style.cornerRadius
-                    color: root.alpha(root.fg, 0.05)
+                    color: isSelected ? root.alpha(root.accent, 0.12) : root.alpha(root.fg, 0.05)
+                    border.width: isSelected ? 1 : 0
+                    border.color: root.alpha(root.accent, 0.3)
 
                     Rectangle {
                       anchors.left: parent.left
@@ -292,6 +311,7 @@ Panel {
                       color: root.fg
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
+                      font.bold: isSelected
                       elide: Text.ElideRight
                       width: parent.width * 0.55
                     }
@@ -304,6 +324,12 @@ Panel {
                       color: root.alpha(root.fg, 0.6)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
+                    }
+
+                    MouseArea {
+                      anchors.fill: parent
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.selectModel(modelData.id)
                     }
                   }
                 }
@@ -616,6 +642,262 @@ Panel {
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
+              }
+            }
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.spacing.panelGap
+            visible: root.ready && root.selectedModelId && root.selectedModel !== null
+
+            Button {
+              text: "← Back"
+              foreground: root.fg
+              bordered: true
+              onClicked: root.clearSelection()
+            }
+
+            Rectangle {
+              width: parent.width
+              height: Style.space(52)
+              radius: Style.cornerRadius
+              color: root.surface
+              border.width: 1
+              border.color: root.border
+
+              Column {
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(12)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: 2
+
+                Text {
+                  text: Model.shortModelName(root.selectedModel ? root.selectedModel.id : "")
+                  color: root.fg
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.title
+                  font.bold: true
+                }
+                Text {
+                  text: {
+                    var m = root.selectedModel
+                    if (!m) return ""
+                    var parts = []
+                    if (m.modelClass) parts.push(m.modelClass)
+                    if (m.inputPrice > 0) parts.push("$" + m.inputPrice + "/M in")
+                    if (m.outputPrice > 0) parts.push("$" + m.outputPrice + "/M out")
+                    return parts.join("  ·  ")
+                  }
+                  color: root.alpha(root.fg, 0.5)
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+
+            PanelSectionHeader {
+              text: "Token Breakdown"
+              color: root.alpha(root.fg, 0.5)
+              font.family: root.fontFamily
+            }
+
+            Column {
+              id: tokenBreakdownCol
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.selectedModel !== null
+
+              readonly property var mComp: Model.modelCompositionPercents(root.selectedModel)
+
+              Rectangle {
+                width: parent.width
+                height: Style.space(12)
+                radius: height / 2
+                color: root.track
+
+                Row {
+                  anchors.fill: parent
+                  spacing: 0
+
+                  Repeater {
+                    model: tokenBreakdownCol.mComp
+
+                    delegate: Rectangle {
+                      height: parent.height
+                      width: parent.width * modelData.pct
+                      color: index < root.compositionColors.length ? root.compositionColors[index] : root.fg
+                      radius: index === 0 ? parent.height / 2 : (index === tokenBreakdownCol.mComp.length - 1 ? parent.height / 2 : 0)
+
+                      Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
+                    }
+                  }
+                }
+              }
+
+              GridLayout {
+                width: parent.width
+                columns: 2
+                rowSpacing: Style.space(4)
+                columnSpacing: Style.space(8)
+
+                Repeater {
+                  model: tokenBreakdownCol.mComp
+
+                  delegate: RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Style.space(6)
+
+                    Rectangle {
+                      width: Style.space(8)
+                      height: Style.space(8)
+                      radius: 2
+                      color: index < root.compositionColors.length ? root.compositionColors[index] : root.fg
+                    }
+
+                    Text {
+                      text: modelData.label
+                      color: root.alpha(root.fg, 0.7)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                      Layout.fillWidth: true
+                    }
+
+                    Text {
+                      text: Model.formatTokens(modelData.value) + "  (" + (modelData.pct * 100).toFixed(1) + "%)"
+                      color: root.alpha(root.fg, 0.5)
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+                }
+              }
+            }
+
+            PanelSectionHeader {
+              text: "Daily Usage (7 days)"
+              color: root.alpha(root.fg, 0.5)
+              font.family: root.fontFamily
+            }
+
+            Column {
+              id: dailyUsageCol
+              width: parent.width
+              spacing: Style.space(6)
+              visible: root.selectedModel !== null && root.selectedModel && root.selectedModel.recentDays
+
+              readonly property int dPeak: Model.modelDayPeak(root.selectedModel)
+
+              Repeater {
+                model: root.selectedModel ? root.selectedModel.recentDays : []
+
+                delegate: Item {
+                  width: parent.width
+                  height: Style.space(28)
+                  required property var modelData
+                  required property int index
+
+                  readonly property real ratio: dailyUsageCol.dPeak > 0 ? Model.clamp(Number(modelData.totalTokens || 0) / dailyUsageCol.dPeak, 0, 1) : 0
+                  readonly property bool isToday: modelData.date === root.todayStr
+
+                  Text {
+                    id: dDayLabel
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.dayLabel(modelData.date, root.todayStr)
+                    color: isToday ? root.fg : root.alpha(root.fg, 0.6)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: isToday
+                    width: Style.space(48)
+                  }
+
+                  Rectangle {
+                    id: dDayTrack
+                    anchors.left: dDayLabel.right
+                    anchors.right: dDayValue.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: Style.space(8)
+                    anchors.rightMargin: Style.space(8)
+                    height: Style.space(6)
+                    radius: height / 2
+                    color: root.track
+
+                    Rectangle {
+                      anchors.left: parent.left
+                      anchors.verticalCenter: parent.verticalCenter
+                      height: parent.height
+                      radius: parent.radius
+                      width: parent.width * ratio
+                      color: isToday ? root.accent : root.alpha(root.fg, 0.5)
+
+                      Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+                    }
+                  }
+
+                  Text {
+                    id: dDayValue
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: Model.formatTokens(modelData.totalTokens || 0) + "  ·  " + Model.formatCost(modelData.estimatedCost || 0)
+                    color: root.alpha(root.fg, 0.7)
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+              }
+            }
+
+            PanelSectionHeader {
+              text: "Statistics"
+              color: root.alpha(root.fg, 0.5)
+              font.family: root.fontFamily
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.space(4)
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Messages"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatNumber(root.selectedModel ? root.selectedModel.messages : 0); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Sessions"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatNumber(root.selectedModel ? root.selectedModel.sessions : 0); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Total Tokens"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatTokens(root.selectedModel ? root.selectedModel.total : 0); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Avg Tokens / Message"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatTokens(Model.avgTokensPerPrompt(root.selectedModel)); color: root.fg; font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Estimated Cost"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatCost(root.selectedModel ? root.selectedModel.cost : 0); color: root.urgent; font.family: root.fontFamily; font.pixelSize: Style.font.body; font.bold: true }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Cost / Message"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatCost(Model.costPerPrompt(root.selectedModel)); color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption }
+              }
+
+              RowLayout {
+                width: parent.width
+                Text { text: "Cost / 1M Tokens"; color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption; Layout.fillWidth: true }
+                Text { text: Model.formatCost(Model.costPerMtok(root.selectedModel)); color: root.alpha(root.fg, 0.6); font.family: root.fontFamily; font.pixelSize: Style.font.caption }
               }
             }
           }
