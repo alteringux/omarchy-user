@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.diskmon",
+  "name": "Disk Monitor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live disk usage on the bar with its own panel: the watched mount's percent-full gauge, every real mount's usage, a 10-minute trend sparkline with min/avg/max stats, and the largest subdirectories under a configured path. Engine is ~/.local/bin/omarchy-diskmon; the widget watches diskmon-state.json.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Disk Monitor",
+    "description": "Disk usage % with a per-mount and trend breakdown",
+    "category": "System",
+    "allowMultiple": false
+  }
+}
