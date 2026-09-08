@@ -1,0 +1,264 @@
+#!/usr/bin/env bash
+# omarchy-reposwatch — git working-tree status across a watched list of repos.
+# Sole writer of reposwatch-state.json (docs/adr/0006-cli-first-plugins.md).
+# The alteringux.reposwatch bar widget is a thin view: Kit.Store watches the
+# state file; its Timer calls `scan` on a cadence, same shape as
+# omarchy-sysmon / omarchy-netwatch / omarchy-diskmon.
+#
+#   omarchy-reposwatch scan               git-status every configured repo, write state
+#   omarchy-reposwatch get                print reposwatch-state.json (scanning first if missing)
+#   omarchy-reposwatch status             alias for get
+#   omarchy-reposwatch list [--json]      the repos array (pretty table, or --json)
+#   omarchy-reposwatch add PATH           add PATH to the watch list, then scan
+#   omarchy-reposwatch remove PATH        drop PATH from the watch list, then scan
+#   omarchy-reposwatch watch [--interval S]   foreground loop: scan; sleep
+#   omarchy-reposwatch config             print reposwatch-config.json (seeding it first)
+#   omarchy-reposwatch reset              wipe state (keeps config)
+#
+# A "repo" here means: a path the user explicitly added. There's no
+# filesystem crawl / auto-discovery — that would mean recursively walking
+# arbitrary directories (slow, and surprising about what ends up watched).
+# `add`/`remove` are the whole interface for curating the list.
+#
+# What "dirty" means, from `git status --porcelain=v1`: for each entry the
+# first column is index (staged) status, the second is worktree (unstaged)
+# status; "??" (both '?') is untracked. staged = first column set and not
+# '?'; unstaged = second column set and not '?'; untracked = "??" lines.
+# ahead/behind come from `git rev-list --left-right --count @{u}...HEAD`,
+# whose two columns are (commits-only-in-upstream, commits-only-in-HEAD) —
+# i.e. (behind, ahead) in that order.
+#
+# Env (fixture override for test/cli.test.sh):
+#   OMARCHY_STATE_DIR   state dir (default ~/.local/state/omarchy)
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+STATE_FILE="$STATE_DIR/reposwatch-state.json"
+CONFIG_FILE="$STATE_DIR/reposwatch-config.json"
+
+die() { echo "omarchy-reposwatch: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now_ms() { date +%s%3N; }
+ensure_dir() { mkdir -p "$STATE_DIR"; }
+
+have jq || die "needs jq on PATH"
+have git || die "needs git on PATH"
+
+put_file() { # put_file <path> ; content on stdin, atomic
+  local f="$1" tmp
+  ensure_dir
+  tmp="$(mktemp "${f}.XXXXXX")"
+  cat >"$tmp"
+  mv -f "$tmp" "$f"
+}
+
+# Seed with the two repos this house's own docs call out as having genuine
+# signal (~/.config/omarchy, ~/Work) when they exist on this machine; an empty
+# array otherwise so a fresh install starts from `add`, not a filesystem scan.
+default_config_repos_json() {
+  local candidates=("$HOME/.config/omarchy" "$HOME/Work") found=()
+  local c
+  for c in "${candidates[@]}"; do
+    [ -d "$c/.git" ] && found+=("$c")
+  done
+  if [ "${#found[@]}" -eq 0 ]; then
+    echo '[]'
+  else
+    printf '%s\n' "${found[@]}" | jq -R . | jq -s .
+  fi
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && return 0
+  ensure_dir
+  local tmp repos
+  repos="$(default_config_repos_json)"
+  tmp="$(mktemp "${CONFIG_FILE}.XXXXXX")"
+  jq -n --argjson repos "$repos" '{repos: $repos}' > "$tmp"
+  mv -f "$tmp" "$CONFIG_FILE"
+}
+
+read_config() {
+  seed_config
+  jq -e . "$CONFIG_FILE" 2>/dev/null || echo '{"repos":[]}'
+}
+
+write_config() { # stdin: full config object
+  put_file "$CONFIG_FILE"
+}
+
+# ── one repo's status as a JSON object ────────────────────────────────────
+repo_status_json() { # repo_status_json <path>
+  local path="$1" name
+  name="$(basename -- "$path")"
+
+  if [ ! -d "$path" ]; then
+    jq -n --arg path "$path" --arg name "$name" \
+      '{path: $path, name: $name, ok: false, error: "path does not exist"}'
+    return 0
+  fi
+  if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    jq -n --arg path "$path" --arg name "$name" \
+      '{path: $path, name: $name, ok: false, error: "not a git repository"}'
+    return 0
+  fi
+
+  local branch detached=false
+  branch="$(git -C "$path" symbolic-ref --short -q HEAD || true)"
+  if [ -z "$branch" ]; then
+    detached=true
+    branch="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+  fi
+
+  local porcelain staged=0 unstaged=0 untracked=0
+  porcelain="$(git -C "$path" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+  if [ -n "$porcelain" ]; then
+    staged="$(printf '%s\n' "$porcelain" | awk 'substr($0,1,1) !~ /[ ?]/' | wc -l | tr -d ' ')"
+    unstaged="$(printf '%s\n' "$porcelain" | awk 'substr($0,2,1) !~ /[ ?]/' | wc -l | tr -d ' ')"
+    untracked="$(printf '%s\n' "$porcelain" | awk 'substr($0,1,2) == "??"' | wc -l | tr -d ' ')"
+  fi
+  local total=$((staged + unstaged + untracked))
+
+  local has_upstream=false ahead=0 behind=0
+  if git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
+    has_upstream=true
+    local counts
+    counts="$(git -C "$path" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || echo "0 0")"
+    behind="$(printf '%s' "$counts" | awk '{print $1+0}')"
+    ahead="$(printf '%s' "$counts" | awk '{print $2+0}')"
+  fi
+
+  local last_commit_ts
+  last_commit_ts="$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)"
+  [ -z "$last_commit_ts" ] && last_commit_ts=0
+
+  jq -n \
+    --arg path "$path" --arg name "$name" --arg branch "$branch" \
+    --argjson detached "$detached" --argjson hasUpstream "$has_upstream" \
+    --argjson staged "$staged" --argjson unstaged "$unstaged" --argjson untracked "$untracked" --argjson total "$total" \
+    --argjson ahead "$ahead" --argjson behind "$behind" --argjson lastCommitTs "$last_commit_ts" \
+    '{
+      path: $path, name: $name, ok: true, error: null,
+      branch: $branch, detached: $detached,
+      dirty: {staged: $staged, unstaged: $unstaged, untracked: $untracked, total: $total},
+      hasUpstream: $hasUpstream, ahead: $ahead, behind: $behind,
+      lastCommitTs: $lastCommitTs
+    }'
+}
+
+cmd_scan() {
+  ensure_dir
+  local cfg repo_paths results updated
+  cfg="$(read_config)"
+  repo_paths="$(printf '%s' "$cfg" | jq -r '.repos[]?')"
+
+  results="[]"
+  if [ -n "$repo_paths" ]; then
+    local entries=()
+    while IFS= read -r p; do
+      [ -z "$p" ] && continue
+      entries+=("$(repo_status_json "$p")")
+    done <<< "$repo_paths"
+    if [ "${#entries[@]}" -gt 0 ]; then
+      results="$(printf '%s\n' "${entries[@]}" | jq -s '.')"
+    fi
+  fi
+
+  updated="$(now_ms)"
+  jq -n --argjson updatedAt "$updated" --argjson repos "$results" '
+    {
+      version: 1,
+      updatedAt: $updatedAt,
+      repos: $repos,
+      totals: {
+        reposScanned: ($repos | length),
+        okRepos: ([$repos[] | select(.ok)] | length),
+        errorRepos: ([$repos[] | select(.ok | not)] | length),
+        dirtyRepos: ([$repos[] | select(.ok and .dirty.total > 0)] | length),
+        totalAhead: ([$repos[] | select(.ok) | .ahead] | add // 0),
+        totalBehind: ([$repos[] | select(.ok) | .behind] | add // 0)
+      }
+    }' | put_file "$STATE_FILE"
+}
+
+cmd_get() {
+  [ -f "$STATE_FILE" ] || cmd_scan
+  jq -e . "$STATE_FILE" 2>/dev/null || echo '{}'
+}
+
+cmd_list() {
+  local as_json=0
+  [ "${1:-}" = "--json" ] && as_json=1
+  [ -f "$STATE_FILE" ] || cmd_scan
+  if [ "$as_json" -eq 1 ]; then
+    jq -e '.repos' "$STATE_FILE"
+  else
+    jq -r '.repos[] | "\(.name)\t\(if .ok then .branch else "!" end)\t\(if .ok then (.dirty.total|tostring) + " dirty" else .error end)\t\(if .ok and .hasUpstream then "+\(.ahead)/-\(.behind)" else "" end)"' "$STATE_FILE" \
+      | column -t -s $'\t'
+  fi
+}
+
+cmd_add() {
+  [ $# -ge 1 ] || die "usage: omarchy-reposwatch add PATH"
+  local path abs
+  path="$1"
+  abs="$(cd "$path" 2>/dev/null && pwd -P || echo "$path")"
+  local cfg
+  cfg="$(read_config)"
+  cfg="$(printf '%s' "$cfg" | jq --arg p "$abs" '.repos = ((.repos // []) + [$p] | unique)')"
+  printf '%s' "$cfg" | write_config
+  cmd_scan
+}
+
+cmd_remove() {
+  [ $# -ge 1 ] || die "usage: omarchy-reposwatch remove PATH"
+  local path abs
+  path="$1"
+  abs="$(cd "$path" 2>/dev/null && pwd -P || echo "$path")"
+  local cfg
+  cfg="$(read_config)"
+  cfg="$(printf '%s' "$cfg" | jq --arg p "$abs" --arg p2 "$path" '.repos = ((.repos // []) - [$p] - [$p2])')"
+  printf '%s' "$cfg" | write_config
+  cmd_scan
+}
+
+cmd_watch() {
+  local interval=60
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --interval) interval="$2"; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  while true; do
+    cmd_scan
+    sleep "$interval"
+  done
+}
+
+cmd_config() { read_config | jq . ; }
+
+cmd_reset() {
+  ensure_dir
+  rm -f "$STATE_FILE"
+  cmd_scan
+}
+
+main() {
+  local verb="${1:-status}"
+  shift || true
+  case "$verb" in
+    scan) cmd_scan ;;
+    get|status) cmd_get ;;
+    list) cmd_list "$@" ;;
+    add) cmd_add "$@" ;;
+    remove|rm) cmd_remove "$@" ;;
+    watch) cmd_watch "$@" ;;
+    config) cmd_config ;;
+    reset) cmd_reset ;;
+    -h|--help|help) sed -n '2,20p' "$0" ;;
+    *) die "unknown verb: $verb" ;;
+  esac
+}
+
+main "$@"

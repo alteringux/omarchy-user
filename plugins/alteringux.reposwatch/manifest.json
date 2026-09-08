@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.reposwatch",
+  "name": "Repos Watch",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Git working-tree status across a watched list of repos on the bar: how many are dirty or diverged from their upstream, with a panel breaking each one down by staged/unstaged/untracked counts and ahead/behind. Engine is ~/.local/bin/omarchy-reposwatch; the widget watches reposwatch-state.json.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Repos Watch",
+    "description": "Dirty / ahead-behind counts across your git repos",
+    "category": "Development",
+    "allowMultiple": false
+  }
+}
