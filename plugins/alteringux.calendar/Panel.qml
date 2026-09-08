@@ -43,6 +43,18 @@ Panel {
     })
   }
 
+  // Jump back to the current month and select today — the nav arrows only
+  // move a month at a time, so getting back from a few months away otherwise
+  // takes several clicks.
+  function goToday() {
+    guard.run("goToday", function () {
+      if (!hostWidget) return
+      var ymd = Qt.formatDate(new Date(), "yyyy-MM-dd")
+      hostWidget.loadMonth(ymd.slice(0, 7))
+      root.selectDate(ymd)
+    })
+  }
+
   onOpenedChanged: {
     if (opened && hostWidget && !root.selectedDate) root.selectDate(root.state.date || hostWidget.currentMonth + "-01")
   }
@@ -93,7 +105,7 @@ Panel {
               MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goMonth(-1) }
             }
             Text {
-              width: content.width - Style.space(60)
+              width: content.width - Style.space(120)
               horizontalAlignment: Text.AlignHCenter
               text: Model.monthTitle(root.currentMonth)
               color: root.barForeground
@@ -106,6 +118,13 @@ Panel {
               color: Color.accent
               font.pixelSize: Style.font.title
               MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goMonth(1) }
+            }
+            Text {
+              text: "Today"
+              color: Kit.Palette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goToday() }
             }
           }
 
@@ -189,12 +208,28 @@ Panel {
             }
           }
 
-          Text {
+          // Same dots + colors as the day-grid markers below, instead of fixed-hue
+          // emoji that don't track the theme and don't visually match the cells
+          // they're explaining.
+          Row {
             width: content.width
-            text: "🟡 holiday   🔵 birthday   🟢 event/block"
-            color: Kit.Palette.faint
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+            spacing: Style.space(14)
+
+            Row {
+              spacing: Style.space(4)
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.warning }
+              Text { text: "holiday"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            }
+            Row {
+              spacing: Style.space(4)
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.info }
+              Text { text: "birthday"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            }
+            Row {
+              spacing: Style.space(4)
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.positive }
+              Text { text: "event/block"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+            }
           }
 
           PanelSeparator {}

@@ -78,6 +78,12 @@ BarWidget {
       onStreamFinished: guard.run("monthProc.onStreamFinished", function () {
         var mj = Model.parseMonthJson(monthOut.text)
         root.monthCells = Model.monthGridCells(mj, root.state.date || "")
+        // A nav click can land while this fetch is still in flight: loadMonth()
+        // below drops that click's fetch (monthProc.running was already true) but
+        // still moves currentMonth to it, so the title shows the new month while
+        // the grid we just applied is for the old one. Chase it now instead of
+        // leaving that mismatch on screen until another click happens to retry it.
+        if (root.currentMonth && root.currentMonth !== mj.month) root.loadMonth(root.currentMonth)
       })
     }
   }
