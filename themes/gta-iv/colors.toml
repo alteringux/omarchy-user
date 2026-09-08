@@ -1,0 +1,40 @@
+mode = "dark"
+
+# GTA IV / Liberty City — grimy urban grit
+accent = "#6b8f4a"
+selection = "#2a3722"
+muted = "#4a5a3a"
+
+background = "#0f120d"
+dark_background = "#0a0c08"
+darker_background = "#050604"
+lighter_background = "#1a1f14"
+
+foreground = "#d6d9cd"
+dark_foreground = "#6b735c"
+light_foreground = "#c4cbb6"
+bright_foreground = "#f0f2ea"
+
+selection_foreground = "#f0f2ea"
+selection_background = "#2a3722"
+
+hyprland_active_border = "rgba(6b8f4aee) rgba(8b7d3bee) rgba(7a6e3cee) rgba(5c6b3bee)"
+hyprland_inactive_border = "rgba(4a5a3aaa)"
+active_border_color = "#6b8f4a"
+active_tab_background = "#1a1f14"
+
+red = "#8c3a3a"
+yellow = "#b8a03e"
+orange = "#9a6e3a"
+green = "#5c8a4a"
+cyan = "#4a7a7a"
+blue = "#4a6a8a"
+magenta = "#6a4a7a"
+brown = "#7a6a4a"
+
+bright_red = "#a84a4a"
+bright_yellow = "#d4bc4e"
+bright_green = "#6ea85c"
+bright_cyan = "#5a9494"
+bright_blue = "#5a7ea8"
+bright_magenta = "#846a94"
