@@ -245,7 +245,9 @@ _do_sample() {
     true) improve_insight iface-change low "active interface changed to $iface between samples (in-flight delta dropped)" ;;
   esac
   if printf '%s' "$result" | jq -e '.alerts[]? | select(.kind=="spike")' >/dev/null 2>&1; then
-    improve_insight spike-alert med "sustained-rate alert fired on $iface — check for false positive vs the fixed spikeMbps threshold"
+    local spike_data
+    spike_data="$(printf '%s' "$result" | jq -c '[.alerts[]? | select(.kind=="spike")] | last | .data // {}')"
+    improve_insight spike-alert med "sustained-rate alert fired on $iface — check for false positive vs the fixed spikeMbps threshold" "$spike_data"
   fi
 
   local webhook

@@ -1,79 +1,184 @@
 {
   "id": "morning-brief",
-  "title": "Classify the news feeds, summarise, merge into one brief",
+  "title": "Multi-sector news brief — fetch, summarise into one sectioned brief, score the mood, track the trend",
   "nodes": [
     {
       "id": "feeds",
       "type": "tool",
-      "cmd": "cat ~/.local/state/omarchy/newsbar.json 2>/dev/null || echo '{\"headlines\":[]}'",
-      "ui": { "x": 40, "y": 60 }
+      "cmd": "brief-feeds --json",
+      "timeoutSec": 45,
+      "ui": {
+        "x": 40,
+        "y": 80
+      }
     },
     {
       "id": "counts",
       "type": "transform",
-      "in": ["feeds"],
-      "jq": "[.headlines | group_by(.source)[] | {feed: .[0].source, n: length}]",
-      "ui": { "x": 40, "y": 240 }
+      "in": [
+        "feeds"
+      ],
+      "jq": ".counts",
+      "ui": {
+        "x": 40,
+        "y": 300
+      }
     },
     {
-      "id": "class",
-      "type": "route",
-      "in": ["feeds"],
-      "prompt": "Which single bucket best fits this headline set: world, tech, or local?\n{{feeds.stdout}}",
-      "edges": {
-        "mixed": ["worldsum", "techsum"],
-        "world": ["worldsum"],
-        "tech": ["techsum"],
-        "local": ["worldsum"]
-      },
-      "ui": { "x": 320, "y": 60 }
+      "id": "slim",
+      "type": "transform",
+      "in": [
+        "feeds"
+      ],
+      "jq": "{focus, generatedAt, sectors: (.sectors | map_values(map({source, title, summary})))}",
+      "ui": {
+        "x": 320,
+        "y": 120
+      }
     },
     {
-      "id": "worldsum",
+      "id": "brief",
       "type": "prompt",
-      "in": ["feeds"],
-      "prompt": "In five bullets, summarise the world news in these headlines:\n{{feeds.stdout}}",
-      "ui": { "x": 600, "y": 20 }
+      "in": [
+        "slim"
+      ],
+      "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "maxTokens": 1100,
+      "timeoutSec": 150,
+      "system": "You are a wire-service news editor. Output GitHub-flavoured Markdown only: no preamble, no sign-off, no code fences.",
+      "prompt": "Here is JSON with today's headlines grouped by sector (each item: source, title, summary) plus a \"focus\" field.\n\nWrite a tight, scannable morning brief:\n- One italic first line: the weekday and date from generatedAt, then \" — \", then the focus sector if focus is non-empty, else \"all sectors\".\n- Then, for EVERY key in .sectors in the order given: a \"## <Sector>\" heading, then EXACTLY 3 to 5 single-line bullets (never more than 5). Merge near-duplicates.\n- Each bullet MUST have this shape: \"- **<2-4 word hook>:** <one clause of detail> (<Source>)\". The bold hook is the gist; the clause adds the specifics; end with the source in parentheses. No trailing period after the closing paren.\n- If a sector's list is empty: a single line \"_nothing notable_\" under its heading.\n- No links, no sub-bullets, no per-section intro sentences, no bold outside the hook.\n\nJSON:\n{{slim.stdout}}",
+      "ui": {
+        "x": 600,
+        "y": 40
+      }
     },
     {
-      "id": "techsum",
+      "id": "mood",
       "type": "prompt",
-      "in": ["feeds"],
-      "agent": true,
-      "prompt": "In five bullets, summarise only the technology stories, citing the source for each:\n{{feeds.stdout}}",
-      "ui": { "x": 600, "y": 180 }
+      "in": [
+        "slim"
+      ],
+      "json": true,
+      "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+      "maxTokens": 320,
+      "timeoutSec": 90,
+      "system": "You output only a single minified JSON object: no markdown, no prose.",
+      "prompt": "Rate how GOOD or BAD the news is in each sector today, on an integer scale from -5 (grim: war, deaths, disasters, crackdowns) through 0 (neutral / mixed) to +5 (upbeat: breakthroughs, relief, wins).\n\nReturn ONE JSON object mapping each sector name — exactly the keys of .sectors — to its integer score. Nothing else.\n\nJSON:\n{{slim.stdout}}",
+      "ui": {
+        "x": 600,
+        "y": 300
+      }
+    },
+    {
+      "id": "scores",
+      "type": "tool",
+      "in": [
+        "mood"
+      ],
+      "cmd": "brief-score",
+      "stdin": "{{mood.text}}",
+      "timeoutSec": 20,
+      "ui": {
+        "x": 880,
+        "y": 300
+      }
+    },
+    {
+      "id": "scoretable",
+      "type": "transform",
+      "in": [
+        "scores"
+      ],
+      "jq": ".table",
+      "ui": {
+        "x": 1140,
+        "y": 240
+      }
+    },
+    {
+      "id": "moodtrend",
+      "type": "transform",
+      "in": [
+        "scores"
+      ],
+      "jq": ".overallTrend",
+      "ui": {
+        "x": 1140,
+        "y": 400
+      }
     },
     {
       "id": "mem",
       "type": "memory",
       "op": "append",
       "key": "brief-history",
-      "in": ["worldsum", "techsum"],
-      "ui": { "x": 880, "y": 180 }
-    },
-    {
-      "id": "digest",
-      "type": "reduce",
-      "mode": "llm",
-      "in": ["worldsum", "techsum"],
-      "prompt": "Merge these into one tight brief, no repetition:\n{{items}}",
-      "ui": { "x": 880, "y": 20 }
+      "in": [
+        "brief"
+      ],
+      "ui": {
+        "x": 880,
+        "y": 40
+      }
     },
     {
       "id": "out",
       "type": "view",
       "shape": "markdown",
-      "in": ["digest"],
-      "meta": { "title": "Morning brief" },
-      "ui": { "x": 1160, "y": 20 }
+      "in": [
+        "brief"
+      ],
+      "meta": {
+        "title": "Morning brief"
+      },
+      "ui": {
+        "x": 880,
+        "y": 120
+      }
     },
     {
       "id": "chart",
       "type": "view",
       "shape": "series",
-      "in": ["counts"],
-      "meta": { "title": "Headlines per feed" },
-      "ui": { "x": 1160, "y": 240 }
+      "in": [
+        "counts"
+      ],
+      "meta": {
+        "title": "Headlines per sector"
+      },
+      "ui": {
+        "x": 320,
+        "y": 300
+      }
+    },
+    {
+      "id": "moodtable",
+      "type": "view",
+      "shape": "table",
+      "in": [
+        "scoretable"
+      ],
+      "meta": {
+        "title": "Sector mood — score · Δ vs last brief · 7-day avg · trend"
+      },
+      "ui": {
+        "x": 1400,
+        "y": 240
+      }
+    },
+    {
+      "id": "moodchart",
+      "type": "view",
+      "shape": "series",
+      "in": [
+        "moodtrend"
+      ],
+      "meta": {
+        "title": "Overall mood (0 grim – 10 upbeat), last 14 briefs"
+      },
+      "ui": {
+        "x": 1400,
+        "y": 400
+      }
     }
   ]
 }

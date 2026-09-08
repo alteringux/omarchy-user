@@ -44,18 +44,26 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import seen_history  # noqa: E402 - sibling module in bin/
+
 HOME = os.path.expanduser("~")
 CONFIG_PATH = os.path.join(HOME, ".config", "omarchy", "newsbar-feeds.json")
 STATE_DIR = os.path.join(HOME, ".local", "state", "omarchy")
 STATE_PATH = os.path.join(STATE_DIR, "newsbar.json")
+SEEN_PATH = os.path.join(STATE_DIR, "newsbar-seen.json")
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) omarchy-newsbar-refresh"
 TIMEOUT = 8
+FRESHNESS_FLOOR = 20  # min headlines a refresh shows before backfilling seen ones
 
 DEFAULT_CONFIG = {
     "version": 1,
     "perFeed": 8,
     "maxHeadlines": 40,
+    # Refresh shows headlines not on the previous crawl and retires the rest;
+    # if fewer than this remain, the freshest retired ones backfill.
+    "freshnessFloor": FRESHNESS_FLOOR,
     # "category" is an optional fallback sector for a feed whose items don't
     # carry one in their URL or <category>; a per-item sector still wins.
     "feeds": [
@@ -92,6 +100,7 @@ def load_config():
         return {
             "perFeed": int(raw.get("perFeed", DEFAULT_CONFIG["perFeed"]) or 8),
             "maxHeadlines": int(raw.get("maxHeadlines", DEFAULT_CONFIG["maxHeadlines"]) or 40),
+            "freshnessFloor": int(raw.get("freshnessFloor", FRESHNESS_FLOOR) or FRESHNESS_FLOOR),
             "feeds": feeds,
         }, False
     except FileNotFoundError:
@@ -106,6 +115,7 @@ def _config_from(raw):
     return {
         "perFeed": raw["perFeed"],
         "maxHeadlines": raw["maxHeadlines"],
+        "freshnessFloor": raw.get("freshnessFloor", FRESHNESS_FLOOR),
         "feeds": [dict(f) for f in raw["feeds"]],
     }
 
@@ -369,8 +379,17 @@ def main():
         sys.stderr.write("newsbar: no headlines fetched: " + "; ".join(failures) + "\n")
         return 1
 
+    # Freshness rule: show headlines that weren't on the previous crawl and
+    # retire the ones that were; backfill the freshest retired headlines only if
+    # under `freshnessFloor` remain. Record what we actually show so the next
+    # refresh treats it as stale.
+    seen = seen_history.load(SEEN_PATH)
+    headlines, shown = seen_history.select_fresh(
+        headlines, seen, config.get("freshnessFloor", FRESHNESS_FLOOR))
+
     error = ("partial: " + "; ".join(failures)) if failures else None
     write_state(headlines, error)
+    seen_history.record(SEEN_PATH, shown)
     return 0
 
 

@@ -1,0 +1,47 @@
+{
+  "id": "agent-demo",
+  "title": "Agent demo — rag_search over the changelog",
+  "nodes": [
+    {
+      "id": "q",
+      "type": "input",
+      "value": { "text": "What TTS engine work happened, and how do the overlays share it? Cite source lines." },
+      "ui": { "x": 40, "y": 60 }
+    },
+    {
+      "id": "a",
+      "type": "agent",
+      "in": ["q"],
+      "prompt": "{{q.text}}",
+      "noSearch": true,
+      "stores": ["changelog"],
+      "maxSteps": 4,
+      "timeoutSec": 200,
+      "ui": { "x": 300, "y": 60 }
+    },
+    {
+      "id": "cites",
+      "type": "transform",
+      "in": ["a"],
+      "js": "input.citations.map(c => c.source || c.url).filter(Boolean)",
+      "ui": { "x": 560, "y": 180 }
+    },
+    {
+      "id": "out",
+      "type": "view",
+      "shape": "markdown",
+      "in": ["a"],
+      "template": "## {{q.text}}\n\n{{a.text}}",
+      "meta": { "title": "Agent answer" },
+      "ui": { "x": 560, "y": 40 }
+    },
+    {
+      "id": "sources",
+      "type": "view",
+      "shape": "log",
+      "in": ["cites"],
+      "meta": { "title": "Sources touched" },
+      "ui": { "x": 820, "y": 180 }
+    }
+  ]
+}

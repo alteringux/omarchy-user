@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "perFeed": 5,
+  "perSector": 8,
+  "cacheMinutes": 10,
+  "timeoutSec": 8,
+  "sectors": {
+    "World": [
+      {
+        "name": "BBC",
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml"
+      },
+      {
+        "name": "NPR",
+        "url": "https://feeds.npr.org/1001/rss.xml"
+      },
+      {
+        "name": "Guardian",
+        "url": "https://www.theguardian.com/world/rss"
+      }
+    ],
+    "Technology": [
+      {
+        "name": "Ars Technica",
+        "url": "http://feeds.arstechnica.com/arstechnica/index"
+      },
+      {
+        "name": "The Verge",
+        "url": "https://www.theverge.com/rss/index.xml"
+      },
+      {
+        "name": "Hacker News",
+        "url": "https://hnrss.org/frontpage"
+      },
+      {
+        "name": "TechCrunch",
+        "url": "https://techcrunch.com/feed/"
+      }
+    ],
+    "Culture": [
+      {
+        "name": "Guardian Culture",
+        "url": "https://www.theguardian.com/culture/rss"
+      },
+      {
+        "name": "NPR Arts",
+        "url": "https://www.npr.org/rss/rss.php?id=1008"
+      },
+      {
+        "name": "The Atlantic",
+        "url": "https://www.theatlantic.com/feed/channel/culture/"
+      }
+    ],
+    "Food": [
+      {
+        "name": "NYT Dining",
+        "url": "https://rss.nytimes.com/services/xml/rss/nyt/DiningandWine.xml"
+      },
+      {
+        "name": "The Kitchn",
+        "url": "https://www.thekitchn.com/main.rss"
+      },
+      {
+        "name": "Eater",
+        "url": "https://www.eater.com/rss/index.xml"
+      },
+      {
+        "name": "Guardian Food",
+        "url": "https://www.theguardian.com/food/rss"
+      }
+    ],
+    "Science": [
+      {
+        "name": "Science Daily",
+        "url": "https://www.sciencedaily.com/rss/top/science.xml"
+      },
+      {
+        "name": "Nature",
+        "url": "https://feeds.nature.com/nature/rss/current"
+      },
+      {
+        "name": "NASA",
+        "url": "https://www.nasa.gov/rss/dyn/breaking_news.rss"
+      },
+      {
+        "name": "Quanta",
+        "url": "https://www.quantamagazine.org/feed/"
+      }
+    ],
+    "Business": [
+      {
+        "name": "MarketWatch",
+        "url": "https://feeds.marketwatch.com/marketwatch/topstories/"
+      },
+      {
+        "name": "Guardian Business",
+        "url": "https://www.theguardian.com/uk/business/rss"
+      },
+      {
+        "name": "Bloomberg Markets",
+        "url": "https://feeds.bloomberg.com/markets/news.rss"
+      },
+      {
+        "name": "Fortune",
+        "url": "https://fortune.com/feed/"
+      }
+    ],
+    "Sports": [
+      {
+        "name": "BBC Sport",
+        "url": "https://feeds.bbci.co.uk/sport/rss.xml"
+      },
+      {
+        "name": "Guardian Sport",
+        "url": "https://www.theguardian.com/uk/sport/rss"
+      }
+    ],
+    "Dating & Social": [
+      {
+        "name": "Guardian Relationships",
+        "url": "https://www.theguardian.com/lifeandstyle/relationships/rss"
+      },
+      {
+        "name": "Mashable Social",
+        "url": "https://mashable.com/feeds/rss/social-media"
+      },
+      {
+        "name": "r/relationship_advice",
+        "url": "https://www.reddit.com/r/relationship_advice/.rss"
+      },
+      {
+        "name": "r/dating",
+        "url": "https://www.reddit.com/r/dating/.rss"
+      }
+    ]
+  }
+}

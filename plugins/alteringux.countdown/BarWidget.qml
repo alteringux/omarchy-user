@@ -220,7 +220,14 @@ BarWidget {
     // When it fits, the Binding parks it centred and the animation is off.
     Item {
       id: marquee
+      // Inset the scroll viewport from the slot edges so text sliding past
+      // either end butts against a gutter, not against the neighbouring
+      // widget (the pomodoro label + its progress bar sit immediately to the
+      // left). The slot stays `marqueeViewport` wide; only the painted band
+      // narrows. Mirrors the button's own `horizontalMargin`.
       anchors.fill: parent
+      anchors.leftMargin: Style.spaceReal(8.75)
+      anchors.rightMargin: Style.spaceReal(8.75)
       clip: true
       visible: root.hasEntries
 

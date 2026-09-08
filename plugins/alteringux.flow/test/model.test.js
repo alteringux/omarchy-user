@@ -136,6 +136,82 @@ test("renderEnvelopeText: markdown/log pass through", () => {
   assert.equal(Model.renderEnvelopeText({ shape: "log", data: ["a", "b"] }), "a\nb");
 });
 
+test("speakable: strips markdown marks Piper should not read aloud", () => {
+  assert.equal(Model.speakable("## Culture\n- **Big** news _here_"), "Culture\nBig news here");
+  assert.equal(Model.speakable("see [the site](https://x.y) now"), "see the site now");
+  assert.equal(Model.speakable(null), "");
+});
+
+test("splitSections: dateline + one section per '## Heading', with speakText", () => {
+  const md = "*Thu, Sep 3 — all sectors*\n\n## World\n- a (BBC)\n- b (NPR)\n\n## Food\n- c (Eater)";
+  const s = Model.splitSections(md);
+  assert.equal(s.length, 3);
+  assert.equal(s[0].heading, ""); // the dateline
+  assert.equal(s[1].heading, "World");
+  assert.match(s[1].body, /^- a \(BBC\)/);
+  assert.equal(s[2].heading, "Food");
+  assert.ok(s[1].speakText.startsWith("World. "));
+  assert.ok(!s[1].speakText.includes("## "));
+  assert.equal(Model.splitSections("").length, 0);
+});
+
+test("escapeHtml: entity-encodes for Text.StyledText", () => {
+  assert.equal(Model.escapeHtml('A & B <c> "d"'), "A &amp; B &lt;c&gt; &quot;d&quot;");
+  assert.equal(Model.escapeHtml(null), "");
+});
+
+test("splitBullets: pulls lead, source, and notes out of a section body", () => {
+  const body = [
+    "- **Robotaxi launch:** Uber beats Waymo to London with Wayve tech (The Verge).",
+    "- Congress blocks OMB grant-funding rewrite (Ars Technica)",
+    "- plain point with no source",
+    "_nothing notable_",
+  ].join("\n");
+  const b = Model.splitBullets(body);
+  assert.equal(b.length, 4);
+  assert.deepEqual(b[0], {
+    kind: "bullet",
+    lead: "Robotaxi launch",
+    text: "Uber beats Waymo to London with Wayve tech",
+    source: "The Verge",
+  });
+  assert.deepEqual(b[1], {
+    kind: "bullet", lead: "", text: "Congress blocks OMB grant-funding rewrite", source: "Ars Technica",
+  });
+  assert.deepEqual(b[2], { kind: "bullet", lead: "", text: "plain point with no source", source: "" });
+  assert.deepEqual(b[3], { kind: "note", text: "nothing notable" });
+  assert.deepEqual(Model.splitBullets(""), []);
+});
+
+test("sectorScoreMap + scoreBadge: read the mood table, badge by sign + delta", () => {
+  const envs = [
+    { shape: "series", data: { labels: ["World"], values: [8] } },
+    {
+      shape: "table",
+      data: {
+        columns: ["Sector", "Today", "Δ prev", "7d avg", "Trend"],
+        rows: [
+          ["World", -4, "-3", "-2.5", "▄▂"],
+          ["Science", 5, "—", "+5.0", "█"],
+          ["Sports", 0, "+0", "+0.0", "▅"],
+          ["Food", "n/a", "—", "—", "—"]
+        ]
+      }
+    }
+  ];
+  const m = Model.sectorScoreMap(envs);
+  assert.equal(m.World.score, -4);
+  assert.equal(m.World.delta, "-3");
+  assert.equal(m.Food.score, null);
+
+  assert.deepEqual(Model.scoreBadge(m.World), { text: "-4  -3 ▼", role: "negative" });
+  assert.deepEqual(Model.scoreBadge(m.Science), { text: "+5", role: "positive" });
+  assert.equal(Model.scoreBadge(m.Sports).role, "faint");
+  assert.equal(Model.scoreBadge(m.Food), null);
+  assert.equal(Model.scoreBadge(undefined), null);
+  assert.deepEqual(Model.sectorScoreMap([]), {});
+});
+
 test("barSummary: prefers a series sparkline, else a pass/fail tally", () => {
   assert.equal(
     Model.barSummary({ envelopes: [{ shape: "series", data: { values: [0, 8] } }], nodes: {} }),

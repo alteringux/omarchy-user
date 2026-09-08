@@ -1,0 +1,39 @@
+{
+  "id": "rag-demo",
+  "title": "RAG demo — ask the omarchy changelog",
+  "nodes": [
+    {
+      "id": "q",
+      "type": "input",
+      "value": { "text": "How does the newsbar plugin speak headlines out loud?" },
+      "ui": { "x": 40, "y": 60 }
+    },
+    {
+      "id": "ctx",
+      "type": "retrieve",
+      "in": ["q"],
+      "store": "changelog",
+      "query": "{{q.text}}",
+      "k": 5,
+      "ui": { "x": 300, "y": 60 }
+    },
+    {
+      "id": "answer",
+      "type": "prompt",
+      "in": ["ctx"],
+      "timeoutSec": 90,
+      "system": "Answer only from the CONTEXT. Cite the source tag (path:lines) after each claim. If the context does not cover it, say so.",
+      "prompt": "QUESTION: {{q.text}}\n\nCONTEXT:\n{{ctx.text}}",
+      "ui": { "x": 560, "y": 60 }
+    },
+    {
+      "id": "out",
+      "type": "view",
+      "shape": "markdown",
+      "in": ["answer"],
+      "template": "## {{q.text}}\n\n{{answer.text}}",
+      "meta": { "title": "Changelog answer" },
+      "ui": { "x": 820, "y": 60 }
+    }
+  ]
+}

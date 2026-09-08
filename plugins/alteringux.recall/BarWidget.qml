@@ -99,8 +99,11 @@ BarWidget {
       onStreamFinished: {
         var data
         try { data = JSON.parse(text || "{}") } catch (e) { data = {} }
-        root.lastChoices = Array.isArray(data.options) ? data.options : []
+        // forId must land before lastChoices: Prompt.qml's onLastChoicesChanged
+        // fires synchronously off the assignment below and reads forId in the
+        // same tick, so the old order left it comparing against the stale id.
         root.lastChoicesForId = choicesProc.forId
+        root.lastChoices = Array.isArray(data.options) ? data.options : []
       }
     }
   }

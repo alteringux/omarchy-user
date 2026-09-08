@@ -314,6 +314,146 @@ function renderEnvelopeText(env) {
   return String(env.data == null ? "" : env.data);
 }
 
+// ---- markdown brief -> sections + speakable text --------------------------
+// The morning-brief flow emits one markdown envelope with a "## <Sector>"
+// heading per sector. The panel's play controls need it broken up (speak one
+// section) and de-marked (Piper should not read "hash hash Culture").
+
+function speakable(md) {
+  return String(md == null ? "" : md)
+    .replace(/```+/g, " ")
+    .replace(/`([^`]*)`/g, "$1")
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*+]\s+/gm, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\*([^*]+)\*/g, "$1")
+    .replace(/_([^_]+)_/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/[ \t]+/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// -> [ { heading, body, speakText } ]. Text before the first "## " heading
+// (the dateline) is returned as a section with heading "".
+function splitSections(md) {
+  var lines = String(md == null ? "" : md).split("\n");
+  var out = [];
+  var cur = { heading: "", body: [] };
+  function flush() {
+    if (cur.heading || cur.body.join("").trim()) {
+      var body = cur.body.join("\n").replace(/^\n+/, "").replace(/\n+$/, "");
+      out.push({
+        heading: cur.heading,
+        body: body,
+        speakText: speakable((cur.heading ? cur.heading + ". " : "") + body)
+      });
+    }
+  }
+  for (var i = 0; i < lines.length; i++) {
+    var m = /^##\s+(.+?)\s*$/.exec(lines[i]);
+    if (m) {
+      flush();
+      cur = { heading: m[1], body: [] };
+    } else {
+      cur.body.push(lines[i]);
+    }
+  }
+  flush();
+  return out;
+}
+
+// & < > " -> entities, so a string is safe to drop into a Text.StyledText.
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+// A section body -> structured bullets the panel styles itself. Each entry:
+//   { kind: "bullet", lead, text, source }   - "- **Lead:** rest ... (Source)."
+//   { kind: "note",   text }                 - "_nothing notable_" / a bare line
+// `lead` is the bold opener when the model marked one with **…**, else "".
+// `source` is the trailing "(…)" citation, stripped from `text`.
+function splitBullets(body) {
+  var lines = String(body == null ? "" : body).split("\n");
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var ln = lines[i].replace(/\s+$/, "").replace(/^\s+/, "");
+    if (!ln) continue;
+    var bm = /^[-*+]\s+(.*)$/.exec(ln);
+    if (!bm) {
+      out.push({ kind: "note", text: ln.replace(/^[_*]+/, "").replace(/[_*]+$/, "").trim() });
+      continue;
+    }
+    var t = bm[1].trim();
+    var source = "";
+    var sm = /\s*[—–-]?\s*\(([^()]{1,40})\)\s*[.。]?\s*$/.exec(t);
+    if (sm) {
+      source = sm[1].trim();
+      t = t.slice(0, sm.index).replace(/\s+$/, "");
+    }
+    var lead = "";
+    var lm = /^\*\*(.+?)\*\*:?\s*/.exec(t);
+    if (lm) {
+      lead = lm[1].trim().replace(/[:：]\s*$/, "");
+      t = t.slice(lm[0].length);
+    }
+    t = t.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+    t = t.replace(/[.。]\s*$/, "");
+    out.push({ kind: "bullet", lead: lead, text: t, source: source });
+  }
+  return out;
+}
+
+// -> { "<Sector>": { score: Number|null, delta: "<+2|-3|—>", avg: "<+1.3>" } }
+// Pulled from the morning-brief's "Sector mood" table envelope (identified by a
+// "Today" column). {} when that envelope isn't present.
+function sectorScoreMap(envelopes) {
+  var out = {};
+  var envs = Array.isArray(envelopes) ? envelopes : [];
+  for (var i = 0; i < envs.length; i++) {
+    var e = envs[i];
+    if (!e || e.shape !== "table" || !e.data) continue;
+    var cols = e.data.columns || [];
+    var ti = cols.indexOf("Today");
+    if (ti < 0) continue;
+    var di = cols.indexOf("Δ prev");
+    var ai = cols.indexOf("7d avg");
+    var rows = e.data.rows || [];
+    for (var r = 0; r < rows.length; r++) {
+      var row = rows[r];
+      if (!row || !row.length) continue;
+      var raw = row[ti];
+      var n = (raw === "n/a" || raw === null || raw === undefined || raw === "") ? NaN : Number(raw);
+      out[String(row[0])] = {
+        score: isNaN(n) ? null : n,
+        delta: di >= 0 ? String(row[di] == null ? "" : row[di]) : "",
+        avg: ai >= 0 ? String(row[ai] == null ? "" : row[ai]) : ""
+      };
+    }
+    break;
+  }
+  return out;
+}
+
+// { text, role } for a sector's mood badge, or null when there's no score.
+function scoreBadge(scoreEntry) {
+  if (!scoreEntry || scoreEntry.score === null || scoreEntry.score === undefined) return null;
+  var s = scoreEntry.score;
+  var d = scoreEntry.delta || "";
+  var arrow = d.charAt(0) === "+" ? " ▲" : d.charAt(0) === "-" ? " ▼" : "";
+  var txt = (s > 0 ? "+" + s : String(s));
+  if (d && d !== "—" && d !== "+0") txt += "  " + d + arrow;
+  return {
+    text: txt,
+    role: s > 0 ? "positive" : s < 0 ? "negative" : "faint"
+  };
+}
+
 var SPARK = "▁▂▃▄▅▆▇█";
 function sparkCells(values) {
   if (!values || !values.length) return "";
@@ -366,7 +506,13 @@ var api = {
   barSummary: barSummary,
   renderEnvelopeText: renderEnvelopeText,
   renderSeriesText: renderSeriesText,
-  renderTableText: renderTableText
+  renderTableText: renderTableText,
+  speakable: speakable,
+  splitSections: splitSections,
+  splitBullets: splitBullets,
+  escapeHtml: escapeHtml,
+  sectorScoreMap: sectorScoreMap,
+  scoreBadge: scoreBadge
 };
 
 if (typeof module !== "undefined") {

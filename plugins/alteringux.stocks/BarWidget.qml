@@ -147,6 +147,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.stocks", function(argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.stocks"
+  }
+
   // ---- Popup panel. Shape contract for shell.summon/hide/toggle routing:
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget root.
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
@@ -241,6 +246,14 @@ BarWidget {
       color: root.tickerColor
       fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       fontSize: Style.font.body
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }

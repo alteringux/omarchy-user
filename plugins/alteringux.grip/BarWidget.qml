@@ -21,6 +21,10 @@ BarWidget {
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-grip"
   readonly property var guard: Kit.BugGuard.create("alteringux.grip", function (argv) { Quickshell.execDetached(argv) })
 
+  // Per-plugin usage analytics — every user action is recorded so the panel
+  // can reorder its nudge buttons toward what this user actually reaches for.
+  Kit.Usage { id: usage; pluginId: "alteringux.grip" }
+
   // ---- state, all written by omarchy-grip -----------------------------
   Kit.Store {
     id: tasksStore
@@ -88,18 +92,18 @@ BarWidget {
     })
   }
 
-  function forceCheckin() { runVerb(["checkin"]) }
-  function pauseFor(minutes) { runVerb(["pause", String(Math.max(1, Math.round(minutes))) + "m"]) }
-  function resume() { runVerb(["resume"]) }
-  function setEnabled(on) { runVerb([on ? "on" : "off"]) }
-  function addTask(text) { if (text && text.trim().length) runVerb(["add", text.trim()]) }
-  function completeTask(id) { if (id) runVerb(["done", String(id)]) }
-  function dropTask(id) { if (id) runVerb(["drop", String(id)]) }
+  function forceCheckin() { usage.record("checkin"); runVerb(["checkin"]) }
+  function pauseFor(minutes) { usage.record("pause"); runVerb(["pause", String(Math.max(1, Math.round(minutes))) + "m"]) }
+  function resume() { usage.record("resume"); runVerb(["resume"]) }
+  function setEnabled(on) { usage.record(on ? "enable" : "disable"); runVerb([on ? "on" : "off"]) }
+  function addTask(text) { if (text && text.trim().length) { usage.record("add"); runVerb(["add", text.trim()]) } }
+  function completeTask(id) { if (id) { usage.record("complete"); runVerb(["done", String(id)]) } }
+  function dropTask(id) { if (id) { usage.record("drop"); runVerb(["drop", String(id)]) } }
 
-  function ackDismiss() { runVerb(["ack", root.promptKind || "checkin"]) }
-  function ackSnooze(minutes) { runVerb(["ack", root.promptKind || "checkin", "--snooze", String(Math.max(1, Math.round(minutes))) + "m"]) }
-  function ackDid(id) { runVerb(["ack", root.promptKind || "checkin", "--did", String(id)]) }
-  function ackHear() { runVerb(["ack", "takeover"]) }
+  function ackDismiss() { usage.record("dismiss"); runVerb(["ack", root.promptKind || "checkin"]) }
+  function ackSnooze(minutes) { usage.record("snooze"); runVerb(["ack", root.promptKind || "checkin", "--snooze", String(Math.max(1, Math.round(minutes))) + "m"]) }
+  function ackDid(id) { usage.record("did"); runVerb(["ack", root.promptKind || "checkin", "--did", String(id)]) }
+  function ackHear() { usage.record("ack"); runVerb(["ack", "takeover"]) }
 
   // ---- IPC (Hyprland keybindings) ----------------------------------
   IpcHandler {
@@ -116,7 +120,8 @@ BarWidget {
         var s = root.summary
         return JSON.stringify({
           enabled: root.stateValue.enabled, prompt: root.promptKind,
-          open: s.open, overdue: s.overdue, tone: s.tone
+          open: s.open, overdue: s.overdue, tone: s.tone,
+          usage: usage.topActions(6)
         })
       }, "{}")
     }
@@ -124,9 +129,9 @@ BarWidget {
 
   // ---- triage panel ------------------------------------------------
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
-  function open() { if (panelLoader.item) panelLoader.item.open() }
+  function open() { usage.record("panel"); if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
-  function togglePanel() { if (panelLoader.item) panelLoader.item.toggle() }
+  function togglePanel() { usage.record("panel"); if (panelLoader.item) panelLoader.item.toggle() }
 
   function injectPanel() {
     var t = panelLoader.item
