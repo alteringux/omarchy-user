@@ -96,6 +96,12 @@ Item {
     root.overviewRaw = ""
     root.overviewLoading = false
     root.overviewData = null
+    // Bug fix: this used to leave overviewStarred untouched, so selecting a
+    // new word inherited the previous word's star state until the
+    // fire-and-forget trackProcess("lookup") round trip landed and corrected
+    // it — a starred word made every word opened right after it flash as
+    // starred too. Reset it eagerly with the rest of the overview state.
+    root.overviewStarred = false
   }
 
   function backToSearch() {
@@ -349,7 +355,14 @@ Item {
             root.moveSelection(1)
             event.accepted = true
           } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-            if (root.step === "search" && root.cursorActive) root.activateIndex(root.selectedIndex)
+            // Feature: Enter used to do nothing unless a suggestion row was
+            // already highlighted, which stranded a typed word with no
+            // matches (or before the debounced suggest call returns). Fall
+            // back to looking the typed text up directly.
+            if (root.step === "search") {
+              if (root.cursorActive) root.activateIndex(root.selectedIndex)
+              else if (root.filterText.trim()) root.selectWord(root.filterText.trim())
+            }
             event.accepted = true
           } else if (root.step === "search" && event.text && event.text.length === 1 &&
                      event.text.charCodeAt(0) >= 32 && event.text.charCodeAt(0) !== 127) {
@@ -487,14 +500,15 @@ Item {
             }
           }
 
-          Text {
+          // Was a bare centered Text hand-rolling the empty-state look;
+          // Kit.EmptyState is the shared styling for "nothing here yet".
+          Kit.EmptyState {
             anchors.centerIn: parent
+            width: Math.min(parent.width - Style.spacing.panelPadding * 2, Style.space(320))
             visible: suggestModel.count === 0 && root.filterText.length > 0
             text: "No matches for “" + root.filterText + "”"
-            color: root.foreground
-            opacity: 0.6
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.body
+            hint: "Press Enter to look it up anyway."
+            foreground: root.foreground
           }
 
           // Self-improving pick: a word related to what you've starred/looked
