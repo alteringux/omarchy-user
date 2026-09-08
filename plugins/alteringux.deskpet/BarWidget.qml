@@ -52,6 +52,8 @@ BarWidget {
   // Wall-clock hour for the time-of-day chatter; re-derived on the same 20s
   // clock as nowMs, so it's at most 20s stale when it matters.
   readonly property int hourValue: new Date(root.nowMs).getHours()
+  readonly property int monthValue: new Date(root.nowMs).getMonth() + 1
+  readonly property int dayValue: new Date(root.nowMs).getDate()
   readonly property int ageDaysValue: Model.ageDays(root.liveState, root.nowMs)
   readonly property var levelInfo: Model.levelInfo(root.liveState)
   readonly property var unlockedIds: Model.unlockedAchievementIds(root.liveState, root.nowMs)

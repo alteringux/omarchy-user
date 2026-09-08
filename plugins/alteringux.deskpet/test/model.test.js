@@ -399,6 +399,54 @@ test("pickAmbientLine: battery, idle, and mood still outrank the time branch", (
   assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { moodLabelValue: "grumpy" }), 0), pet.voice("Not feeling it today. A pat might help."))
 })
 
+// ── seasonal events ───────────────────────────────────────────────────────
+
+test("seasonalEvent: returns the right event for each holiday date", () => {
+  assert.equal(Model.seasonalEvent(1, 1).id, "new_year")
+  assert.equal(Model.seasonalEvent(2, 14).id, "valentines")
+  assert.equal(Model.seasonalEvent(10, 31).id, "halloween")
+  assert.equal(Model.seasonalEvent(12, 25).id, "christmas")
+})
+
+test("seasonalEvent: null for a non-holiday date and for missing/invalid input", () => {
+  assert.equal(Model.seasonalEvent(7, 4), null)
+  assert.equal(Model.seasonalEvent(3, 15), null)
+  assert.equal(Model.seasonalEvent(undefined, undefined), null)
+  assert.equal(Model.seasonalEvent(NaN, NaN), null)
+  assert.equal(Model.seasonalEvent(0, 0), null)
+})
+
+test("pickSeasonalLine: voiced and in-bank on a holiday, empty otherwise", () => {
+  const pet = Model.petById("cat")
+  const line = Model.pickSeasonalLine(pet, 12, 25, 0)
+  assert.equal(line, pet.voice(Model.SEASONAL_LINES.christmas[0]))
+  assert.equal(Model.pickSeasonalLine(pet, 7, 4, 0), "")
+  assert.equal(Model.pickSeasonalLine(pet, undefined, undefined, 0), "")
+})
+
+test("pickAmbientLine: seasonal branch fires for half the seeds when a holiday is active", () => {
+  const pet = Model.petById("cat")
+  const ctx = { isLowBattery: false, minutesIdleValue: 2, moodLabelValue: "content", hourValue: 9, monthValue: 12, dayValue: 25 }
+  assert.equal(Model.pickAmbientLine(pet, ctx, 0), pet.voice(Model.SEASONAL_LINES.christmas[0]))
+  assert.equal(Model.pickAmbientLine(pet, ctx, 499), pet.voice(Model.SEASONAL_LINES.christmas[499 % Model.SEASONAL_LINES.christmas.length]))
+  assert.equal(Model.pickAmbientLine(pet, ctx, 500), pet.voice(Model.CLIPPY_TIPS[500 % Model.CLIPPY_TIPS.length]))
+})
+
+test("pickAmbientLine: no seasonal event -> time-of-day and generic tips behave as before", () => {
+  const pet = Model.petById("cat")
+  const ctx = { isLowBattery: false, minutesIdleValue: 2, moodLabelValue: "content", hourValue: 9, monthValue: 7, dayValue: 4 }
+  assert.equal(Model.pickAmbientLine(pet, ctx, 0), pet.voice(Model.TIME_LINES.morning[0]))
+  assert.equal(Model.pickAmbientLine(pet, ctx, 400), pet.voice(Model.CLIPPY_TIPS[400 % Model.CLIPPY_TIPS.length]))
+})
+
+test("pickAmbientLine: battery, idle, and mood still outrank the seasonal branch", () => {
+  const pet = Model.petById("robot")
+  const base = { isLowBattery: false, minutesIdleValue: 2, moodLabelValue: "content", hourValue: 9, monthValue: 12, dayValue: 25 }
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { isLowBattery: true }), 0), pet.lowBattery)
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { minutesIdleValue: 45 }), 0), pet.longIdle)
+  assert.equal(Model.pickAmbientLine(pet, Object.assign({}, base, { moodLabelValue: "grumpy" }), 0), pet.voice("Not feeling it today. A pat might help."))
+})
+
 test("pickZoomLine: comes from the shared pool, wrapped in the pet's own voice()", () => {
   const fox = Model.petById("fox")
   const line = Model.pickZoomLine(fox, 0)

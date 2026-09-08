@@ -22,6 +22,7 @@ Panel {
   readonly property var speechPresets: [1.5, 3, 6, 15]
   readonly property var level: hostWidget ? hostWidget.levelInfo : Model.levelInfo(Model.defaultState())
   readonly property var unlockedIds: hostWidget ? hostWidget.unlockedIds : []
+  readonly property var seasonalEvent: hostWidget ? Model.seasonalEvent(hostWidget.monthValue, hostWidget.dayValue) : null
 
   function moodDescription(m) {
     if (m === "asleep") return "Dozing off"
@@ -57,7 +58,8 @@ Panel {
           Kit.PanelHead {
             glyph: (hostWidget && hostWidget.state.shiny ? "✨" : "") + root.pet.glyph
             title: root.pet.name + (hostWidget && hostWidget.state.shiny ? " ✨ (Shiny!)" : "")
-            meta: root.moodDescription(root.mood).toUpperCase() + "  ·  LVL " + root.level.level + " " + root.level.title.toUpperCase()
+            meta: (root.seasonalEvent ? root.seasonalEvent.glyph + " " + root.seasonalEvent.name.toUpperCase() + "  ·  " : "")
+              + root.moodDescription(root.mood).toUpperCase() + "  ·  LVL " + root.level.level + " " + root.level.title.toUpperCase()
             foreground: root.barForeground
           }
 
