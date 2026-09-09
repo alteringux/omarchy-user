@@ -15,7 +15,9 @@
 #
 # Backend selection:
 #   LLM_BACKEND / LLM_BLURB_BACKEND = auto (default) | hermes | claude
-#   LLM_HERMES_MODEL               = a NanoGPT model id to force (else hermes default)
+#   LLM_HERMES_PROVIDER            = a hermes provider to pin (e.g. claude-cli for
+#                                   the Claude subscription; else hermes default = NanoGPT)
+#   LLM_HERMES_MODEL              = a model id to force (else the provider default)
 #
 # Usage:
 #   llm-blurb [options] "PROMPT"        # prompt as args, or on stdin if none
@@ -92,8 +94,14 @@ fi
 [[ -n "$max_tokens" ]] && system="$system Keep the reply to roughly ${max_tokens} tokens."
 
 # hermes -z has no --system flag; fold the system message into the prompt.
+# LLM_HERMES_PROVIDER (e.g. claude-cli) + LLM_HERMES_MODEL pin the backend;
+# unset, hermes uses its configured default (NanoGPT).
 gen_hermes() {
-  local m=() ; [[ -n "${LLM_HERMES_MODEL:-}" ]] && m=(-m "$LLM_HERMES_MODEL")
+  local m=() hmodel="${LLM_HERMES_MODEL:-}"
+  # `hermes -z --provider X` errors without a model; default one when pinned.
+  [[ -n "${LLM_HERMES_PROVIDER:-}" && -z "$hmodel" ]] && hmodel=sonnet
+  [[ -n "$hmodel" ]] && m=(-m "$hmodel")
+  [[ -n "${LLM_HERMES_PROVIDER:-}" ]] && m+=(--provider "$LLM_HERMES_PROVIDER")
   timeout -k 5 "$timeout" hermes -z "${system}"$'\n\n'"${prompt}" \
     --safe-mode --ignore-rules "${m[@]}" </dev/null 2>/dev/null
 }

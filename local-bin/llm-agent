@@ -11,7 +11,9 @@ already expect.
 
 Backend selection:
     LLM_BACKEND / LLM_AGENT_BACKEND = auto (default) | hermes | claude
-    LLM_HERMES_MODEL               = a NanoGPT model id to force (else hermes default)
+    LLM_HERMES_PROVIDER            = a hermes provider to pin (e.g. claude-cli for the
+                                    Claude subscription; else hermes default = NanoGPT)
+    LLM_HERMES_MODEL              = a model id to force (else the provider default)
 
 Usage:
     llm-agent [options] "PROMPT"          # prompt in args, or on stdin if none
@@ -104,8 +106,14 @@ def run_hermes(prompt: str, system: str, args) -> tuple[str, str, int]:
         sysmsg += " Do not use any tools or web search; answer directly from your own knowledge."
         argv.append("--safe-mode")
     model = os.environ.get("LLM_HERMES_MODEL", "").strip()
+    provider = os.environ.get("LLM_HERMES_PROVIDER", "").strip()
+    # `hermes -z --provider X` errors without a model; default one when pinned.
+    if provider and not model:
+        model = "sonnet"
     if model:
         argv += ["-m", model]
+    if provider:
+        argv += ["--provider", provider]
     argv[2] = f"{sysmsg}\n\n{prompt}"
 
     if args.verbose:
