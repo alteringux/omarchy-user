@@ -128,6 +128,38 @@ test("feed and play clamp at 100 even when nearly full", () => {
   assert.equal(played.happiness, 100)
 })
 
+test("feed: streak continues within the window, resets after it lapses", () => {
+  let s = state({ lastTickMs: 0, feedStreak: 0, feedStreakAt: 0 })
+  s = Model.feed(s, 0)
+  assert.equal(s.feedStreak, 1)
+  s = Model.feed(s, 1000) // within FEED_STREAK_WINDOW_MS
+  assert.equal(s.feedStreak, 2)
+  s = Model.feed(s, 1000 + Model.FEED_STREAK_WINDOW_MS + 1) // lapsed
+  assert.equal(s.feedStreak, 1)
+})
+
+test("isFeedCombo: true once the streak reaches FEED_STREAK_COMBO, stays true after", () => {
+  assert.equal(Model.isFeedCombo({ feedStreak: Model.FEED_STREAK_COMBO - 1 }), false)
+  assert.equal(Model.isFeedCombo({ feedStreak: Model.FEED_STREAK_COMBO }), true)
+  assert.equal(Model.isFeedCombo({ feedStreak: Model.FEED_STREAK_COMBO + 5 }), true)
+  assert.equal(Model.isFeedCombo({ feedStreak: 0 }), false)
+})
+
+test("pickFeedLine: returns the combo line once the feed streak hits the threshold", () => {
+  const pet = Model.petById("cat")
+  const combo = state({ feedStreak: Model.FEED_STREAK_COMBO })
+  assert.equal(Model.pickFeedLine(pet, 0, combo), Model.pickFeedComboLine(pet, combo.feedStreak))
+  const normal = state({ feedStreak: 1 })
+  assert.equal(Model.pickFeedLine(pet, 0, normal), pet.feed[0])
+})
+
+test("pickFeedComboLine: interpolates the count and rides the pet's voice", () => {
+  const pet = Model.petById("robot")
+  const line = Model.pickFeedComboLine(pet, 4)
+  assert.ok(line.includes("4"))
+  assert.equal(line, pet.voice(Model.FEED_COMBO_LINE.replace("{count}", 4)))
+})
+
 test("play: raises happiness, costs energy, records count", () => {
   const s = state({ happiness: 50, energy: 50, lastTickMs: 0, totalPlays: 0 })
   const next = Model.play(s, 0)
