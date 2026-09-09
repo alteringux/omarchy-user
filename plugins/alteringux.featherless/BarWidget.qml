@@ -47,7 +47,12 @@ BarWidget {
 
   readonly property color barColor: {
     if (!root.ready) return Kit.Palette.faint
-    return root.bar ? Color.bar.text : Color.foreground
+    // WidgetButton's own default reads bar.barForeground (the live,
+    // transparency-adaptive color every other widget tracks for free) --
+    // this widget overrides `foreground` explicitly, so it has to read the
+    // same live property itself instead of the static theme constant
+    // (Color.bar.text), or it stops matching once the bar goes transparent.
+    return root.bar ? root.bar.barForeground : Color.foreground
   }
 
   Process {
