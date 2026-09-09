@@ -2,15 +2,12 @@
 # AI startup greeting + daily briefing.
 #
 # Runs as a post-boot hook (omarchy-hook post-boot) and on SUPER+ALT+Q. Asks
-# Featherless -- via ~/.local/bin/llm-blurb -- for a short personalised greeting
-# and shows it as a desktop notification.
-#
-# Featherless is flat-rate and OFF the Claude subscription (the same backend as
-# the morning brief and the stocks / dictionary blurbs), so a login greeting no
-# longer spends interactive Claude quota and needs no ANTHROPIC_API_KEY.
+# `claude -p` -- via ~/.local/bin/llm-blurb -- for a short personalised greeting
+# and shows it as a desktop notification. Featherless has been removed from this
+# box; llm-blurb is now a thin wrapper over the claude CLI.
 #
 # Optional overrides in ~/.config/omarchy/ai-briefing/env:
-#   BRIEFING_MODEL   Featherless model id (default: llm-blurb's own default)
+#   BRIEFING_MODEL   sonnet | haiku | opus (default: llm-blurb's own default)
 #   LLM_BLURB_BIN    path to the llm-blurb helper
 
 set -euo pipefail
@@ -46,8 +43,8 @@ if [[ ! -x "$LLM_BLURB_BIN" ]]; then
   exit 0
 fi
 
-# llm-blurb already retries Featherless and falls back to local Ollama; if it
-# still comes back empty we degrade to a plain dateline rather than an error toast.
+# llm-blurb wraps `claude -p`; if it still comes back empty we degrade to a
+# plain dateline rather than an error toast.
 TEXT=$("$LLM_BLURB_BIN" --max-tokens 120 --timeout 30 "${model_args[@]}" "$PROMPT" 2>>"$LOG_FILE") || TEXT=""
 TEXT=$(printf '%s' "$TEXT" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
 

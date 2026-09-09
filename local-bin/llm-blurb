@@ -1,59 +1,39 @@
 #!/usr/bin/env bash
-# llm-blurb -- one-shot text generation via Featherless AI (OpenAI-compatible).
+# llm-blurb -- one-shot text generation via the Claude CLI (`claude -p`).
 #
-# Drop-in stand-in for `claude -p` in the small Omarchy "self-improving"
-# helpers (dictionary overview / daily suggestion, stocks commentary,
-# dashboard digest, motivator pool growth). Prints the model's reply on
-# stdout; on ANY failure it prints a one-line reason to stderr and exits
-# non-zero *quietly* so callers keep whatever fallback they already have.
+# Drop-in stand-in for a raw model call in the small Omarchy "self-improving"
+# helpers (dictionary overview / daily suggestion, stocks commentary, dashboard
+# digest, motivator pool growth, morning briefing, weekly recap). Prints the
+# model's reply on stdout; on ANY failure it prints a one-line reason to stderr
+# and exits non-zero *quietly* so callers keep whatever fallback they already
+# have.
 #
-# Why Featherless instead of the claude CLI: these are throwaway blurbs that
-# don't need a frontier model, and routing them off the Claude subscription
-# keeps that quota for interactive work. Featherless is a flat-rate plan, so
-# the only real budget here is the account's concurrency cap (feather_pro_plus
-# = 4 units). Small models cost ~1 unit; this defaults to one so a blurb
-# refresh doesn't knock out a running opencode session (or vice versa).
+# History: this used to POST to a hosted inference API to keep these off the Claude
+# subscription. That backend has been removed, so the same interface now
+# shells out to `claude -p`. Callers are unchanged.
 #
 # Usage:
 #   llm-blurb [options] "PROMPT"        # prompt as args, or on stdin if none
 #
-# Options:
-#   --json            ask for one JSON object (adds response_format, low temp)
+# Options (kept for caller compatibility):
+#   --json            ask the model for one JSON object; stdout is that object
 #   --system TEXT     override the system message
-#   --model NAME      override the model
-#   --max-tokens N    completion cap (default 500)
-#   --temp N          sampling temperature (default 0.7; 0.2 with --json)
-#   --timeout N       curl --max-time seconds (default 40)
+#   --model NAME      sonnet | haiku | opus, or a legacy hosted-model id which is
+#                     mapped by family (anything unrecognised -> claude default)
+#   --max-tokens N    soft length hint appended to the system message
+#   --temp N          accepted and ignored (claude -p has no temperature knob)
+#   --timeout N       wall-clock cap in seconds for the claude call (default 45)
 #
-# Environment:
-#   FEATHERLESS_API_KEY   API key. Falls back to ~/.config/featherless/key,
-#                         then to .provider.featherless.options.apiKey in
-#                         ~/.config/opencode/opencode.json.
-#   LLM_BLURB_MODEL       default model id.
-#   OLLAMA_URL            local fallback endpoint (default http://localhost:11434),
-#   LLM_BLURB_OLLAMA_MODEL  and model (default qwen2.5:3b), used automatically when
-#                         Featherless is unreachable / capped / keyless so blurbs
-#                         still generate offline. Disable with LLM_BLURB_FALLBACK=0.
-#   LLM_BLURB_OLLAMA_TIMEOUT  curl deadline for that fallback call (default 90,
-#                         floored at --timeout) -- local cold-load is slow.
-#
-# Exit codes: 0 ok | 2 bad args | 3 no key | 4 curl failed | 5 empty reply
-#             6 rate limited (concurrency cap) | 7 other HTTP error
-#   (a successful Ollama fallback exits 0 with a one-line note on stderr)
+# Exit codes: 0 ok | 2 bad args | 3 claude not found | 4 claude failed/timed out
+#             5 empty reply
 set -uo pipefail
 
-API_URL="https://api.featherless.ai/v1/chat/completions"
-model="${LLM_BLURB_MODEL:-Qwen/Qwen2.5-7B-Instruct}"
-max_tokens=500
+max_tokens=""
 temp=""
-timeout=25
+timeout=45
 want_json=0
 system=""
-# Featherless caps the account at a few concurrency units, which a running
-# opencode session can hold. Those holds are bursty, not constant, so a
-# 429 usually clears within seconds -- retry with backoff before giving up.
-retries=4
-backoff=(0 3 8 15)
+model=""
 
 while (($#)); do
   case "$1" in
@@ -73,113 +53,70 @@ prompt="${*:-}"
 [[ -z "$prompt" ]] && prompt="$(cat)"
 [[ -z "${prompt// }" ]] && { echo "llm-blurb: empty prompt" >&2; exit 2; }
 
-key="${FEATHERLESS_API_KEY:-}"
-[[ -z "$key" && -r "$HOME/.config/featherless/key" ]] && key="$(<"$HOME/.config/featherless/key")"
-[[ -z "$key" && -r "$HOME/.config/opencode/opencode.json" ]] && \
-  key="$(jq -r '.provider.featherless.options.apiKey // empty' "$HOME/.config/opencode/opencode.json" 2>/dev/null)"
-key="${key//[$'\r\n\t ']/}"
-no_key=0
-[[ -z "$key" ]] && no_key=1
+command -v claude >/dev/null 2>&1 || { echo "llm-blurb: claude CLI not on PATH" >&2; exit 3; }
 
-if [[ -z "$temp" ]]; then temp=0.7; ((want_json)) && temp=0.2; fi
+# Map a model hint to a claude alias. Legacy callers still pass hosted-model ids
+# such as Qwen/Qwen3-30B-A3B-Instruct-2507 -- fall through to the CLI default.
+model_args=()
+case "${model,,}" in
+  *haiku*)  model_args=(--model haiku) ;;
+  *opus*)   model_args=(--model opus) ;;
+  *sonnet*) model_args=(--model sonnet) ;;
+  "")       : ;;
+  *)        : ;;
+esac
+
 if [[ -z "$system" ]]; then
   if ((want_json)); then
-    system="You output only a single minified JSON object: no markdown fences, no prose."
+    system="You output only a single JSON object: no markdown fences, no prose before or after it."
   else
-    system="You write short, plain-text answers. No markdown, no preamble, no disclaimers."
+    system="You write short, plain-text answers. No markdown, no preamble, no disclaimers, no follow-up suggestions."
   fi
 fi
+[[ -n "$max_tokens" ]] && system="$system Keep the reply to roughly ${max_tokens} tokens."
 
-req="$(jq -n \
-  --arg model "$model" --arg sys "$system" --arg user "$prompt" \
-  --argjson max "$max_tokens" --argjson temp "$temp" --argjson json "$want_json" \
-  '{
-     model: $model,
-     max_tokens: $max,
-     temperature: $temp,
-     messages: [ {role:"system", content:$sys}, {role:"user", content:$user} ]
-   }
-   + (if $json == 1 then {response_format: {type: "json_object"}} else {} end)')"
-
-# --- Ollama local fallback -------------------------------------------------
-# Featherless is primary. When it can't be reached (offline), is rate-limited,
-# or there's no key at all, retry the same request against a local Ollama over
-# its OpenAI-compatible endpoint so the blurb still generates.
-ollama_url="${OLLAMA_URL:-http://localhost:11434}"
-ollama_model="${LLM_BLURB_OLLAMA_MODEL:-qwen2.5:3b}"
-# Local inference on a small box can spend 15-25s just cold-loading the model
-# before it emits a token, so the fallback gets its own, roomier deadline
-# (never shorter than the Featherless --timeout).
-ollama_timeout="${LLM_BLURB_OLLAMA_TIMEOUT:-90}"
-((ollama_timeout < timeout)) && ollama_timeout="$timeout"
-fallback_disabled=0
-[[ "${LLM_BLURB_FALLBACK:-1}" == 0 ]] && fallback_disabled=1
-
-fallback_ollama() {
-  # $1 = short reason, for the stderr note. On success: prints the completion
-  # and exits 0. Otherwise returns non-zero so the caller runs its own hard exit.
-  local reason="$1" oreq oresp ocode obody ocontent
-  ((fallback_disabled)) && return 1
-  command -v curl >/dev/null 2>&1 || return 1
-  oreq="$(printf '%s' "$req" | jq --arg m "$ollama_model" '.model = $m')" || return 1
-  oresp="$(curl -sS --max-time "$ollama_timeout" -w $'\n%{http_code}' \
-        "$ollama_url/v1/chat/completions" \
-        -H 'Content-Type: application/json' -d "$oreq" 2>/dev/null)" || return 1
-  ocode="${oresp##*$'\n'}"
-  obody="${oresp%$'\n'*}"
-  [[ "$ocode" == 200 ]] || return 1
-  ocontent="$(printf '%s' "$obody" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
-  [[ -n "${ocontent// }" ]] || return 1
-  printf '%s\n' "$ocontent"
-  echo "llm-blurb: Featherless $reason -- used Ollama ($ollama_model)" >&2
-  exit 0
-}
-
-if ((no_key)); then
-  fallback_ollama "has no API key"
-  echo "llm-blurb: no Featherless API key" >&2
-  exit 3
+raw="$(timeout -k 5 "$timeout" claude -p "$prompt" \
+        --system-prompt "$system" "${model_args[@]}" \
+        --output-format text </dev/null 2>/dev/null)"
+rc=$?
+if ((rc != 0)); then
+  ((rc == 124)) && { echo "llm-blurb: claude timed out after ${timeout}s" >&2; exit 4; }
+  echo "llm-blurb: claude exited $rc" >&2
+  exit 4
 fi
 
-for ((try = 0; try < retries; try++)); do
-  ((try > 0)) && sleep "${backoff[try]:-15}"
-  last=$((try == retries - 1))
+# `claude -p` occasionally tacks on a "Next steps:" / "Sources:" trailer or a
+# leading "I'll ..." meta line. Strip both so callers get just the answer.
+clean="$(printf '%s' "$raw" | python3 -c '
+import re, sys
+t = sys.stdin.read().strip()
+t = re.sub(r"\n+[*_#>\s]*(?:Next steps?|Follow-?ups?|Related|Sources?|Notes?)\b[^\n]*:?\s*\n.*\Z", "", t, flags=re.S | re.I)
+lines = t.split("\n")
+while lines and re.match(r"^\s*(?:i.?ll |i will |let me |sure[,!. ]|here.?s )", lines[0], re.I):
+    lines.pop(0)
+t = "\n".join(lines).strip()
+if not t:
+    sys.exit(1)
+print(t)
+')" || { echo "llm-blurb: empty completion" >&2; exit 5; }
 
-  resp="$(curl -sS --max-time "$timeout" -w $'\n%{http_code}' "$API_URL" \
-        -H "Authorization: Bearer $key" -H 'Content-Type: application/json' -d "$req")"
-  curl_rc=$?
-  if ((curl_rc != 0)); then
-    # curl 6 (DNS) / 7 (connect refused) => offline: skip the retry ladder and
-    # go straight to the local fallback.
-    ((curl_rc == 6 || curl_rc == 7)) && fallback_ollama "unreachable (offline?)"
-    ((last)) && { fallback_ollama "curl failed"; echo "llm-blurb: curl failed" >&2; exit 4; }
-    continue
-  fi
+if ((want_json)); then
+  clean="$(printf '%s' "$clean" | python3 -c '
+import json, re, sys
+s = sys.stdin.read().strip()
+if s.startswith("```"):
+    s = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", s).strip()
+m = re.search(r"\{.*\}", s, re.S)
+if not m:
+    sys.exit(1)
+frag = m.group(0)
+try:
+    json.loads(frag)
+except Exception:
+    sys.exit(1)
+print(frag)
+')" || { echo "llm-blurb: model did not return JSON" >&2; exit 5; }
+fi
 
-  code="${resp##*$'\n'}"
-  body="${resp%$'\n'*}"
-
-  case "$code" in
-    200)
-      content="$(printf '%s' "$body" | jq -r '.choices[0].message.content // empty' 2>/dev/null)"
-      if [[ -n "${content// }" ]]; then
-        printf '%s\n' "$content"
-        exit 0
-      fi
-      ((last)) && { fallback_ollama "returned empty"; echo "llm-blurb: empty completion" >&2; exit 5; } ;;
-    429)
-      ((last)) && { fallback_ollama "rate limited"; echo "llm-blurb: rate limited (concurrency cap)" >&2; exit 6; } ;;
-    500 | 502 | 503 | 504 | 529)
-      # Transient: a cold/low-traffic model reports "temporarily at capacity"
-      # (503) while it loads, or the gateway hiccups (502/504). Same retry
-      # ladder as 429 -- it usually clears within a few seconds.
-      msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
-      ((last)) && { fallback_ollama "HTTP $code"; echo "llm-blurb: HTTP $code (transient)${msg:+ -- $msg}" >&2; exit 7; } ;;
-    *)
-      msg="$(printf '%s' "$body" | jq -r '.error.message // .error // empty' 2>/dev/null | head -c 200)"
-      fallback_ollama "HTTP $code"
-      echo "llm-blurb: HTTP $code${msg:+ -- $msg}" >&2
-      exit 7 ;;
-  esac
-done
-exit 1
+[[ -z "${clean// }" ]] && { echo "llm-blurb: empty completion" >&2; exit 5; }
+printf '%s\n' "$clean"

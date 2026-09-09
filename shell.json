@@ -4,9 +4,6 @@
     "layout": {
       "center": [
         {
-          "id": "alteringux.pulse"
-        },
-        {
           "id": "alteringux.calendar"
         },
         {
@@ -34,9 +31,6 @@
         },
         {
           "id": "alteringux.netwatch"
-        },
-        {
-          "id": "alteringux.devcast"
         }
       ],
       "right": [
@@ -59,12 +53,6 @@
           "id": "omarchy.network"
         },
         {
-          "id": "alteringux.deskpet"
-        },
-        {
-          "id": "alteringux.featherless"
-        },
-        {
           "id": "omarchy.agents"
         },
         {
@@ -72,9 +60,6 @@
         },
         {
           "id": "omarchy.tray"
-        },
-        {
-          "id": "alteringux.crochet"
         },
         {
           "id": "alteringux.recall"
@@ -92,7 +77,7 @@
           "id": "alteringux.clock",
           "format": "dddd h:mm:ss AP",
           "formatAlt": "d MMMM 'W'ww yyyy",
-          "verticalFormat": "h\n—\nmm:ss AP"
+          "verticalFormat": "h\n\u2014\nmm:ss AP"
         }
       ]
     },

@@ -2,12 +2,12 @@
 # Speaks a daily briefing aloud via Piper TTS: date, weather, and what's
 # happening locally. Run again while speaking to stop.
 #
-# Weather comes from wttr.in (no key). "What's happening" uses the Anthropic
-# API with web search, reusing the key in ~/.config/omarchy/ai-briefing/env.
-# Both parts degrade gracefully if offline or unconfigured.
+# Weather comes from wttr.in (no key). "What's happening" uses `claude -p` with
+# its web-search tool -- no API key, no third-party model host. Both parts degrade
+# gracefully if offline or unconfigured.
 set -uo pipefail
 
-VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_GB-cori-high.onnx}"
+VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_US-lessac-medium.onnx}"
 ENV_FILE="$HOME/.config/omarchy/ai-briefing/env"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
 # Override with LOCATION=... in the env file; blank = wttr.in IP geolocation.
@@ -56,38 +56,27 @@ fi
 
 # --- What's happening ----------------------------------------------------
 happenings() {
-  [[ -n "${ANTHROPIC_API_KEY:-}" ]] || return 1
+  command -v claude >/dev/null 2>&1 || return 1
   local where="$LOCATION"
   [[ -z "$where" ]] && return 1
-  local resp
-  resp=$(curl -sS https://api.anthropic.com/v1/messages --max-time 45 \
-    -H "x-api-key: $ANTHROPIC_API_KEY" \
-    -H "anthropic-version: 2023-06-01" \
-    -H "content-type: application/json" \
-    -d "$(jq -n --arg where "$where" --arg day "$(date '+%A %-d %B %Y')" '{
-      model:"claude-haiku-4-5-20251001",
-      max_tokens:350,
-      tools:[{type:"web_search_20250305",name:"web_search",max_uses:3}],
-      messages:[{role:"user",content:("Its \($day). Give a spoken briefing of whats happening today in \($where): 2 to 3 items across local news, events, transport disruptions or sport, plus any weather warnings. Plain text only. No markdown, no headings, no URLs, no citations. 3 to 5 short sentences to be read aloud. Start immediately with the first item. Do NOT say that you are searching, do NOT write phrases like \"based on the search results\" or \"heres your briefing\".")}]
-    }')") || return 1
+  local day resp
+  day=$(date '+%A %-d %B %Y')
+  resp=$(timeout -k 5 60 claude -p "Its ${day}. Give a spoken briefing of whats happening today in ${where}: 2 to 3 items across local news, events, transport disruptions or sport, plus any weather warnings. Plain text only. No markdown, no headings, no URLs, no citations, no follow-up suggestions. 3 to 5 short sentences to be read aloud. Start immediately with the first item. Do NOT say that you are searching, do NOT write phrases like \"based on the search results\" or \"heres your briefing\"." \
+    --system-prompt "You write short spoken-word briefings. Plain text only." \
+    --allowedTools WebSearch \
+    --output-format text </dev/null 2>/dev/null) || return 1
   printf '%s' "$resp" | python3 -c "
-import json,sys
-try:
-    d=json.load(sys.stdin)
-    if 'error' in d: sys.exit(1)
-    import re
-    out=' '.join(b['text'].strip() for b in d['content'] if b.get('type')=='text')
-    out=' '.join(out.split())
-    # Drop leading meta chatter the model sometimes prepends.
-    meta=re.compile(r\"(i'll search|let me search|i will search|based on (the |my )?search|here'?s your|here is your|searching for)\", re.I)
-    parts=re.split(r'(?<=[.!?])\s+', out)
-    while parts and meta.search(parts[0]):
-        parts.pop(0)
-    out=' '.join(parts).strip()
-    if not out: sys.exit(1)
-    print(out)
-except Exception:
-    sys.exit(1)
+import json,sys,re
+out=' '.join(sys.stdin.read().split())
+if not out: sys.exit(1)
+out=re.sub(r'\s*(?:Next steps?|Sources?|Follow-?ups?)\b.*\$', '', out, flags=re.I)
+meta=re.compile(r\"(i'll search|let me search|i will search|based on (the |my )?search|here'?s your|here is your|searching for)\", re.I)
+parts=re.split(r'(?<=[.!?])\s+', out)
+while parts and meta.search(parts[0]):
+    parts.pop(0)
+out=' '.join(parts).strip()
+if not out: sys.exit(1)
+print(out)
 " || return 1
 }
 
