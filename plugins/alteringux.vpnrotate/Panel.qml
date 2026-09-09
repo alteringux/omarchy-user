@@ -28,6 +28,10 @@ Panel {
   readonly property var presets: Model.intervalPresets()
   readonly property string killSwitchError: hostWidget ? hostWidget.killSwitchError : ""
 
+  readonly property var metrics: hostWidget ? hostWidget.metrics : Model.parseMetrics("")
+  readonly property real rxRate: hostWidget ? hostWidget.rxRate : 0
+  readonly property real txRate: hostWidget ? hostWidget.txRate : 0
+
   KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
@@ -82,6 +86,56 @@ Panel {
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+        }
+
+        // ── connection metrics (throughput / load / latency / rotation tally) ──
+        Column {
+          width: content.width
+          spacing: Style.space(3)
+          visible: root.connected || root.metrics.rotations > 0
+
+          Text {
+            visible: root.connected
+            width: parent.width
+            text: "↓ " + Model.formatRate(root.rxRate) + "    ↑ " + Model.formatRate(root.txRate)
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: root.connected && (root.metrics.rxBytes > 0 || root.metrics.txBytes > 0)
+            width: parent.width
+            text: Model.formatBytes(root.metrics.rxBytes) + " down  ·  " + Model.formatBytes(root.metrics.txBytes) + " up  ·  this session"
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            visible: root.connected
+            width: parent.width
+            text: {
+              var bits = []
+              if (root.metrics.load > 0) bits.push("Load " + Model.formatLoad(root.metrics.load))
+              if (root.metrics.protocol) bits.push(root.metrics.protocol === "wireguard" ? "WireGuard" : root.metrics.protocol)
+              bits.push("Exit " + Model.formatLatency(root.metrics.latencyMs))
+              return bits.join("  ·  ")
+            }
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: root.metrics.rotations > 0
+            width: parent.width
+            text: Model.rotationSummary(root.metrics, false)
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
         }
 
         // Next-rotation readout + thin progress bar (only meaningful while

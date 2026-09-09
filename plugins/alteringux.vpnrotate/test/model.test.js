@@ -118,3 +118,59 @@ test("summaryLine describes each state", () => {
   assert.strictEqual(Model.summaryLine({ action: "connecting" }), "Connecting…");
   assert.ok(Model.summaryLine({ action: "idle", connected: true, city: "Oslo", country: "NO", exitIp: "1.1.1.1" }).indexOf("Oslo, NO") !== -1);
 });
+
+// ── metrics ─────────────────────────────────────────────────────────────
+test("parseMetrics returns a safe empty shape for junk", () => {
+  const m = Model.parseMetrics("not json");
+  assert.strictEqual(m.load, 0);
+  assert.strictEqual(m.protocol, "");
+  assert.strictEqual(m.rotations, 0);
+});
+
+test("parseMetrics reads a well-formed blob and coerces types", () => {
+  const m = Model.parseMetrics(JSON.stringify({
+    load: 83, protocol: "wireguard", latencyMs: 42, rxBytes: 2048, txBytes: 1024,
+    bytesAt: 100, rotations: 5, rotationsToday: 3, distinctIps: 9,
+    ipChangedCount: 7, failures: 1
+  }));
+  assert.strictEqual(m.load, 83);
+  assert.strictEqual(m.protocol, "wireguard");
+  assert.strictEqual(m.rxBytes, 2048);
+  assert.strictEqual(m.rotations, 5);
+  assert.strictEqual(m.failures, 1);
+});
+
+test("formatBytes scales and labels binary units", () => {
+  assert.strictEqual(Model.formatBytes(512), "512 B");
+  assert.strictEqual(Model.formatBytes(1536), "1.5 KB");
+  assert.strictEqual(Model.formatBytes(5 * 1024 * 1024), "5.0 MB");
+  assert.strictEqual(Model.formatBytes(3 * 1024 * 1024 * 1024), "3.0 GB");
+  assert.strictEqual(Model.formatBytes(-10), "0 B");
+});
+
+test("formatRate appends /s, floors at 0 B/s", () => {
+  assert.strictEqual(Model.formatRate(0), "0 B/s");
+  assert.strictEqual(Model.formatRate(2048), "2.0 KB/s");
+  assert.strictEqual(Model.formatRate(-5), "0 B/s");
+});
+
+test("formatLatency renders ms or an em-dash when unmeasured", () => {
+  assert.strictEqual(Model.formatLatency(42), "42 ms");
+  assert.strictEqual(Model.formatLatency(0), "—");
+  assert.strictEqual(Model.formatLatency(-1), "—");
+});
+
+test("throughput divides the byte delta by the time delta, guarding a counter reset", () => {
+  assert.strictEqual(Model.throughput(3000, 110, 1000, 100), 200);   // 2000 B / 10 s
+  assert.strictEqual(Model.throughput(500, 110, 1000, 100), 0);       // counter went backwards (reconnect)
+  assert.strictEqual(Model.throughput(3000, 100, 1000, 100), 0);      // no time elapsed
+});
+
+test("rotationSummary omits zero clauses but always keeps the count", () => {
+  assert.strictEqual(Model.rotationSummary({ rotations: 1, ipChangedCount: 0, distinctIps: 0, failures: 0 }), "1 rotation");
+  assert.strictEqual(
+    Model.rotationSummary({ rotations: 5, ipChangedCount: 4, distinctIps: 9, failures: 1 }),
+    "5 rotations  ·  4 changed IP  ·  9 IPs seen  ·  1 failed"
+  );
+  assert.strictEqual(Model.rotationSummary({ rotationsToday: 3, ipChangedCount: 0, distinctIps: 0, failures: 0 }, true), "3 today");
+});

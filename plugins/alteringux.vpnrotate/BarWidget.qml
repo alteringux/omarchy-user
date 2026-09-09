@@ -105,6 +105,67 @@ BarWidget {
     serialize: function (v) { return JSON.stringify(Model.parseConfig(JSON.stringify(v)), null, 2) + "\n" }
   }
 
+  // Metrics sidecar: server load / protocol / exit latency / tunnel byte
+  // counters + rotation tallies. The script owns the writes (`metrics` verb on
+  // the poll below, plus connect/rotate for the counters); the widget just
+  // reads and derives the live throughput rate from successive samples.
+  property var metrics: Model.parseMetrics("")
+  property real rxRate: 0
+  property real txRate: 0
+  property int prevRxBytes: 0
+  property int prevTxBytes: 0
+  property int prevBytesAt: 0
+
+  Kit.Store {
+    id: metricsStore
+    fileName: "vpnrotate-metrics.json"
+    watch: true
+    pollMs: 2000
+    polling: true
+    parse: function (raw) { return Model.parseMetrics(raw) }
+    onExternallyChanged: function (value) { root.applyMetrics(value) }
+  }
+
+  function applyMetrics(value) {
+    guard.run("applyMetrics", function () {
+      var m = value || Model.parseMetrics("")
+      if (root.st.connected && m.bytesAt > 0 && root.prevBytesAt > 0 && m.bytesAt !== root.prevBytesAt) {
+        root.rxRate = Model.throughput(m.rxBytes, m.bytesAt, root.prevRxBytes, root.prevBytesAt)
+        root.txRate = Model.throughput(m.txBytes, m.bytesAt, root.prevTxBytes, root.prevBytesAt)
+      } else if (!root.st.connected) {
+        root.rxRate = 0; root.txRate = 0
+      }
+      root.prevRxBytes = m.bytesAt > 0 ? m.rxBytes : 0
+      root.prevTxBytes = m.bytesAt > 0 ? m.txBytes : 0
+      root.prevBytesAt = m.bytesAt
+      root.metrics = m
+    })
+  }
+
+  // Ask the script to refresh the volatile metrics while a tunnel is up. Each
+  // run spawns `protonvpn status` (a Python CLI), so 10 s keeps the box quiet
+  // while still giving a live-enough throughput readout; the latency probe
+  // inside rate-limits itself further to ~25 s. Only runs while the panel is
+  // open or auto-rotate needs the numbers — no point polling for a hidden UI.
+  Process {
+    id: metricsProc
+    command: [root.scriptPath, "metrics"]
+    running: false
+    onExited: function (code) { metricsStore.reload() }
+  }
+
+  Timer {
+    interval: 10000
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: {
+      if (!root.st.connected || metricsProc.running || actionProc.running) return
+      if (!root.opened && !root.cfg.autoRotate) return
+      metricsProc.running = true
+    }
+  }
+
   function applyState(value) {
     guard.run("applyState", function () {
       root.st = value || Model.parseState("")
@@ -309,7 +370,19 @@ BarWidget {
           intervalSec: root.cfg.intervalSec,
           killSwitch: root.cfg.killSwitch,
           killSwitchError: root.killSwitchError,
-          secondsToRotate: root.secsToRotate
+          secondsToRotate: root.secsToRotate,
+          load: root.metrics.load,
+          protocol: root.metrics.protocol,
+          latencyMs: root.metrics.latencyMs,
+          rxBytes: root.metrics.rxBytes,
+          txBytes: root.metrics.txBytes,
+          rxRate: Math.round(root.rxRate),
+          txRate: Math.round(root.txRate),
+          rotations: root.metrics.rotations,
+          rotationsToday: root.metrics.rotationsToday,
+          distinctIps: root.metrics.distinctIps,
+          ipChangedCount: root.metrics.ipChangedCount,
+          failures: root.metrics.failures
         })
       }, "{}")
     }
@@ -317,6 +390,13 @@ BarWidget {
 
   // ── panel wiring (mirrors alteringux.stopwatch) ────────────────────────
   readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+
+  // Refresh the metrics the moment the panel opens so the numbers aren't stale
+  // for up to a poll interval (the timer only runs while the panel is open).
+  onOpenedChanged: {
+    if (root.opened && root.st.connected && !metricsProc.running && !actionProc.running)
+      metricsProc.running = true
+  }
 
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }

@@ -12,6 +12,7 @@
 #   protonvpn-rotate refresh          # reconcile the status file with `protonvpn status`
 #   protonvpn-rotate status [--json]  # print cached status (--json for the raw file)
 #   protonvpn-rotate probe            # re-check the exit IP, update status
+#   protonvpn-rotate metrics          # refresh server load / protocol / latency / throughput
 #   protonvpn-rotate killswitch on|off|sync   # sync = match CLI to widget config
 #
 # Exit IP is verified through the tunnel after every connect/rotate, so the
@@ -72,11 +73,18 @@ cli_connect_retry() {
 # ── paths ──────────────────────────────────────────────────────────────────
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE_FILE="$STATE_DIR/vpnrotate.json"
-CONFIG_FILE="$STATE_DIR/vpnrotate-config.json"   # widget-owned policy (read-only here)
+CONFIG_FILE="$STATE_DIR/vpnrotate-config.json"    # widget-owned policy (read-only here)
+METRICS_FILE="$STATE_DIR/vpnrotate-metrics.json"  # sidecar: volatile stats + counters
+IPS_FILE="$STATE_DIR/vpnrotate-ips.txt"           # every exit IP seen, for the distinct count
 LOG_FILE="$STATE_DIR/vpnrotate.log"
+PROTON_IFACE="${PROTON_IFACE:-proton0}"           # wireguard tunnel iface (recreated per connect)
 mkdir -p "$STATE_DIR"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE" 2>/dev/null; }
+
+# Sanitise a value for a bare (unquoted) JSON number slot: anything non-integer
+# becomes 0 so a stray parse never produces invalid JSON.
+num_or_zero() { case "${1:-}" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
 
 # Desired kill-switch state from the widget's config file. Echoes on|off
 # (defaults off when the file is missing / unreadable / malformed).
@@ -145,6 +153,101 @@ set_action() {
     "$action" "$(state_get server)" "$(state_get exitIp)" "$(state_get country)" \
     "$(state_get city)" "$(state_get org)" "$(state_get since)" "$(state_get lastRotate)" \
     "$error"
+}
+
+# ── metrics sidecar (vpnrotate-metrics.json) ───────────────────────────────
+# Kept separate from the connection state file so the widget can watch/poll it
+# on a faster cadence without churning the state file, and so adding a stat is
+# never a positional-arg change to write_state.
+#
+# Fields: load (server load %), protocol, latencyMs (RTT to the exit),
+#   rxBytes/txBytes/bytesAt (tunnel iface byte counters + sample epoch — they
+#   reset on every connect, so they read as "this session"), rotations /
+#   rotationsToday / todayDate, distinctIps (unique exit IPs ever seen),
+#   ipChangedCount (rotations that actually moved the exit IP), failures
+#   (connect attempts that gave up after retries).
+metric_get() {
+  [ -f "$METRICS_FILE" ] || { echo ""; return; }
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$METRICS_FILE" | head -n1
+}
+
+load_metrics() {
+  m_load="$(num_or_zero "$(metric_get load)")"
+  m_protocol="$(metric_get protocol)"
+  m_latencyMs="$(num_or_zero "$(metric_get latencyMs)")"
+  m_latencyAt="$(num_or_zero "$(metric_get latencyAt)")"
+  m_rxBytes="$(num_or_zero "$(metric_get rxBytes)")"
+  m_txBytes="$(num_or_zero "$(metric_get txBytes)")"
+  m_bytesAt="$(num_or_zero "$(metric_get bytesAt)")"
+  m_rotations="$(num_or_zero "$(metric_get rotations)")"
+  m_rotationsToday="$(num_or_zero "$(metric_get rotationsToday)")"
+  m_todayDate="$(metric_get todayDate)"
+  m_distinctIps="$(num_or_zero "$(metric_get distinctIps)")"
+  m_ipChangedCount="$(num_or_zero "$(metric_get ipChangedCount)")"
+  m_failures="$(num_or_zero "$(metric_get failures)")"
+}
+
+save_metrics() {
+  local tmp; tmp="$(mktemp "$STATE_DIR/.vpnmetrics.XXXXXX")" || return 1
+  cat >"$tmp" <<EOF
+{
+  "load": $(num_or_zero "${m_load:-0}"),
+  "protocol": "$(json_escape "${m_protocol:-}")",
+  "latencyMs": $(num_or_zero "${m_latencyMs:-0}"),
+  "latencyAt": $(num_or_zero "${m_latencyAt:-0}"),
+  "rxBytes": $(num_or_zero "${m_rxBytes:-0}"),
+  "txBytes": $(num_or_zero "${m_txBytes:-0}"),
+  "bytesAt": $(num_or_zero "${m_bytesAt:-0}"),
+  "rotations": $(num_or_zero "${m_rotations:-0}"),
+  "rotationsToday": $(num_or_zero "${m_rotationsToday:-0}"),
+  "todayDate": "$(json_escape "${m_todayDate:-}")",
+  "distinctIps": $(num_or_zero "${m_distinctIps:-0}"),
+  "ipChangedCount": $(num_or_zero "${m_ipChangedCount:-0}"),
+  "failures": $(num_or_zero "${m_failures:-0}"),
+  "updated": $(date +%s)
+}
+EOF
+  mv -f "$tmp" "$METRICS_FILE"
+}
+
+# rx<TAB>tx from the tunnel iface's kernel counters (blank if the iface is gone).
+iface_bytes() {
+  local d="/sys/class/net/$PROTON_IFACE/statistics"
+  [ -r "$d/rx_bytes" ] || return 1
+  printf '%s\t%s\n' "$(cat "$d/rx_bytes" 2>/dev/null)" "$(cat "$d/tx_bytes" 2>/dev/null)"
+}
+
+# Round-trip ms through the tunnel. ICMP to the exit IP first (most direct);
+# then ICMP to 1.1.1.1 (always answers, anycast-near, still traverses the
+# tunnel); then TCP-connect time to a stable host as a last resort. Echoes an
+# integer or nothing.
+measure_latency() {
+  local ip="$1" out ms
+  for target in "$ip" "1.1.1.1"; do
+    [ -n "$target" ] || continue
+    if out="$(ping -n -c1 -W2 "$target" 2>/dev/null)"; then
+      ms="$(printf '%s\n' "$out" | sed -n 's/.*time=\([0-9.]\+\).*/\1/p' | head -n1)"
+      [ -n "$ms" ] && break
+    fi
+  done
+  if [ -z "${ms:-}" ]; then
+    ms="$(curl -o /dev/null -s -w '%{time_connect}' --max-time 5 https://1.1.1.1 2>/dev/null)"
+    [ -n "$ms" ] && ms="$(awk -v t="$ms" 'BEGIN{printf "%f", t*1000}')"
+  fi
+  [ -n "${ms:-}" ] || return 1
+  awk -v t="$ms" 'BEGIN{printf "%d", (t+0.5)}'
+}
+
+# Record an exit IP into the distinct-IP set and refresh m_distinctIps.
+# Bounded to the last 500 entries so it can't grow without limit.
+record_exit_ip() {
+  local ip="$1"
+  [ -n "$ip" ] || return 0
+  printf '%s\n' "$ip" >>"$IPS_FILE" 2>/dev/null || return 0
+  if [ "$(wc -l <"$IPS_FILE" 2>/dev/null || echo 0)" -gt 500 ]; then
+    tail -n 500 "$IPS_FILE" >"$IPS_FILE.tmp" 2>/dev/null && mv -f "$IPS_FILE.tmp" "$IPS_FILE"
+  fi
+  m_distinctIps="$(sort -u "$IPS_FILE" 2>/dev/null | grep -c . || echo 0)"
 }
 
 # ── exit-IP probe (source of truth that the public IP moved) ────────────────
@@ -221,6 +324,7 @@ do_connect() {
   if [ $rc -ne 0 ] && ! is_connected_cli; then
     write_state false error "" "" "" "" "" 0 "$(state_get lastRotate)" \
       "$(printf '%s\n' "$out" | grep -i error | head -n1 | cut -c1-180)"
+    load_metrics; m_failures=$(( m_failures + 1 )); save_metrics
     echo "protonvpn-rotate: connect failed" >&2
     printf '%s\n' "$out" >&2
     return 1
@@ -238,6 +342,23 @@ do_connect() {
   IFS=$'\t' read -r ip cc city org <<<"${probe:-}"
 
   write_state true idle "$server" "$ip" "$cc" "$city" "$org" "$since" "$now" ""
+
+  # ── metrics: every successful connect feeds the distinct-IP set; a rotate
+  # also bumps the rotation counters and the "actually moved" tally. ──────────
+  load_metrics
+  record_exit_ip "$ip"
+  if [ "$rotating" = "true" ]; then
+    local today; today="$(date +%F)"
+    if [ "$m_todayDate" != "$today" ]; then m_todayDate="$today"; m_rotationsToday=0; fi
+    m_rotations=$(( m_rotations + 1 ))
+    m_rotationsToday=$(( m_rotationsToday + 1 ))
+    if [ -n "$ip" ] && [ -n "$prev_ip" ] && [ "$ip" != "$prev_ip" ]; then
+      m_ipChangedCount=$(( m_ipChangedCount + 1 ))
+    fi
+  fi
+  # refresh the volatile bits too so the panel isn't stale until the next tick
+  local rt; rt="$(iface_bytes)" && IFS=$'\t' read -r m_rxBytes m_txBytes <<<"$rt" && m_bytesAt="$now"
+  save_metrics
 
   if [ -n "$ip" ] && [ -n "$prev_ip" ] && [ "$ip" = "$prev_ip" ]; then
     log "warning: exit IP unchanged after rotate ($ip)"
@@ -265,6 +386,33 @@ do_status() {
     local e; e="$(state_get error)"
     echo "disconnected${e:+  error=$e}"
   fi
+}
+
+# Refresh the volatile metrics (server load, protocol, exit latency, tunnel
+# byte counters). Counters (rotations, distinctIps, failures) are untouched
+# here — they only move on connect/rotate. The widget calls this on a short
+# timer while connected; it's a no-op-ish write while disconnected.
+do_metrics() {
+  load_metrics
+  if is_connected_cli; then
+    local txt; txt="$(cli_status_raw)"
+    local ld pr
+    ld="$(printf '%s\n' "$txt" | sed -n 's/.*[Ll]oad:[[:space:]]*\([0-9]\+\).*/\1/p' | head -n1)"
+    pr="$(printf '%s\n' "$txt" | sed -n 's/.*[Pp]rotocol:[[:space:]]*\([A-Za-z0-9_+-]\+\).*/\1/p' | head -n1)"
+    [ -n "$ld" ] && m_load="$ld"
+    [ -n "$pr" ] && m_protocol="$pr"
+    local now; now="$(date +%s)"
+    local rt; rt="$(iface_bytes)" && IFS=$'\t' read -r m_rxBytes m_txBytes <<<"$rt" && m_bytesAt="$now"
+    # Latency involves an actual probe (ping / TLS connect) — only re-measure
+    # every ~25s even if the widget polls faster.
+    if [ $(( now - m_latencyAt )) -ge 25 ]; then
+      local lat; lat="$(measure_latency "$(state_get exitIp)")" && [ -n "$lat" ] && { m_latencyMs="$lat"; m_latencyAt="$now"; }
+    fi
+  else
+    m_load=0; m_latencyMs=0
+  fi
+  save_metrics
+  echo "load=${m_load}% proto=${m_protocol:-?} rx=${m_rxBytes} tx=${m_txBytes} lat=${m_latencyMs}ms rotations=${m_rotations} ips=${m_distinctIps} fail=${m_failures}"
 }
 
 do_probe() {
@@ -398,12 +546,13 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     refresh|reconcile)     do_refresh ;;
     status)                shift; do_status "${1:-}" ;;
     probe)                 do_probe ;;
+    metrics)               do_metrics ;;
     killswitch)            shift; do_killswitch "${1:-}" ;;
     ""|-h|--help|help)
       sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
       echo "protonvpn-rotate: unknown command '$1'" >&2
-      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | killswitch on|off|sync" >&2
+      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | metrics | killswitch on|off|sync" >&2
       exit 2 ;;
   esac
 fi
