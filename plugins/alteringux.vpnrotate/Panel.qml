@@ -213,8 +213,8 @@ Panel {
           activeFocusOnTab: false
           label: "Kill switch"
           description: root.cfg.killSwitch
-            ? "Traffic is blocked during the reconnect gap (no leak, brief offline)"
-            : "Traffic uses your real IP during the reconnect gap"
+            ? "Internet is blocked if the tunnel drops or a reconnect fails — no real-IP leak, brief offline until it recovers"
+            : "If the tunnel drops, traffic falls back to your real IP"
           checked: root.cfg.killSwitch
           foreground: root.barForeground
           onClicked: if (root.hostWidget) root.hostWidget.toggleKillSwitch()

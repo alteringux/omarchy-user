@@ -12,7 +12,7 @@
 #   protonvpn-rotate refresh          # reconcile the status file with `protonvpn status`
 #   protonvpn-rotate status [--json]  # print cached status (--json for the raw file)
 #   protonvpn-rotate probe            # re-check the exit IP, update status
-#   protonvpn-rotate killswitch on|off
+#   protonvpn-rotate killswitch on|off|sync   # sync = match CLI to widget config
 #
 # Exit IP is verified through the tunnel after every connect/rotate, so the
 # status file is proof the public IP actually moved, not just that the CLI
@@ -44,14 +44,46 @@ cli_killswitch() {                                   # $1 = on|off
     *)  "$CLI_BIN" config set kill-switch off 2>&1 | strip_ansi ;;
   esac
 }
+# proton-vpn-cli 1.0.3 prints the current kill-switch in `config list` as
+# "kill-switch   standard" / "kill-switch   off". Echoes standard|off (|"" on error).
+cli_killswitch_current() {
+  "$CLI_BIN" config list 2>/dev/null | strip_ansi \
+    | sed -n 's/^[[:space:]]*kill-switch[[:space:]]\+\([A-Za-z]\+\).*/\1/p' | head -n1
+}
+
+# Connect with a few retries. proton's FREE pool intermittently rejects a
+# reconnect with `rc=1 :: Connection failed` — a plain retry a minute later
+# almost always succeeds (see vpnrotate.log history). Without this the tunnel
+# just stays down until the user notices. Echoes the last CLI output, returns
+# 0 as soon as the CLI reports connected.
+cli_connect_retry() {
+  local tries="${1:-3}" gap="${2:-4}" out rc i
+  for (( i = 1; i <= tries; i++ )); do
+    out="$(cli_connect_random)"; rc=$?
+    if [ $rc -eq 0 ] || is_connected_cli; then
+      printf '%s\n' "$out"; return 0
+    fi
+    log "connect attempt $i/$tries failed rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    [ "$i" -lt "$tries" ] && sleep "$gap"
+  done
+  printf '%s\n' "$out"; return 1
+}
 
 # ── paths ──────────────────────────────────────────────────────────────────
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE_FILE="$STATE_DIR/vpnrotate.json"
+CONFIG_FILE="$STATE_DIR/vpnrotate-config.json"   # widget-owned policy (read-only here)
 LOG_FILE="$STATE_DIR/vpnrotate.log"
 mkdir -p "$STATE_DIR"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE" 2>/dev/null; }
+
+# Desired kill-switch state from the widget's config file. Echoes on|off
+# (defaults off when the file is missing / unreadable / malformed).
+desired_killswitch() {
+  [ -f "$CONFIG_FILE" ] || { echo off; return; }
+  grep -q '"killSwitch"[[:space:]]*:[[:space:]]*true' "$CONFIG_FILE" && echo on || echo off
+}
 
 # ── status file helpers ────────────────────────────────────────────────────
 # Fields: connected, action, server, exitIp, country, city, org,
@@ -170,15 +202,20 @@ do_connect() {
   set_action "$( [ "$rotating" = true ] && echo rotating || echo connecting )"
   log "$([ "$rotating" = true ] && echo rotate || echo connect): calling CLI"
 
-  # On free tier there's no server picker, so force a fresh pick by dropping
-  # the tunnel first when rotating. (Often still the same server if it's the
-  # least loaded — hence the exit-IP check below.)
-  if [ "$rotating" = "true" ]; then
-    cli_disconnect >/dev/null 2>&1
-    sleep 1
+  # Re-assert the kill switch while we're allowed to (proton-vpn-cli 1.0.3
+  # rejects a kill-switch change while connected). Safe here: a fresh connect
+  # starts disconnected, and even a rotate is about to re-handshake.
+  if ! is_connected_cli && [ "$(desired_killswitch)" = on ] && [ "$(cli_killswitch_current)" != standard ]; then
+    log "connect: asserting kill switch (was $(cli_killswitch_current))"
+    cli_killswitch on >/dev/null 2>&1
   fi
 
-  out="$(cli_connect_random)"; local rc=$?
+  # Rotate reconnects *on top* of the live tunnel — no disconnect-first. On
+  # proton FREE `connect` re-handshakes in place (~6s), so a failed rotate
+  # leaves the old server up instead of dropping the user offline. Free tier
+  # has no server picker anyway, so the pre-disconnect never bought much
+  # diversity (the exit-IP check below is the real proof the IP moved).
+  out="$(cli_connect_retry)"; local rc=$?
   log "CLI connect rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
 
   if [ $rc -ne 0 ] && ! is_connected_cli; then
@@ -261,8 +298,10 @@ do_refresh() {
   # Don't stomp a transition this script is in the middle of.
   case "$file_action" in
     connecting|rotating|disconnecting)
+      # connect now retries up to 3× with backoff, so a transition can legitimately
+      # run ~30s before the status file catches up — don't stomp it before then.
       local age; age=$(( $(date +%s) - $(state_get updated 2>/dev/null || echo 0) ))
-      [ "$age" -lt 25 ] && { echo "refresh: skipped (mid-$file_action)"; return 0; }
+      [ "$age" -lt 45 ] && { echo "refresh: skipped (mid-$file_action)"; return 0; }
       ;;
   esac
 
@@ -300,14 +339,52 @@ do_refresh() {
   echo "refresh: synced to $server  exit ${ip:-?}"
 }
 
+# proton-vpn-cli 1.0.3 refuses `config set kill-switch` while a tunnel is up
+# ("Disconnect before changing Kill Switch"), so applying the setting means:
+# drop the tunnel → set → bring it back if it was up. `sync` reconciles the
+# CLI's actual setting to the widget's config flag and is a no-op when they
+# already match — the widget calls it on every shell start.
 do_killswitch() {
-  case "${1:-}" in
+  local want="${1:-}"
+  case "$want" in
     on|off) : ;;
-    *) echo "usage: protonvpn-rotate killswitch on|off" >&2; return 2 ;;
+    sync)
+      want="$(desired_killswitch)"
+      log "killswitch sync: desired=$want current=$(cli_killswitch_current)"
+      ;;
+    *) echo "usage: protonvpn-rotate killswitch on|off|sync" >&2; return 2 ;;
   esac
-  local out; out="$(cli_killswitch "$1")"; local rc=$?
-  log "CLI killswitch $1 rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
-  [ $rc -eq 0 ] && echo "kill switch $1" || { echo "kill switch $1 failed (CLI may not support it on this version)" >&2; return 1; }
+
+  local target cur
+  target="$( [ "$want" = on ] && echo standard || echo off )"
+  cur="$(cli_killswitch_current)"
+  if [ "$cur" = "$target" ]; then
+    echo "kill switch already $want"
+    return 0
+  fi
+
+  local was_connected=false
+  if is_connected_cli; then
+    was_connected=true
+    log "killswitch $want: disconnecting to change setting"
+    cli_disconnect >/dev/null 2>&1
+    sleep 1
+  fi
+
+  local out; out="$(cli_killswitch "$want")"; local rc=$?
+  log "CLI killswitch $want rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+
+  if [ "$was_connected" = true ]; then
+    log "killswitch $want: reconnecting"
+    do_connect false >/dev/null 2>&1 || true
+  fi
+
+  if [ $rc -eq 0 ] && [ "$(cli_killswitch_current)" = "$target" ]; then
+    echo "kill switch $want"
+  else
+    echo "kill switch $want failed (CLI may not support it on this version)" >&2
+    return 1
+  fi
 }
 
 # ── dispatch ───────────────────────────────────────────────────────────────
@@ -326,7 +403,7 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
       sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
       echo "protonvpn-rotate: unknown command '$1'" >&2
-      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | killswitch on|off" >&2
+      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | killswitch on|off|sync" >&2
       exit 2 ;;
   esac
 fi

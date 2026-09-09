@@ -36,6 +36,18 @@ BarWidget {
   // 1 s tick trigger a second rotate on top of the first.
   property int lastAutoAt: 0
 
+  // "I want a tunnel up" intent, separate from whether one is up right now.
+  // Set when the user connects (or the shell restarts while connected, or the
+  // kill switch is armed); cleared only when the user disconnects. The
+  // watchdog below uses it to auto-reconnect a tunnel that dropped on its own
+  // — the "Proton turned itself off after a while" failure, which was a
+  // rotate whose reconnect got rejected with nothing retrying it.
+  property bool keepUp: false
+  // Seeded to "now" so the watchdog holds off for its first debounce window
+  // after load — lets the startup state read and the kill-switch sync settle
+  // before it considers reconnecting.
+  property int lastKeepUpAt: Math.floor(Date.now() / 1000)
+
   readonly property var cfg: configStore.value || Model.defaultConfig()
 
   readonly property string effectiveAction: root.pendingAction !== "" ? root.pendingAction : root.st.action
@@ -99,6 +111,11 @@ BarWidget {
       // The file has caught up with (or overtaken) the optimistic guess.
       if (root.pendingAction !== "" && root.st.action === root.pendingAction)
         root.pendingAction = ""
+      // Observed a live tunnel we didn't just tear down → adopt "keep it up"
+      // intent, so a later unexpected drop gets auto-reconnected. A shell
+      // restart while connected lands here too.
+      if (root.st.connected && root.pendingAction !== "disconnecting")
+        root.keepUp = true
     })
   }
 
@@ -125,9 +142,9 @@ BarWidget {
     })
   }
 
-  function runConnect() { root.runVerb("connect", "connecting") }
+  function runConnect() { root.keepUp = true; root.runVerb("connect", "connecting") }
   function runRotate() { root.runVerb("rotate", "rotating") }
-  function runDisconnect() { root.runVerb("disconnect", "disconnecting") }
+  function runDisconnect() { root.keepUp = false; root.runVerb("disconnect", "disconnecting") }
 
   // ── reconcile with ground truth ────────────────────────────────────────
   // The status file is only written by this widget's own verbs, so anything
@@ -164,6 +181,7 @@ BarWidget {
     running: true
     onTriggered: {
       root.nowSec = Math.floor(Date.now() / 1000)
+      root.evaluateWatchdog()
       root.evaluateAutoRotate()
     }
   }
@@ -176,6 +194,22 @@ BarWidget {
       if (root.nowSec - root.lastAutoAt < 30) return   // debounce a slow script
       root.lastAutoAt = root.nowSec
       root.runRotate()
+    })
+  }
+
+  // Keep-up watchdog: the user wants a tunnel (keepUp, or the kill switch is
+  // armed) but the status file says there isn't one and nothing is in flight.
+  // Reconnect. 90 s debounce so a genuinely unreachable Proton free pool
+  // isn't hammered, and so the reconnect + its own retries get time to land.
+  function evaluateWatchdog() {
+    guard.run("evaluateWatchdog", function () {
+      if (!(root.keepUp || root.cfg.killSwitch)) return
+      if (root.st.connected || root.busy) return
+      if (killSwitchProc.running || killSwitchSyncProc.running || reconcileProc.running) return
+      if (root.effectiveAction === "disconnecting") return   // don't fight a user disconnect
+      if (root.nowSec - root.lastKeepUpAt < 90) return
+      root.lastKeepUpAt = root.nowSec
+      root.runConnect()
     })
   }
 
@@ -227,9 +261,24 @@ BarWidget {
   }
   function toggleKillSwitch() { root.setKillSwitch(!root.cfg.killSwitch) }
 
-  Component.onCompleted: {
-    if (root.cfg.killSwitch) root.runKillSwitch(true)
+  // Startup reconciliation. The old code ran `killswitch on` here, but
+  // proton-vpn-cli 1.0.3 rejects a kill-switch change while connected — which
+  // is exactly the state at shell start — so it always failed silently and
+  // the tunnel ran with the kill switch OFF while the panel showed it ON.
+  // `killswitch sync` reads the config flag, does the disconnect→set→reconnect
+  // dance only if the CLI's real setting differs, and is a no-op otherwise.
+  Process {
+    id: killSwitchSyncProc
+    command: [root.scriptPath, "killswitch", "sync"]
+    running: false
+    onExited: function (code) {
+      if (code !== 0)
+        root.killSwitchError = "kill switch sync failed — check protonvpn-cli"
+      stateStore.reload()
+    }
   }
+
+  Component.onCompleted: killSwitchSyncProc.running = true
 
   // ── IPC (read-only status + the same verbs the panel exposes) ───────────
   IpcHandler {
