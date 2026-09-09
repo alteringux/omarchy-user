@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""omarchy-nanogpt-usage -- collect NanoGPT usage for the alteringux.nanogpt widget.
+
+Fetches two keyless-per-request endpoints (Bearer key only) and folds them into
+one state file the QML side (Model.js / Panel.qml) reads:
+
+    GET https://nano-gpt.com/api/v1/usage
+        per-day and per-model token / request / cost rollups for this API key.
+    GET https://nano-gpt.com/api/subscription/v1/usage
+        the flat-subscription weekly input-token quota, reset time, routing mode.
+
+Writes ~/.local/state/omarchy/nanogpt-usage.json atomically. On any failure it
+leaves the previous file in place and exits non-zero quietly, so the widget
+keeps showing the last-known values.
+
+API key resolution (first hit wins):
+    $NANOGPT_API_KEY
+    ~/.config/nanogpt/key          (single line)
+    NANOGPT_API_KEY=... in ~/.hermes/.env
+
+Usage: omarchy-nanogpt-usage        (no args)
+Exit:  0 ok | 3 no API key | 4 fetch/parse failed
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+import tempfile
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE = "https://nano-gpt.com"
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / "omarchy"
+STATE_FILE = STATE_DIR / "nanogpt-usage.json"
+TIMEOUT = 12
+WEEK_DAYS = 7
+
+
+def eprint(*a):
+    print(*a, file=sys.stderr)
+
+
+def resolve_key() -> str:
+    k = (os.environ.get("NANOGPT_API_KEY") or "").strip()
+    if k:
+        return k
+    keyfile = Path.home() / ".config/nanogpt/key"
+    try:
+        k = keyfile.read_text().strip().splitlines()[0].strip()
+        if k:
+            return k
+    except (OSError, IndexError):
+        pass
+    envfile = Path.home() / ".hermes/.env"
+    try:
+        for line in envfile.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("NANOGPT_API_KEY=") and not line.startswith("#"):
+                return line.split("=", 1)[1].strip().strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def get_json(path: str, key: str) -> dict:
+    req = urllib.request.Request(
+        BASE + path,
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json",
+            "User-Agent": "omarchy-nanogpt-usage",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def num(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def inum(v) -> int:
+    return int(num(v))
+
+
+def day_row(d: dict) -> dict:
+    return {
+        "date": d.get("date"),
+        "totalTokens": inum(d.get("totalTokens")),
+        "prompts": inum(d.get("requests")),
+        "inputTokens": inum(d.get("inputTokens")),
+        "outputTokens": inum(d.get("outputTokens")),
+        "cacheRead": inum(d.get("cacheReadInputTokens")),
+        "estimatedCost": round(num(d.get("netCostUsd")), 6),
+    }
+
+
+def build_state(usage: dict, sub: dict) -> dict:
+    now = datetime.now(timezone.utc)
+    today_str = now.strftime("%Y-%m-%d")
+
+    by_day = sorted(usage.get("byDay") or [], key=lambda r: r.get("date") or "")
+    by_model = usage.get("byModel") or []
+    by_day_model = usage.get("byDayModel") or []
+    totals = usage.get("totals") or {}
+
+    # ---- week: last WEEK_DAYS calendar days, newest last (Panel renders top→down)
+    week = [
+        {"date": r["date"], "totalTokens": day_row(r)["totalTokens"],
+         "estimatedCost": day_row(r)["estimatedCost"]}
+        for r in by_day[-WEEK_DAYS:]
+    ]
+
+    # ---- today
+    today_src = next((r for r in by_day if r.get("date") == today_str), None)
+    today = day_row(today_src) if today_src else {
+        "date": today_str, "totalTokens": 0, "prompts": 0,
+        "inputTokens": 0, "outputTokens": 0, "cacheRead": 0, "estimatedCost": 0.0,
+    }
+
+    # ---- per-model, with a recentDays trail from byDayModel
+    days_for_model: dict[str, list] = {}
+    for r in sorted(by_day_model, key=lambda r: r.get("date") or ""):
+        m = r.get("model") or "?"
+        days_for_model.setdefault(m, []).append({
+            "date": r.get("date"),
+            "totalTokens": inum(r.get("totalTokens")),
+            "estimatedCost": round(num(r.get("netCostUsd")), 6),
+        })
+
+    models = []
+    for m in sorted(by_model, key=lambda r: num(r.get("totalTokens")), reverse=True):
+        name = m.get("model") or "?"
+        models.append({
+            "id": name,
+            "total": inum(m.get("totalTokens")),
+            "cost": round(num(m.get("netCostUsd")), 6),
+            "messages": inum(m.get("requests")),
+            "sessions": inum(m.get("requests")),
+            "input": inum(m.get("inputTokens")),
+            "output": inum(m.get("outputTokens")),
+            "reasoning": inum(m.get("reasoningTokens")),
+            "cacheRead": inum(m.get("cacheReadInputTokens")),
+            "cacheWrite": inum(m.get("cacheCreationInputTokens")),
+            "modelClass": "",
+            "inputPrice": 0,
+            "outputPrice": 0,
+            "recentDays": days_for_model.get(name, [])[-WEEK_DAYS:],
+        })
+
+    all_time = {
+        "totalTokens": inum(totals.get("totalTokens")),
+        "totalPrompts": inum(totals.get("requests")),
+        "estimatedCost": round(num(totals.get("netCostUsd")), 6),
+        "activeDays": len(by_day),
+        "firstUse": usage.get("from") or "",
+        "lastUse": usage.get("to") or "",
+    }
+
+    token_composition = {
+        "input": inum(totals.get("inputTokens")),
+        "output": inum(totals.get("outputTokens")),
+        "reasoning": inum(totals.get("reasoningTokens")),
+        "cacheRead": inum(totals.get("cacheReadInputTokens")),
+        "cacheWrite": inum(totals.get("cacheCreationInputTokens")),
+    }
+
+    # ---- subscription / quota
+    weekly = sub.get("weeklyInputTokens") or {}
+    limits = sub.get("limits") or {}
+    routing = sub.get("routing") or {}
+    daily_img = sub.get("dailyImages") or {}
+    sub_active = bool(sub.get("active"))
+    plan = {
+        "name": "NanoGPT subscription" if sub_active else "NanoGPT pay-as-you-go",
+        "active": sub_active,
+        "state": sub.get("state") or "",
+        "routingMode": routing.get("recommendedMode") or "",
+        "billingMode": routing.get("billingMode") or "",
+        "weeklyLimit": inum(limits.get("weeklyInputTokens") or weekly.get("used", 0) + weekly.get("remaining", 0)),
+        "weeklyUsed": inum(weekly.get("used")),
+        "weeklyRemaining": inum(weekly.get("remaining")),
+        "percentUsed": round(num(weekly.get("percentUsed")) * 100, 3),
+        "resetAt": inum(weekly.get("resetAt")),
+        "periodEnd": (sub.get("period") or {}).get("currentPeriodEnd") or "",
+        "dailyImagesUsed": inum(daily_img.get("used")),
+        "dailyImagesLimit": inum(limits.get("dailyImages")),
+        "allowOverage": bool(sub.get("allowOverage")),
+    }
+
+    return {
+        "schemaVersion": 1,
+        "ready": True,
+        "updatedAt": now.isoformat(timespec="seconds"),
+        "plan": plan,
+        "today": today,
+        "week": week,
+        "allTime": all_time,
+        "models": models,
+        "tokenComposition": token_composition,
+    }
+
+
+def main() -> int:
+    key = resolve_key()
+    if not key:
+        eprint("omarchy-nanogpt-usage: no API key (env / ~/.config/nanogpt/key / ~/.hermes/.env)")
+        return 3
+
+    try:
+        usage = get_json("/api/v1/usage", key)
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        eprint(f"omarchy-nanogpt-usage: /api/v1/usage failed: {e}")
+        return 4
+
+    # Subscription endpoint is optional — a pay-as-you-go key 404s / 403s here.
+    sub: dict = {}
+    try:
+        sub = get_json("/api/subscription/v1/usage", key)
+    except (urllib.error.URLError, TimeoutError, ValueError, OSError) as e:
+        eprint(f"omarchy-nanogpt-usage: subscription usage unavailable ({e}); continuing")
+
+    try:
+        state = build_state(usage, sub)
+    except Exception as e:  # never let a shape surprise kill the widget
+        eprint(f"omarchy-nanogpt-usage: could not shape state: {e}")
+        return 4
+
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".nanogpt-usage.", suffix=".json")
+        with os.fdopen(fd, "w") as fh:
+            json.dump(state, fh, separators=(",", ":"))
+        os.replace(tmp, STATE_FILE)
+    except OSError as e:
+        eprint(f"omarchy-nanogpt-usage: write failed: {e}")
+        return 4
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

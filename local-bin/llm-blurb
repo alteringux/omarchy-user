@@ -1,16 +1,21 @@
 #!/usr/bin/env bash
-# llm-blurb -- one-shot text generation via the Claude CLI (`claude -p`).
+# llm-blurb -- one-shot text generation for the small Omarchy helpers.
 #
-# Drop-in stand-in for a raw model call in the small Omarchy "self-improving"
-# helpers (dictionary overview / daily suggestion, stocks commentary, dashboard
-# digest, motivator pool growth, morning briefing, weekly recap). Prints the
-# model's reply on stdout; on ANY failure it prints a one-line reason to stderr
-# and exits non-zero *quietly* so callers keep whatever fallback they already
-# have.
+# Drop-in stand-in for a raw model call in the "self-improving" helpers
+# (dictionary overview / daily suggestion, stocks commentary, dashboard digest,
+# motivator pool growth, morning briefing, weekly recap). Prints the model's
+# reply on stdout; on ANY failure it prints a one-line reason to stderr and
+# exits non-zero *quietly* so callers keep whatever fallback they already have.
 #
-# History: this used to POST to a hosted inference API to keep these off the Claude
-# subscription. That backend has been removed, so the same interface now
-# shells out to `claude -p`. Callers are unchanged.
+# History: this used to POST to a hosted inference API to keep these off the
+# Claude subscription. That was swapped for `claude -p`. It now prefers the
+# `hermes` CLI (one-shot `-z` mode, backed by NanoGPT) so the volume of tiny
+# blurb calls stays off the Claude subscription again, and falls back to
+# `claude -p` when hermes is unavailable or errors. Callers are unchanged.
+#
+# Backend selection:
+#   LLM_BACKEND / LLM_BLURB_BACKEND = auto (default) | hermes | claude
+#   LLM_HERMES_MODEL               = a NanoGPT model id to force (else hermes default)
 #
 # Usage:
 #   llm-blurb [options] "PROMPT"        # prompt as args, or on stdin if none
@@ -18,14 +23,15 @@
 # Options (kept for caller compatibility):
 #   --json            ask the model for one JSON object; stdout is that object
 #   --system TEXT     override the system message
-#   --model NAME      sonnet | haiku | opus, or a legacy hosted-model id which is
-#                     mapped by family (anything unrecognised -> claude default)
+#   --model NAME      sonnet | haiku | opus, or a legacy hosted-model id. Only
+#                     consulted on the claude fallback path (mapped by family);
+#                     the hermes path uses LLM_HERMES_MODEL or the hermes default.
 #   --max-tokens N    soft length hint appended to the system message
-#   --temp N          accepted and ignored (claude -p has no temperature knob)
-#   --timeout N       wall-clock cap in seconds for the claude call (default 45)
+#   --temp N          accepted and ignored (no temperature knob on either path)
+#   --timeout N       wall-clock cap in seconds per backend call (default 45)
 #
-# Exit codes: 0 ok | 2 bad args | 3 claude not found | 4 claude failed/timed out
-#             5 empty reply
+# Exit codes: 0 ok | 2 bad args | 3 no backend (hermes/claude) on PATH
+#             4 backend failed/timed out | 5 empty reply
 set -uo pipefail
 
 max_tokens=""
@@ -53,16 +59,26 @@ prompt="${*:-}"
 [[ -z "$prompt" ]] && prompt="$(cat)"
 [[ -z "${prompt// }" ]] && { echo "llm-blurb: empty prompt" >&2; exit 2; }
 
-command -v claude >/dev/null 2>&1 || { echo "llm-blurb: claude CLI not on PATH" >&2; exit 3; }
+backend="${LLM_BLURB_BACKEND:-${LLM_BACKEND:-auto}}"
+have_hermes=0; command -v hermes >/dev/null 2>&1 && have_hermes=1
+have_claude=0; command -v claude >/dev/null 2>&1 && have_claude=1
 
-# Map a model hint to a claude alias. Legacy callers still pass hosted-model ids
-# such as Qwen/Qwen3-30B-A3B-Instruct-2507 -- fall through to the CLI default.
+case "$backend" in
+  hermes) have_hermes=1 ;;  # honour explicit request; call still fails loudly if absent
+  claude) have_hermes=0 ;;
+esac
+if ((!have_hermes && !have_claude)); then
+  echo "llm-blurb: neither hermes nor claude on PATH" >&2; exit 3
+fi
+
+# Map a model hint to a claude alias (claude fallback path only). Legacy callers
+# still pass hosted-model ids such as Qwen/Qwen3-30B-A3B-Instruct-2507 -- fall
+# through to the CLI default.
 model_args=()
 case "${model,,}" in
   *haiku*)  model_args=(--model haiku) ;;
   *opus*)   model_args=(--model opus) ;;
   *sonnet*) model_args=(--model sonnet) ;;
-  "")       : ;;
   *)        : ;;
 esac
 
@@ -75,18 +91,34 @@ if [[ -z "$system" ]]; then
 fi
 [[ -n "$max_tokens" ]] && system="$system Keep the reply to roughly ${max_tokens} tokens."
 
-raw="$(timeout -k 5 "$timeout" claude -p "$prompt" \
-        --system-prompt "$system" "${model_args[@]}" \
-        --output-format text </dev/null 2>/dev/null)"
-rc=$?
+# hermes -z has no --system flag; fold the system message into the prompt.
+gen_hermes() {
+  local m=() ; [[ -n "${LLM_HERMES_MODEL:-}" ]] && m=(-m "$LLM_HERMES_MODEL")
+  timeout -k 5 "$timeout" hermes -z "${system}"$'\n\n'"${prompt}" \
+    --safe-mode --ignore-rules "${m[@]}" </dev/null 2>/dev/null
+}
+gen_claude() {
+  timeout -k 5 "$timeout" claude -p "$prompt" \
+    --system-prompt "$system" "${model_args[@]}" \
+    --output-format text </dev/null 2>/dev/null
+}
+
+raw=""; rc=1; used=""
+if ((have_hermes)) && [[ "$backend" != claude ]]; then
+  raw="$(gen_hermes)"; rc=$?; used=hermes
+fi
+if ((rc != 0)) && [[ "$backend" != hermes ]] && ((have_claude)); then
+  raw="$(gen_claude)"; rc=$?; used=claude
+fi
+
 if ((rc != 0)); then
-  ((rc == 124)) && { echo "llm-blurb: claude timed out after ${timeout}s" >&2; exit 4; }
-  echo "llm-blurb: claude exited $rc" >&2
+  ((rc == 124)) && { echo "llm-blurb: ${used:-backend} timed out after ${timeout}s" >&2; exit 4; }
+  echo "llm-blurb: ${used:-backend} exited $rc" >&2
   exit 4
 fi
 
-# `claude -p` occasionally tacks on a "Next steps:" / "Sources:" trailer or a
-# leading "I'll ..." meta line. Strip both so callers get just the answer.
+# Backends occasionally tack on a "Next steps:" / "Sources:" trailer, a leading
+# "I'll ..." meta line, or wrap the whole answer in quotes. Strip all three.
 clean="$(printf '%s' "$raw" | python3 -c '
 import re, sys
 t = sys.stdin.read().strip()
@@ -95,6 +127,10 @@ lines = t.split("\n")
 while lines and re.match(r"^\s*(?:i.?ll |i will |let me |sure[,!. ]|here.?s )", lines[0], re.I):
     lines.pop(0)
 t = "\n".join(lines).strip()
+if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"" + chr(8220) + chr(39):
+    inner = t[1:-1]
+    if t[0] not in inner:
+        t = inner.strip()
 if not t:
     sys.exit(1)
 print(t)

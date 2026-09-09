@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""llm-agent -- a grounded one-shot answer via the Claude CLI (`claude -p`).
+"""llm-agent -- a grounded one-shot answer for the small Omarchy helpers.
 
 This used to run a client-side tool-calling loop against a hosted model with
-web_search backed by a local SearXNG. That backend has been removed. It now
-shells out to `claude -p`, which runs its own tool loop and its own web
-search, and reshapes the result into the same envelope callers already expect.
+web_search backed by a local SearXNG, then it shelled out to `claude -p`. It
+now prefers the `hermes` CLI (one-shot `-z` mode, backed by NanoGPT, with
+hermes' own web search) so the volume of these calls stays off the Claude
+subscription, and falls back to `claude -p` when hermes is unavailable or
+errors. Either way the result is reshaped into the same envelope callers
+already expect.
+
+Backend selection:
+    LLM_BACKEND / LLM_AGENT_BACKEND = auto (default) | hermes | claude
+    LLM_HERMES_MODEL               = a NanoGPT model id to force (else hermes default)
 
 Usage:
     llm-agent [options] "PROMPT"          # prompt in args, or on stdin if none
@@ -15,22 +22,24 @@ Options:
     --json-full          print {text, steps[], citations[], iters, model}
     --system TEXT        system message (default: a terse research operator)
     --no-search          forbid web search -- a plain one-shot completion
-    --model NAME         sonnet | haiku | opus, or a legacy id (mapped by family)
+    --model NAME         sonnet | haiku | opus, or a legacy id. Consulted only on
+                         the claude fallback path; the hermes path uses
+                         LLM_HERMES_MODEL or the hermes default.
     --max-iters N        upper bound on model<->tool round trips (default 6)
     --timeout N          wall-clock cap in seconds (default 120)
     --verbose            log progress to stderr
 
     --max-tokens / --temp / --results / --searxng-url / --rag-store are accepted
-    for caller compatibility and ignored (claude -p has no equivalent knob, and
-    the local SearXNG / flow-rag path is gone).
+    for caller compatibility and ignored.
 
-Exit codes: 0 ok | 2 bad args | 3 claude not found | 4 claude failed/timed out
-            5 empty/no final answer
+Exit codes: 0 ok | 2 bad args | 3 no backend (hermes/claude) on PATH
+            4 backend failed/timed out | 5 empty/no final answer
 """
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -39,6 +48,14 @@ import sys
 
 def eprint(*a):
     print(*a, file=sys.stderr)
+
+
+class BackendError(Exception):
+    """Raised by a backend runner; carries the process exit code to return."""
+
+    def __init__(self, msg: str, code: int = 4):
+        super().__init__(msg)
+        self.code = code
 
 
 def map_model(name: str):
@@ -79,6 +96,78 @@ def harvest_citations(text: str):
     return out
 
 
+def run_hermes(prompt: str, system: str, args) -> tuple[str, str, int]:
+    """One-shot via `hermes -z`. Returns (raw_text, model_id, iters)."""
+    sysmsg = system
+    argv = ["hermes", "-z", "", "--ignore-rules"]
+    if args.no_search:
+        sysmsg += " Do not use any tools or web search; answer directly from your own knowledge."
+        argv.append("--safe-mode")
+    model = os.environ.get("LLM_HERMES_MODEL", "").strip()
+    if model:
+        argv += ["-m", model]
+    argv[2] = f"{sysmsg}\n\n{prompt}"
+
+    if args.verbose:
+        eprint(f"llm-agent: hermes -z (search={'off' if args.no_search else 'on'}, "
+               f"model={model or 'default'}, timeout={args.timeout}s)")
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=args.timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise BackendError("hermes not on PATH", code=3)
+    except subprocess.TimeoutExpired:
+        raise BackendError(f"hermes timed out after {args.timeout}s")
+    if proc.returncode != 0:
+        raise BackendError(f"hermes exited {proc.returncode}: {proc.stderr.strip()[:400]}")
+    raw = proc.stdout.strip()
+    if not raw:
+        raise BackendError("hermes returned an empty answer", code=5)
+    return raw, (model or "hermes/default"), 1
+
+
+def run_claude(prompt: str, system: str, args) -> tuple[str, str, int]:
+    """One-shot via `claude -p --output-format json`. Returns (raw_text, model_id, iters)."""
+    argv = [
+        "claude", "-p", prompt,
+        "--system-prompt", system,
+        "--output-format", "json",
+        "--max-turns", str(max(1, args.max_iters)),
+    ]
+    argv += map_model(args.model)
+    if not args.no_search:
+        argv += ["--allowedTools", "WebSearch", "WebFetch"]
+    else:
+        argv += ["--disallowedTools", "WebSearch", "WebFetch"]
+
+    if args.verbose:
+        eprint(f"llm-agent: claude -p (search={'off' if args.no_search else 'on'}, "
+               f"max_turns={args.max_iters}, timeout={args.timeout}s)")
+    try:
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, timeout=args.timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        raise BackendError("claude not on PATH", code=3)
+    except subprocess.TimeoutExpired:
+        raise BackendError(f"claude timed out after {args.timeout}s")
+    if proc.returncode != 0:
+        raise BackendError(f"claude exited {proc.returncode}: {proc.stderr.strip()[:400]}")
+    try:
+        env = json.loads(proc.stdout.strip())
+    except ValueError:
+        raise BackendError(f"claude did not return JSON: {proc.stdout[:300]}", code=5)
+    if env.get("is_error") or env.get("subtype") not in (None, "success"):
+        eprint(f"llm-agent: claude reported {env.get('subtype') or 'an error'}")
+    raw = env.get("result") or ""
+    if not raw.strip():
+        raise BackendError("claude returned an empty final answer", code=5)
+    return raw, (env.get("model") or args.model or "claude"), int(env.get("num_turns") or 1)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("--json", action="store_true", dest="want_json")
@@ -110,8 +199,12 @@ def main() -> int:
         eprint("llm-agent: empty prompt")
         return 2
 
-    if not shutil.which("claude"):
-        eprint("llm-agent: claude CLI not on PATH")
+    backend = (os.environ.get("LLM_AGENT_BACKEND")
+               or os.environ.get("LLM_BACKEND") or "auto").strip().lower()
+    order = {"hermes": ["hermes"], "claude": ["claude"]}.get(backend, ["hermes", "claude"])
+    order = [b for b in order if shutil.which(b)]
+    if not order:
+        eprint("llm-agent: neither hermes nor claude on PATH")
         return 3
 
     system = args.system.strip() or (
@@ -124,53 +217,25 @@ def main() -> int:
     if args.want_json:
         system += " Your final message must be exactly one JSON object and nothing else."
 
-    argv = [
-        "claude", "-p", prompt,
-        "--system-prompt", system,
-        "--output-format", "json",
-        "--max-turns", str(max(1, args.max_iters)),
-    ]
-    argv += map_model(args.model)
-    if not args.no_search:
-        argv += ["--allowedTools", "WebSearch", "WebFetch"]
-    else:
-        argv += ["--disallowedTools", "WebSearch", "WebFetch"]
+    runners = {"hermes": run_hermes, "claude": run_claude}
+    raw_text = model_id = None
+    iters = 1
+    last = BackendError("no backend ran", code=4)
+    for name in order:
+        try:
+            raw_text, model_id, iters = runners[name](prompt, system, args)
+            break
+        except BackendError as e:
+            last = e
+            eprint(f"llm-agent: {e}")
+            continue
+    if raw_text is None:
+        return last.code
 
-    if args.verbose:
-        eprint(f"llm-agent: claude -p (search={'off' if args.no_search else 'on'}, "
-               f"max_turns={args.max_iters}, timeout={args.timeout}s)")
-
-    try:
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, timeout=args.timeout,
-            stdin=subprocess.DEVNULL,
-        )
-    except subprocess.TimeoutExpired:
-        eprint(f"llm-agent: claude timed out after {args.timeout}s")
-        return 4
-
-    if proc.returncode != 0:
-        eprint(f"llm-agent: claude exited {proc.returncode}: {proc.stderr.strip()[:400]}")
-        return 4
-
-    try:
-        env = json.loads(proc.stdout.strip())
-    except ValueError:
-        eprint(f"llm-agent: claude did not return JSON: {proc.stdout[:300]}")
-        return 5
-
-    if env.get("is_error") or env.get("subtype") not in (None, "success"):
-        eprint(f"llm-agent: claude reported {env.get('subtype') or 'an error'}")
-        # still fall through if there is usable text
-
-    raw_text = env.get("result") or ""
     text = clean_text(raw_text)
     if not text:
         eprint("llm-agent: model returned an empty final answer")
         return 5
-
-    iters = int(env.get("num_turns") or 1)
-    model_id = env.get("model") or args.model or "claude"
 
     if args.want_json:
         m = re.search(r"\{.*\}", text, re.S)
@@ -183,7 +248,7 @@ def main() -> int:
         citations = harvest_citations(raw_text)
         steps = [] if args.no_search else [
             {"iter": 1, "tool": "web_search", "ok": True,
-             "note": "claude -p ran its own search loop; per-query trace not exposed"}
+             "note": f"{model_id} ran its own search loop; per-query trace not exposed"}
         ]
         print(json.dumps(
             {"text": text, "steps": steps, "citations": citations,
