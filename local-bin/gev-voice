@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# gev-voice — push-to-talk voice control for God's Eye View, backed by Claude.
+#
+#   press once  -> start recording the mic (notification appears)
+#   press again -> stop, transcribe (whisper), run gev-agent, speak reply (piper)
+#
+# Bind a single Hyprland key to `gev-voice` and tap it twice per command.
+# `gev-voice cancel` aborts an in-progress recording without acting.
+#
+# Requires: pw-record, whisper-cli, gev-agent, piper-tts, notify-send.
+set -euo pipefail
+
+STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/gev-voice"
+mkdir -p "$STATE_DIR"
+WAV="$STATE_DIR/capture.wav"
+RECPID="$STATE_DIR/rec.pid"
+WHISPER_MODEL="${GEV_WHISPER_MODEL:-$HOME/.cache/whisper/ggml-base.en.bin}"
+VOICE_TAG=gev
+
+notify() { notify-send -a "God's Eye View" -t "${2:-4000}" "$1" "${3:-}" 2>/dev/null || true; }
+
+stop_recording() {
+  [[ -f "$RECPID" ]] || return 1
+  local pid; pid="$(cat "$RECPID")"
+  rm -f "$RECPID"
+  kill -INT "$pid" 2>/dev/null || true
+  for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+  kill -KILL "$pid" 2>/dev/null || true
+  return 0
+}
+
+case "${1:-toggle}" in
+  cancel)
+    if stop_recording; then notify "Voice command cancelled" 2000; else notify "Nothing recording" 1500; fi
+    rm -f "$WAV"; exit 0 ;;
+esac
+
+# --- toggle -------------------------------------------------------------------
+if [[ -f "$RECPID" ]] && kill -0 "$(cat "$RECPID" 2>/dev/null)" 2>/dev/null; then
+  # second press: stop + process
+  stop_recording
+  notify "Transcribing…" 2000
+  if [[ ! -s "$WAV" ]]; then notify "No audio captured" 2500; exit 1; fi
+
+  txt="$(whisper-cli -m "$WHISPER_MODEL" -f "$WAV" -nt -np -otxt -of "$STATE_DIR/capture" 2>/dev/null; cat "$STATE_DIR/capture.txt" 2>/dev/null | tr '\n' ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
+  rm -f "$WAV" "$STATE_DIR/capture.txt"
+  if [[ -z "${txt// }" || "$txt" == "[BLANK_AUDIO]" ]]; then notify "Didn't catch that" 2500; exit 1; fi
+  notify "Heard:" 3000 "$txt"
+
+  if reply="$(GEV_CDP_PORT="${GEV_CDP_PORT:-9333}" gev-agent "$txt" 2>"$STATE_DIR/agent.err")"; then
+    notify "God's Eye View" 5000 "$reply"
+    piper-tts --tag "$VOICE_TAG" "$reply" >/dev/null 2>&1 || true
+  else
+    err="$(tail -1 "$STATE_DIR/agent.err" 2>/dev/null)"
+    notify "Voice command failed" 4000 "${err:-see $STATE_DIR/agent.err}"
+    exit 1
+  fi
+  exit 0
+fi
+
+# first press: start recording
+: > "$WAV"
+pw-record --channels=1 --rate=16000 --format=s16 "$WAV" &
+echo $! > "$RECPID"
+notify "Listening… tap again to send" 60000
