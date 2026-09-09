@@ -106,7 +106,9 @@ Item {
         isLowBattery: hostWidget.isLowBattery,
         minutesIdleValue: hostWidget.minutesIdleValue,
         moodLabelValue: hostWidget.mood,
-        hourValue: hostWidget.hourValue
+        hourValue: hostWidget.hourValue,
+        monthValue: hostWidget.monthValue,
+        dayValue: hostWidget.dayValue
       }, Math.random() * 10000))
     }
     root._scheduleAmbient()
@@ -185,12 +187,16 @@ Item {
       } else if (unlocked.length > 0) {
         root.say("🏆 " + unlocked[0].name + " — " + unlocked[0].description, 7000)
         spawnParticles("sparkle")
+      } else if (Model.didLevelUp(prev, next)) {
+        root.say(Model.pickLevelUpLine(root.pet, Model.levelInfo(next).level), 7000)
+        spawnParticles("sparkle")
+        bounceAnim.restart()
       } else if ((next.totalPokes || 0) > (prev.totalPokes || 0)) {
         root.say(Model.pickPokeLine(root.pet, next, Math.random() * 10000))
         spawnParticles("heart")
         bounceAnim.restart()
       } else if ((next.totalFeeds || 0) > (prev.totalFeeds || 0)) {
-        root.say(Model.pickFeedLine(root.pet, Math.random() * 10000))
+        root.say(Model.pickFeedLine(root.pet, Math.random() * 10000, next))
         spawnParticles("food")
         bounceAnim.restart()
       } else if ((next.totalPlays || 0) > (prev.totalPlays || 0)) {
@@ -314,6 +320,54 @@ Item {
           opacity: 0.75,
           targetY: startY + (gallop ? 10 : 4)
         })
+      }
+
+      // A faint slipstream off the bristle end whenever a prop-carrying pet is
+      // awake, so the sloth reads as airborne even when hovering in place
+      // rather than mid-roam. Same particle machinery as spawnDust, aimed at
+      // the tail of the broom and drifting backward.
+      Timer {
+        id: flyTrailTimer
+        running: !!root.pet.prop && !root.liveState.asleep
+        repeat: true
+        interval: 540
+        onTriggered: {
+          var back = petContainer.facingLeft ? 1 : -1
+          var sx = hitBox.width / 2 + back * (20 + Math.random() * 8)
+          var sy = hitBox.height * 0.3 + (Math.random() * 12 - 6)
+          particleComponent.createObject(hitBox, {
+            text: Math.random() < 0.35 ? "💨" : "·",
+            "font.pixelSize": Style.space(11),
+            x: sx,
+            y: sy,
+            opacity: 0.45,
+            targetY: sy + 3
+          })
+        }
+      }
+
+      // Snore bubbles: while asleep, a 💤 (sometimes a small z) peels off
+      // above the head every couple of seconds and drifts up, fading out.
+      // Complements the static corner 💤 badge, which marks sleep at a
+      // glance; these make it feel alive. Pure decoration, no model change.
+      Timer {
+        id: snoreTimer
+        running: root.liveState.asleep
+        repeat: true
+        interval: 1400 + Math.random() * 800
+        onTriggered: {
+          interval = 1400 + Math.random() * 800
+          var sx = hitBox.width / 2 + (Math.random() * 10 - 5)
+          var sy = hitBox.height * 0.15
+          particleComponent.createObject(hitBox, {
+            text: Math.random() < 0.3 ? "z" : "💤",
+            "font.pixelSize": Style.space(10 + Math.random() * 5),
+            x: sx,
+            y: sy,
+            opacity: 0.8,
+            targetY: sy - (28 + Math.random() * 12)
+          })
+        }
       }
 
       Timer {
@@ -476,6 +530,87 @@ Item {
           }
           opacity: root.liveState.asleep ? 0.6 : 1.0
           Behavior on opacity { NumberAnimation { duration: 400 } }
+        }
+
+        // The sloth's broom, drawn from primitives rather than an emoji: the
+        // 🦥 glyph has a green branch baked in that a 🧹 overlay could never
+        // fully hide, so this opaque shape sits on the grip line and covers
+        // it, leaving the sloth holding only the broom. Handle to the left,
+        // straw head to the right; rides glyphText's bob and mirrors with
+        // facing exactly as the body does so it flips together on turns.
+        Item {
+          id: broomProp
+          visible: !!root.pet.prop
+          width: Style.space(66)
+          height: Style.space(24)
+          x: (hitBox.width - width) / 2 + hitBox.walkOffset
+          y: glyphText.y - glyphText.height * 0.11
+          z: 1
+          opacity: root.liveState.asleep ? 0.6 : 1.0
+          Behavior on opacity { NumberAnimation { duration: 400 } }
+          transform: [
+            Rotation {
+              origin.x: broomProp.width / 2
+              origin.y: broomProp.height / 2
+              angle: 9
+            },
+            Scale {
+              origin.x: broomProp.width / 2
+              origin.y: broomProp.height / 2
+              xScale: petContainer.facingLeft ? -1 : 1
+              Behavior on xScale { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
+            }
+          ]
+
+          // Deliberately thick and overhanging the left grip: this doubles as
+          // the mask that blankets the glyph's green branch. Its right end
+          // stops under the straw head, which covers the branch stub there.
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            x: -Style.space(3)
+            width: parent.width * 0.68 + Style.space(3)
+            height: Math.max(5, Style.space(6))
+            radius: height / 2
+            color: "#8a5a2c"
+          }
+          Rectangle {
+            anchors.verticalCenter: parent.verticalCenter
+            x: parent.width * 0.46
+            width: Math.max(3, Style.space(3.5))
+            height: parent.height * 0.44
+            radius: 2
+            color: "#7c3f36"
+          }
+          Canvas {
+            id: broomHead
+            anchors.verticalCenter: parent.verticalCenter
+            x: parent.width * 0.54
+            width: parent.width * 0.46
+            height: parent.height
+            Component.onCompleted: requestPaint()
+            onWidthChanged: requestPaint()
+            onPaint: {
+              var ctx = getContext("2d"); ctx.reset()
+              var w = width, h = height
+              ctx.fillStyle = "#d7a63e"
+              ctx.beginPath()
+              ctx.moveTo(0, h * 0.30)
+              ctx.lineTo(w * 0.97, h * 0.02)
+              ctx.lineTo(w * 0.97, h * 0.98)
+              ctx.lineTo(0, h * 0.70)
+              ctx.closePath()
+              ctx.fill()
+              ctx.strokeStyle = "rgba(0,0,0,0.22)"
+              ctx.lineWidth = 1
+              for (var i = 1; i < 6; i++) {
+                var t = i / 6
+                ctx.beginPath()
+                ctx.moveTo(w * 0.1, h * (0.32 + t * 0.38))
+                ctx.lineTo(w * 0.95, h * (0.05 + t * 0.9))
+                ctx.stroke()
+              }
+            }
+          }
         }
 
         // Equipped accessory rides along with the bob/walk offsets so it

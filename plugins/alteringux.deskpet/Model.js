@@ -16,6 +16,13 @@ var MIN = 60000
 var POKE_STREAK_WINDOW_MS = 4000
 var POKE_STREAK_ANNOY = 6
 
+// A feed within FEED_STREAK_WINDOW_MS of the last one continues the combo;
+// otherwise it resets to 1. Feeding isn't rapid-click like poking, so the
+// window is longer -- this catches "mashed the Feed button a few times in a
+// row", not "fed it twice this session". See feed()/isFeedCombo().
+var FEED_STREAK_WINDOW_MS = 10000
+var FEED_STREAK_COMBO = 3
+
 // The "ages up a notch" milestones: the 50-pat mark (the same one the
 // pat_pat_pat achievement rides on) and, ten times past it, 500 pats.
 // See ageUp().
@@ -200,6 +207,9 @@ var PETS = [
   {
     id: "sloth", name: "Sloth", glyph: "🦥", tone: "positive",
     tagline: "Slow is smooth. Smooth is done.",
+    // Held diagonally across the body in the overlay, wizard-on-a-broom style.
+    // `prop` is intrinsic pet flavour like `glyph`; any pet may carry one.
+    prop: "🧹",
     voice: function (s) { return s + " *very slowly*"; },
     greet: ["*appears to have been here the whole time.* Hello. You moved so fast.", "*one long, slow yawn.* Welcome back."],
     poke: ["*processes the pat... eventually.*", "*nods, on a delay.* Good pat."],
@@ -346,6 +356,24 @@ function levelInfo(state) {
   return { level: level, title: title, total: total, nextAt: level * LEVEL_INTERACTIONS_PER_LEVEL }
 }
 
+// A level-up is the derived level crossing a threshold between two persisted
+// states. The counters only ever grow, so a higher level on the new state is
+// the whole test.
+function didLevelUp(prevState, nextState) {
+  return levelInfo(nextState).level > levelInfo(prevState).level
+}
+
+// The special one-liner fired the moment the pet levels up -- fired from
+// Pet.qml's state handler, like the age-up lines, so it isn't competing with
+// the poke/feed/play reaction that crossed the threshold.
+var LEVEL_UP_LINE = "Level {level}! I'm a {title} now -- all thanks to you."
+function pickLevelUpLine(pet, level) {
+  var lv = Math.max(1, level || 1)
+  var title = LEVEL_TITLES[Math.min(lv - 1, LEVEL_TITLES.length - 1)]
+  var line = LEVEL_UP_LINE.replace("{level}", lv).replace("{title}", title)
+  return pet.voice(line)
+}
+
 // ── wardrobe ─────────────────────────────────────────────────────────────────
 // Cosmetic only; each accessory unlocks alongside a specific achievement.
 var ACCESSORIES = [
@@ -425,6 +453,8 @@ function defaultState() {
     lastInteractionMs: now,
     pokeStreak: 0,
     pokeStreakAt: 0,
+    feedStreak: 0,
+    feedStreakAt: 0,
     totalPokes: 0,
     totalFeeds: 0,
     totalPlays: 0,
@@ -458,10 +488,10 @@ function parseState(raw) {
   ;["happiness", "fullness", "energy"].forEach(function (k) {
     if (typeof obj[k] === "number" && isFinite(obj[k])) out[k] = clamp(obj[k], 0, 100)
   })
-  ;["lastTickMs", "lastFedMs", "lastPlayedMs", "lastInteractionMs", "pokeStreakAt", "bornMs"].forEach(function (k) {
+  ;["lastTickMs", "lastFedMs", "lastPlayedMs", "lastInteractionMs", "pokeStreakAt", "feedStreakAt", "bornMs"].forEach(function (k) {
     if (typeof obj[k] === "number" && isFinite(obj[k]) && obj[k] >= 0) out[k] = obj[k]
   })
-  ;["pokeStreak", "totalPokes", "totalFeeds", "totalPlays"].forEach(function (k) {
+  ;["pokeStreak", "feedStreak", "totalPokes", "totalFeeds", "totalPlays"].forEach(function (k) {
     if (typeof obj[k] === "number" && isFinite(obj[k]) && obj[k] >= 0) out[k] = Math.floor(obj[k])
   })
   if (typeof obj.speechFreqMin === "number" && obj.speechFreqMin > 0) out.speechFreqMin = clamp(obj.speechFreqMin, 1, 240)
@@ -516,12 +546,21 @@ function withInteraction(state, nowMs) {
 
 function feed(state, nowMs) {
   var next = withInteraction(applyDecay(state, nowMs), nowMs)
+  var withinWindow = (nowMs - (state.feedStreakAt || 0)) <= FEED_STREAK_WINDOW_MS
+  next.feedStreak = withinWindow ? (state.feedStreak || 0) + 1 : 1
+  next.feedStreakAt = nowMs
   next.fullness = clamp(next.fullness + 30, 0, 100)
   next.happiness = clamp(next.happiness + 5, 0, 100)
   next.lastFedMs = nowMs
   next.totalFeeds = (next.totalFeeds || 0) + 1
   return next
 }
+
+// True once a run of feeds within FEED_STREAK_WINDOW_MS of each other hits
+// FEED_STREAK_COMBO or more -- stays true for every feed after that too
+// (unlike isAnnoyedPoke's every-Nth pulse), since a feeding frenzy is one
+// continuous thing to comment on, not a repeating milestone.
+function isFeedCombo(state) { return (state.feedStreak || 0) >= FEED_STREAK_COMBO }
 
 function play(state, nowMs) {
   var next = withInteraction(applyDecay(state, nowMs), nowMs)
@@ -646,7 +685,19 @@ function pickAgeUpLine(pet) { return pet.voice(AGE_UP_LINE) }
 var AGE_UP2_LINE = "Five hundred pats in -- I've aged up again, and this halo is staying."
 function pickAgeUp2Line(pet) { return pet.voice(AGE_UP2_LINE) }
 
-function pickFeedLine(pet, seed) { return pick(pet.feed, seed) }
+// Fired instead of a normal feed line once the feed streak reaches
+// FEED_STREAK_COMBO -- same pattern as pickAgeUpLine/pickLevelUpLine: one
+// shared template wrapped in the pet's own voice(), with a {count} slot.
+var FEED_COMBO_LINE = "Feeding frenzy! That's {count} snacks in a row -- I'm stuffed."
+function pickFeedComboLine(pet, count) {
+  var c = Math.max(FEED_STREAK_COMBO, count || FEED_STREAK_COMBO)
+  return pet.voice(FEED_COMBO_LINE.replace("{count}", c))
+}
+
+function pickFeedLine(pet, seed, state) {
+  if (state && isFeedCombo(state)) return pickFeedComboLine(pet, state.feedStreak)
+  return pick(pet.feed, seed)
+}
 function pickPlayLine(pet, seed) { return pick(pet.play, seed) }
 function sleepyLine(pet) { return pet.sleepy }
 function wakeLine(pet) { return pet.wake }
@@ -725,9 +776,63 @@ function pickTimeLine(hour, seed) {
   return period ? pick(TIME_LINES[period], seed) : ""
 }
 
+// Seasonal events: date-based chatter for a handful of holidays. Same
+// trick as TIME_LINES -- one shared bank per event the caller wraps in
+// the pet's own voice(), so the 13-pet catalogue doesn't need a
+// dedicated bank just for this. `seasonalEvent(month, day)` returns the
+// active event (or null) for an exact date match; `pickSeasonalLine`
+// returns "" when no event is active so the caller can fall through.
+var SEASONAL_EVENTS = [
+  { id: "new_year", name: "New Year", glyph: "🎉", month: 1, day: 1 },
+  { id: "valentines", name: "Valentine's Day", glyph: "💝", month: 2, day: 14 },
+  { id: "halloween", name: "Halloween", glyph: "🎃", month: 10, day: 31 },
+  { id: "christmas", name: "Christmas", glyph: "🎄", month: 12, day: 25 }
+]
+
+var SEASONAL_LINES = {
+  new_year: [
+    "New year, new you. Same me, still here, still judging your tabs.",
+    "Resolution check: I won't ask how it's going. You're welcome.",
+    "It's a new year. I resolved to nap more. So far, so good.",
+    "New year, same desktop. But the vibes are fresh, I can feel it."
+  ],
+  valentines: [
+    "It's Valentine's Day. I'm your companion. That counts, right?",
+    "Roses are red, violets are blue, I'm a desktop pet, and I'm here for you.",
+    "Valentine's Day! I got you nothing. But I'm cute, and that's enough."
+  ],
+  halloween: [
+    "Happy Halloween! I'm already a ghost. Well, one of me is.",
+    "Spooky season. I'd wear a costume but I'm already an emoji.",
+    "Boo. Did that work? It's Halloween, I'm trying."
+  ],
+  christmas: [
+    "Merry Christmas! I checked: the tree is not a cat tower. Disappointing.",
+    "It's Christmas. I don't need gifts. Just snacks. And pats. Okay, mostly snacks.",
+    "Holiday cheer: deployed. The desktop is festive. I did my part."
+  ]
+}
+
+function seasonalEvent(month, day) {
+  var m = numOr(month, NaN)
+  var d = numOr(day, NaN)
+  if (!isFinite(m) || !isFinite(d)) return null
+  for (var i = 0; i < SEASONAL_EVENTS.length; i++) {
+    if (SEASONAL_EVENTS[i].month === m && SEASONAL_EVENTS[i].day === d) return SEASONAL_EVENTS[i]
+  }
+  return null
+}
+
+function pickSeasonalLine(pet, month, day, seed) {
+  var e = seasonalEvent(month, day)
+  if (!e) return ""
+  return pet.voice(pick(SEASONAL_LINES[e.id], seed))
+}
+
 // Priority for unsolicited chatter: low battery > long idle > mood >
-// time-of-day chatter (one third of the time, same seed) > generic Clippy
-// tip. `context` = { isLowBattery, minutesIdleValue, moodLabelValue, hourValue }
+// seasonal event (half the seeds, when one is active) > time-of-day
+// chatter (one third of the seeds) > generic Clippy tip.
+// `context` = { isLowBattery, minutesIdleValue, moodLabelValue, hourValue, monthValue, dayValue }
 function pickAmbientLine(pet, context, seed) {
   var ctx = context || {}
   if (ctx.isLowBattery) return pet.lowBattery
@@ -735,6 +840,13 @@ function pickAmbientLine(pet, context, seed) {
   var mood = ctx.moodLabelValue
   if (mood === "hungry") return pet.voice("I could really go for a snack right about now.")
   if (mood === "grumpy") return pet.voice("Not feeling it today. A pat might help.")
+  // Seasonal event: when one is active, half the seeds take the seasonal
+  // branch so the pet actually acknowledges the holiday. A missing/invalid
+  // date just falls through to the time-of-day branch below.
+  if ((Math.abs(Math.floor(seed)) % 1000) < 500) {
+    var seasonal = pickSeasonalLine(pet, ctx.monthValue, ctx.dayValue, seed)
+    if (seasonal) return seasonal
+  }
   // One third of the seeds take the time-of-day branch; the same seed drives
   // both the branch roll and the bank pick, so it's deterministic in tests.
   // A missing/invalid hour just falls through to the generic tip.
@@ -750,6 +862,8 @@ if (typeof module !== "undefined") {
     HOUR: HOUR, MIN: MIN,
     PETS: PETS, CLIPPY_TIPS: CLIPPY_TIPS, ZOOM_LINES: ZOOM_LINES, TIME_LINES: TIME_LINES,
     POKE_STREAK_WINDOW_MS: POKE_STREAK_WINDOW_MS, POKE_STREAK_ANNOY: POKE_STREAK_ANNOY,
+    FEED_STREAK_WINDOW_MS: FEED_STREAK_WINDOW_MS, FEED_STREAK_COMBO: FEED_STREAK_COMBO,
+    isFeedCombo: isFeedCombo, FEED_COMBO_LINE: FEED_COMBO_LINE, pickFeedComboLine: pickFeedComboLine,
     AGE_UP_POKE_THRESHOLD: AGE_UP_POKE_THRESHOLD, AGE_UP_LINE: AGE_UP_LINE,
   AGE_UP2_POKE_THRESHOLD: AGE_UP2_POKE_THRESHOLD, AGE_UP2_LINE: AGE_UP2_LINE,
     ACHIEVEMENTS: ACHIEVEMENTS, ACCESSORIES: ACCESSORIES, LEVEL_TITLES: LEVEL_TITLES, ROAM_MODES: ROAM_MODES,
@@ -764,10 +878,13 @@ if (typeof module !== "undefined") {
     pickGreeting: pickGreeting, pickPokeLine: pickPokeLine, pickFeedLine: pickFeedLine,
     pickPlayLine: pickPlayLine, sleepyLine: sleepyLine, wakeLine: wakeLine, pickAmbientLine: pickAmbientLine,
     timePeriod: timePeriod, pickTimeLine: pickTimeLine,
+    SEASONAL_EVENTS: SEASONAL_EVENTS, SEASONAL_LINES: SEASONAL_LINES,
+    seasonalEvent: seasonalEvent, pickSeasonalLine: pickSeasonalLine,
     pickZoomLine: pickZoomLine,
     screenLookSystemPrompt: screenLookSystemPrompt,
     unlockedAchievementIds: unlockedAchievementIds, newlyUnlocked: newlyUnlocked,
-    levelInfo: levelInfo, isAccessoryUnlocked: isAccessoryUnlocked, equipAccessory: equipAccessory,
+    levelInfo: levelInfo, didLevelUp: didLevelUp, LEVEL_UP_LINE: LEVEL_UP_LINE, pickLevelUpLine: pickLevelUpLine,
+    isAccessoryUnlocked: isAccessoryUnlocked, equipAccessory: equipAccessory,
     rollShiny: rollShiny, pickShinyLine: pickShinyLine
   }
 }
