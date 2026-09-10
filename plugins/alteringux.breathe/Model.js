@@ -381,7 +381,22 @@ function phaseTargetScale(kind, nextKind, arriving, peak) {
 }
 
 // Per-phase { from, to, kind, breaths } for one cycle of a technique.
+//
+// The result is pure per technique, but the guides ask for it via orbScale()
+// on every animation frame — recomputing the two-pass envelope (and its object
+// churn) 30-60 times a second is wasted work. A one-entry cache keyed on the
+// technique object identity covers the real case (one technique for a whole
+// session) and simply misses harmlessly for the test harness's tight loops.
+var _envCacheKey = null
+var _envCacheVal = null
 function scaleEnvelope(technique) {
+  if (technique === _envCacheKey && _envCacheVal !== null) return _envCacheVal
+  _envCacheKey = technique
+  _envCacheVal = computeScaleEnvelope(technique)
+  return _envCacheVal
+}
+
+function computeScaleEnvelope(technique) {
   var phases = (technique && technique.phases) ? technique.phases : []
   if (!phases.length) return []
   var peak = peakScale(technique)

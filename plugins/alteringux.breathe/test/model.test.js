@@ -132,6 +132,18 @@ test("orbScale is continuous across every phase boundary, including the cycle wr
   })
 })
 
+test("scaleEnvelope caches per technique and recomputes when it changes", () => {
+  // The guides call this every animation frame; it must return the same array
+  // for the same technique without rebuilding it, and still be correct.
+  const box = Model.techniqueById("box")
+  const a = Model.scaleEnvelope(box)
+  assert.strictEqual(Model.scaleEnvelope(box), a, "a repeat call returns the cached array")
+  const vortex = Model.techniqueById("vortex")
+  assert.notStrictEqual(Model.scaleEnvelope(vortex), a, "a different technique rebuilds")
+  assert.strictEqual(Model.scaleEnvelope(box).length, box.phases.length)
+  assert.ok(a.every(s => s.from >= Model.SCALE_MIN - 1e-9 && s.to <= Model.SCALE_MAX + 1e-9))
+})
+
 test("holds do not move the orb", () => {
   const box = Model.techniqueById("box")
   const holdIn = box.phases.findIndex(p => p.kind === Model.PHASE.HOLD_IN)

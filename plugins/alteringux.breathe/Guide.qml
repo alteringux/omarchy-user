@@ -214,6 +214,14 @@ Item {
       // ---- progress rings ------------------------------------------------
       // Drawn rather than stacked: an arc that sweeps needs a real path, and
       // Canvas keeps it anti-aliased at any orb size.
+      //
+      // A Canvas repaint is a software rasterisation, so it is the most
+      // expensive thing on this surface. The frame clock hands us a new
+      // fraction every tick, but a sub-pixel change is not worth a repaint —
+      // maybePaint() skips one until the arc would actually move (~a few px),
+      // which barely matters on a fast phase but drops the retention ring from
+      // 30fps to a handful while a 90s hold barely creeps. paused / tone
+      // changes still force one so the ring recolours immediately.
       Canvas {
         id: rings
         anchors.fill: parent
@@ -221,8 +229,23 @@ Item {
 
         readonly property real phaseFraction: root.live ? root.live.phaseFraction : 0
         readonly property real sessionFraction: root.live ? root.live.sessionFraction : 0
-        onPhaseFractionChanged: requestPaint()
-        onSessionFractionChanged: requestPaint()
+        property real _paintedPhaseF: -1
+        property real _paintedSessionF: -1
+
+        function maybePaint() {
+          if (Math.abs(phaseFraction - _paintedPhaseF) < 0.002
+              && Math.abs(sessionFraction - _paintedSessionF) < 0.001) return
+          _paintedPhaseF = phaseFraction
+          _paintedSessionF = sessionFraction
+          requestPaint()
+        }
+        onPhaseFractionChanged: maybePaint()
+        onSessionFractionChanged: maybePaint()
+        Connections {
+          target: root
+          function onPausedChanged() { rings.requestPaint() }
+          function onToneChanged() { rings.requestPaint() }
+        }
         Component.onCompleted: requestPaint()
 
         onPaint: {

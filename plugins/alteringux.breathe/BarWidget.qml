@@ -137,11 +137,14 @@ BarWidget {
 
   // ---- display clock ---------------------------------------------------
   // Advances the breath position between the daemon's heartbeats. It never
-  // transitions anything; the daemon owns every real phase change. 16ms while
-  // the overlay is up so the orb animates smoothly, a lazier 250ms when only
-  // the bar countdown is watching.
+  // transitions anything; the daemon owns every real phase change. A breath is
+  // slow, so 30fps looks identical to 60 for the orb swell and halves the
+  // per-frame resolve + binding churn; the bar countdown only shows whole
+  // seconds, so 500ms is plenty when the overlay is down; and with motion
+  // reduced there is no swell to animate at all, just the number.
   Timer {
-    interval: root.guideVisible ? 16 : 250
+    interval: !root.guideVisible ? 500
+              : (root.configLoaded && root.config.reduceMotion ? 500 : 33)
     repeat: true
     running: root.running
     onTriggered: root.nowMs = Date.now()
