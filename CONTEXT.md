@@ -22,3 +22,16 @@ The interaction for any user-authored label on a card or panel title: click it, 
 
 **Scrollable panel body**:
 A panel body that can be taller than the panel. Always a `Kit.PanelScroll` (a `Flickable` subclass with `clip`, bounds, a resting-visible vertical scrollbar, and an amplified wheel/touchpad step baked in), never a bare `Flickable`. A scrollable `ListView` — which can't be wrapped — takes an inline `ScrollBar` plus `Kit.WheelBoost` ([[0004]]).
+
+**Technique**:
+One named breathing pattern in `alteringux.breathe` — a list of phases with durations, plus the prose and tone that identify it. Built-ins are canonical data in `techniques.json`; the user's own are `family: "custom"` and live in `breathe-config.json`. Both drive the guides identically.
+_Avoid_: Exercise, pattern (except in "pattern builder", the UI that authors a custom technique)
+
+**Phase**:
+One step of a technique's cycle — an inhale, a hold, an exhale, a nostril switch. Its `kind` drives the label, the glyph, and how the orb moves; a cycle is one pass through all of them.
+
+**Orb**:
+The circle that swells and settles with the breath. Its radius is `Model.orbScale`, the single easing source both the fullscreen guide and the compact in-panel guide read, so the two can't drift ([[0007]]).
+
+**Guide**:
+The fullscreen breath overlay (`Guide.qml`). It covers the screen and takes keyboard focus, so every key it binds is reversible — Escape hides it without ending the session ([[0007]]). Distinct from the **panel**, which picks techniques and shows metrics.

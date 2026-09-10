@@ -9,11 +9,13 @@
     { "when": "start", "cli": "protonvpn-rotate",       "args": ["connect"],       "optional": true },
     { "when": "start", "cli": "tts-player-ctl",         "args": ["pause"],         "optional": true },
     { "when": "start", "cli": "omarchy-dashboard-note", "args": ["Focus: {{label}} @ {{time}}"], "optional": true },
+    { "when": "start", "cli": "omarchy-breathe",        "args": ["start", "box"],  "optional": true },
 
     { "when": "break", "cli": "omarchy-stopwatch",         "args": ["cancel"],   "speak": "Break. Look away from the screen." },
     { "when": "break", "cli": "omarchy-newsbar-refresh",   "args": [],            "optional": true },
     { "when": "break", "cli": "omarchy-stocks-commentary", "args": [],            "optional": true },
     { "when": "break", "cli": "omarchy-dictionary-suggest-daily", "args": [],     "optional": true },
+    { "when": "break", "cli": "omarchy-breathe",           "args": ["start", "physiological-sigh"], "optional": true },
 
     { "when": "work",  "cli": "omarchy-stopwatch", "args": ["5", "focus check-in"], "speak": "Back to it." },
 
@@ -22,6 +24,7 @@
     { "when": "end",   "cli": "omarchy-pomodoro",       "args": ["reset"] },
     { "when": "end",   "cli": "protonvpn-rotate",       "args": ["disconnect"],        "optional": true },
     { "when": "end",   "cli": "flow",                   "args": ["run", "session-journal"], "optional": true },
-    { "when": "end",   "cli": "omarchy-dashboard-note", "args": ["Focus done: {{label}}"], "optional": true }
+    { "when": "end",   "cli": "omarchy-dashboard-note", "args": ["Focus done: {{label}}"], "optional": true },
+    { "when": "end",   "cli": "omarchy-breathe",        "args": ["reset"],             "optional": true }
   ]
 }

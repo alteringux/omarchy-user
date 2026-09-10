@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.breathe",
+  "name": "Breathe",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Guided breathing — eleven techniques from box breathing to Wim Hof, a fullscreen animated breath guide, a compact in-panel guide, custom pattern builder, and streak/technique/time-of-day metrics",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Breathe",
+    "description": "Live phase and countdown on the bar; click for techniques, metrics and settings, or breathe along with the fullscreen guide",
+    "category": "Wellbeing",
+    "allowMultiple": false
+  }
+}
