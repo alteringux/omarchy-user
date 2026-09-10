@@ -30,6 +30,14 @@ BarWidget {
   readonly property bool warn: level === "warning"
   readonly property bool crit: level === "critical"
 
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+
+  readonly property string tooltipText: stateLoaded
+    ? "DISK " + Model.formatPct(root.stat.primary.pct)
+      + "  ·  " + Model.formatGb(root.stat.primary.usedKb) + " / " + Model.formatGb(root.stat.primary.totalKb)
+      + (root.stale ? "  ·  stale" : "")
+    : "Loading…"
+
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-diskmon"
   // Disk usage moves slowly; sampling every 30s is plenty and keeps df calls
   // (and the resulting flash-storage wear) low compared to cpumon's 2s.
@@ -47,7 +55,7 @@ BarWidget {
 
   function sampleNow() {
     guard.run("sampleNow", function () {
-      if (sampleProc.running) return
+      if (sampleProc.running) { Quickshell.execDetached([root.scriptPath, "sample"]); return }
       sampleProc.command = [root.scriptPath, "sample"]
       sampleProc.running = true
     })
@@ -66,7 +74,11 @@ BarWidget {
 
     function status(): string {
       return guard.call("ipc.status", function () {
-        return JSON.stringify(root.stat && root.stat.primary ? root.stat.primary : {})
+        var p = (root.stat && root.stat.primary) ? root.stat.primary : {}
+        var out = {}
+        for (var k in p) out[k] = p[k]
+        out.stale = root.stale
+        return JSON.stringify(out)
       }, "{}")
     }
     function sample(): void { root.sampleNow() }
@@ -110,6 +122,8 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.displayText
+    tooltipText: root.tooltipText
+    dimmed: root.stale
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

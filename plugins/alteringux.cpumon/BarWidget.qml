@@ -44,13 +44,13 @@ BarWidget {
     : "Loading…"
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon"
-  readonly property int sampleIntervalMs: 2000
+  readonly property int sampleIntervalMs: 4000
 
   Kit.Store {
     id: stateStore
     fileName: "sysmon-state.json"
     watch: true
-    pollMs: 2000
+    pollMs: 4000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -64,7 +64,16 @@ BarWidget {
       // whatever it last read. netwatch already fires a detached one-off in
       // that case, since the write to sysmon-state.json is the point, not
       // this Process's own exit. Mirror it here.
-      if (sampleProc.running) { Quickshell.execDetached([root.scriptPath, "sample"]); return }
+      // sysmon-state.json is shared by cpumon/memmon/tempmon and by one
+      // copy of each PER screen. Coalesce N pollers to one real sample
+      // per interval; keep a bounded recovery if the sampler is stuck.
+      var updatedAt = Number((root.state && root.state.updatedAt) || 0)
+      var age = Date.now() - updatedAt
+      if (sampleProc.running) {
+        if (age > root.sampleIntervalMs * 4) Quickshell.execDetached([root.scriptPath, "sample"])
+        return
+      }
+      if (age >= 0 && age < root.sampleIntervalMs * 0.75) return
       sampleProc.command = [root.scriptPath, "sample"]
       sampleProc.running = true
     })
