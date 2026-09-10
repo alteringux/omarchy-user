@@ -528,6 +528,15 @@ credit_session() {   # $1 = session JSON, $2 = elapsedMs, $3 = completed(true|fa
   cycles="$(jq -r '.cycles' <<<"$sess")"
   [ "$cycleMs" -gt 0 ] 2>/dev/null || return 0
 
+  # Clamp HERE, at the one place that writes the record, rather than trusting
+  # every caller to have done it. A session can legitimately overrun its
+  # planned length — the daemon sleeps between ticks, the machine suspends, a
+  # long pause shifts the arithmetic — and a stat that says you breathed for
+  # longer than the exercise lasts is simply wrong. Belt and braces: the stop
+  # and restore paths clamp too, but this is the invariant that matters.
+  local plannedMs=$(( cycleMs * cycles ))
+  (( plannedMs > 0 && elapsed > plannedMs )) && elapsed=$plannedMs
+
   doneCycles=$(( elapsed / cycleMs ))
   (( doneCycles < 1 )) && return 0
   (( doneCycles > cycles )) && doneCycles=$cycles

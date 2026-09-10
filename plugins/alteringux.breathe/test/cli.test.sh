@@ -157,6 +157,45 @@ t_overrun_is_clamped() {
   check "an overrun credits only the planned seconds" "$(statfield '.totals.seconds')" 32
 }
 
+# The daemon's own completion path, as opposed to the `stop` verb. Every other
+# test stubs the daemon out, so this is the only place run_loop's finish is
+# exercised — and it is the path a real unattended session actually takes.
+t_daemon_completes_and_clamps() {
+  fresh
+  b get >/dev/null
+  jq '.customTechniques=[{id:"custom-fast",name:"Fast",family:"custom",tone:"info",defaultCycles:3,
+      phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}]' \
+    "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start custom-fast --cycles 3 >/dev/null          # 3 x 2s = 6s planned
+
+  # Backdate savedAtMs so the wall clock has badly overrun the plan — a
+  # suspend, a long pause, or a daemon that was not scheduled.
+  jq --argjson n "$(( $(date +%s%3N) - 20000 ))" '.state="RUNNING" | .elapsedMs=0 | .savedAtMs=$n' \
+    "$OMARCHY_STATE_DIR/breathe-session.json" > "$OMARCHY_STATE_DIR/.s" \
+    && mv "$OMARCHY_STATE_DIR/.s" "$OMARCHY_STATE_DIR/breathe-session.json"
+
+  timeout 20 "$CLI" __run >/dev/null 2>&1
+
+  check "the daemon finishes an overrun session"        "$(sfield '.state')" DONE
+  check "and clamps the clock to the planned length"    "$(sfield '.elapsedMs')" 6000
+  check "crediting the planned seconds, not wall clock" "$(statfield '.totals.seconds')" 6
+  check "and the planned cycles, not the overrun"       "$(statfield '.totals.cycles')" 3
+  check "marked completed"                              "$(histfield '.sessions[0].completed')" true
+}
+
+# The invariant that matters, enforced where the record is written: no session
+# may ever credit more time than the exercise actually lasts, whichever path
+# got there.
+t_never_credits_more_than_planned() {
+  fresh
+  b start box --cycles 4 >/dev/null                    # 4 x 16s = 64s planned
+  park_at 500000                                       # absurd overrun
+  b stop >/dev/null
+  check "an absurd overrun still credits only the plan" "$(statfield '.totals.seconds')" 64
+  check "and only the planned cycles"                   "$(statfield '.totals.cycles')" 4
+}
+
 t_reset_credits_nothing() {
   fresh
   b start box --cycles 4 >/dev/null
@@ -357,7 +396,8 @@ t_silent_flag() {
 for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_config \
          t_pause_freezes t_toggle_cycles_states t_pause_resume_are_idempotent \
          t_stop_before_a_cycle_credits_nothing t_stop_after_a_cycle_credits \
-         t_full_run_completes t_overrun_is_clamped t_reset_credits_nothing \
+         t_full_run_completes t_overrun_is_clamped t_daemon_completes_and_clamps \
+         t_never_credits_more_than_planned t_reset_credits_nothing \
          t_streak_starts_at_one t_streak_same_day_idempotent t_streak_consecutive_day \
          t_streak_gap_resets t_history_cap t_daily_cap \
          t_restore_finished_while_offline t_restore_still_live t_restore_missing_technique \
