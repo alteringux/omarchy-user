@@ -463,12 +463,21 @@ Item {
         property real walkOffset: 0
         property real blinkScale: 1
 
-        SequentialAnimation {
-          running: !root.liveState.asleep
-          loops: Animation.Infinite
-          // Bobs noticeably faster while mid-gallop, for a bit of energy.
-          NumberAnimation { target: hitBox; property: "bobOffset"; to: -6; duration: petContainer.roamMode === "gallop" ? 220 : 900; easing.type: Easing.InOutSine }
-          NumberAnimation { target: hitBox; property: "bobOffset"; to: 0; duration: petContainer.roamMode === "gallop" ? 220 : 900; easing.type: Easing.InOutSine }
+        // The idle bob is the one thing that kept this always-on-top overlay's
+        // render loop from ever parking. A 60fps NumberAnimation for a slow 6px
+        // sine is overkill: drive it from a 30fps timer instead (halves the
+        // surface's frames) and let it stop dead when the pet sleeps. A poke
+        // still overrides bobOffset directly via bounceAnim.
+        Timer {
+          id: bobTick
+          running: !root.liveState.asleep && !bounceAnim.running
+          repeat: true
+          interval: 33
+          onTriggered: {
+            var period = petContainer.roamMode === "gallop" ? 440 : 1800
+            hitBox.bobOffset = -3 + 3 * Math.cos(2 * Math.PI * (Date.now() % period) / period)
+          }
+          onRunningChanged: if (!running && !bounceAnim.running) hitBox.bobOffset = 0
         }
 
         // Occasional blink: a quick vertical squash.

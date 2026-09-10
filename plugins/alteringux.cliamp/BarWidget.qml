@@ -81,7 +81,9 @@ BarWidget {
   // ── live spectrum: `cliamp visstream` while playing ──────────────────
   Process {
     id: visProc
-    command: [root.cliampBin, "visstream", "--fps", "24"]
+    // 12fps is smooth enough for a 10-bar, bar-height spectrum and halves the
+    // top-bar repaints this widget forces while music plays.
+    command: [root.cliampBin, "visstream", "--fps", "12"]
     running: root.playing && !root.visCooldown
     stdout: SplitParser {
       onRead: function (line) {
@@ -117,12 +119,14 @@ BarWidget {
   }
 
   // ── synthesised idle drift when nothing is streaming ─────────────────
+  // ~7fps with a proportionally bigger phase step keeps the ambient shimmer
+  // looking the same while cutting its always-on top-bar repaints by half.
   Timer {
-    interval: 66
+    interval: 140
     repeat: true
     running: root.visible && !root.playing
     onTriggered: {
-      root.idlePhase += 0.16
+      root.idlePhase += 0.34
       root.bands = Model.idleBands(root.idlePhase, root.running ? 0.16 : 0.10)
     }
   }
