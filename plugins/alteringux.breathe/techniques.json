@@ -137,6 +137,30 @@
       ]
     },
     {
+      "id": "vortex",
+      "name": "Vortex",
+      "pattern": "13-8-5-3-2-1",
+      "family": "energising",
+      "tone": "info",
+      "blurb": "A descending run down the Fibonacci sequence — 13, 8, 5, 3, 2, 1 seconds a breath, each one lighter than the last. The shortening pace does the settling; you just follow it down.",
+      "use": "Morning practice, clearing a busy head, dropping into a rhythm without counting. Let the short breaths stay light — no need to force them.",
+      "defaultCycles": 4,
+      "phases": [
+        { "kind": "INHALE", "seconds": 6.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 6.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 2.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 2.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 1.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 1.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 1, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 1, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 0.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 0.5, "label": "Exhale" }
+      ]
+    },
+    {
       "id": "buteyko",
       "name": "Buteyko",
       "pattern": "3-4-5",

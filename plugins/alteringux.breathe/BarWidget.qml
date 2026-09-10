@@ -148,11 +148,14 @@ BarWidget {
   }
 
   // ---- actions ---------------------------------------------------------
-  function startSession(techniqueId, cycles, silent) {
+  // `loop` is optional: omitted, the CLI falls back to the widget-owned config
+  // default, exactly as `silent` already does.
+  function startSession(techniqueId, cycles, silent, loop) {
     var args = ["start"]
     if (techniqueId) args.push(techniqueId)
     if (cycles) args = args.concat(["--cycles", String(cycles)])
     if (silent) args.push("--silent")
+    if (loop) args.push("--loop")
     usage.record("start:" + (techniqueId || "default"))
     root.runVerb(args)
   }
@@ -160,8 +163,13 @@ BarWidget {
   function toggleSession() { usage.record("toggle"); root.runVerb(["toggle"]) }
   function pauseSession()  { usage.record("pause");  root.runVerb(["pause"]) }
   function resumeSession() { usage.record("resume"); root.runVerb(["resume"]) }
+  function skipHold()      { usage.record("skip");   root.runVerb(["skip"]) }
   function stopSession()   { usage.record("stop");   root.runVerb(["stop"]) }
   function resetSession()  { usage.record("reset");  root.runVerb(["reset"]) }
+
+  function toggleLoop() {
+    root.updateConfig({ loop: !(root.configLoaded && root.config.loop === true) })
+  }
 
   // ---- the fullscreen guide -------------------------------------------
   property bool guideVisible: false
@@ -238,8 +246,10 @@ BarWidget {
     function toggle(): void { root.toggleSession() }
     function pause(): void { root.pauseSession() }
     function resume(): void { root.resumeSession() }
+    function skip(): void { root.skipHold() }
     function stop(): void { root.stopSession() }
     function reset(): void { root.resetSession() }
+    function loop(): void { root.toggleLoop() }
     function guide(): void { root.toggleGuide() }
     function open(): void { root.open() }
     function close(): void { root.close() }
@@ -251,6 +261,7 @@ BarWidget {
           state: root.state,
           techniqueId: root.session.techniqueId,
           techniqueName: root.technique ? root.technique.name : "",
+          loop: root.session.loop === true,
           phaseKind: l.phaseKind,
           phaseLabel: l.phaseLabel,
           phaseRemainingMs: Math.round(l.phaseRemainingMs),
@@ -310,6 +321,7 @@ BarWidget {
     }
     if (l.breathCount) text += " " + (l.breathIndex + 1) + "/" + l.breathCount
     else text += "  " + (l.cycleIndex + 1) + "/" + l.cycleCount
+    if (root.session.loop) text += " ↻"
     if (root.paused) text += " "   // fa-pause
     return text
   }

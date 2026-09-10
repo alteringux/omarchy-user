@@ -87,6 +87,23 @@ test("cycleSeconds and sessionSeconds add up", () => {
   assert.strictEqual(Model.sessionSeconds(null, 5), 0)
 })
 
+test("Vortex is the descending Fibonacci run and its cycle sums to 32s", () => {
+  const vortex = Model.techniqueById("vortex")
+  assert.ok(vortex, "vortex is in the catalogue")
+  assert.strictEqual(vortex.phases.length, 12, "six breaths, each an inhale and an exhale")
+  assert.deepStrictEqual(
+    vortex.phases.map(p => p.seconds),
+    [6.5, 6.5, 4, 4, 2.5, 2.5, 1.5, 1.5, 1, 1, 0.5, 0.5]
+  )
+  assert.strictEqual(Model.cycleSeconds(vortex), 32)
+  // The 0.5s tail is the fastest phase in the catalogue — make sure resolve
+  // still lands cleanly on it rather than skidding past.
+  const r = Model.resolve(
+    { state: "RUNNING", techniqueId: "vortex", cycles: 4, savedAtMs: 0, elapsedMs: 31200 }, vortex, 0)
+  assert.strictEqual(r.phaseIndex, 10, "31.2s in is inside the last half-second inhale")
+  assert.strictEqual(r.phaseKind, Model.PHASE.INHALE)
+})
+
 // ── the orb-scale envelope ─────────────────────────────────────────────────
 
 test("orbScale stays inside its declared range for every technique", () => {
@@ -392,6 +409,25 @@ test("parseStats repairs a file whose daily map or totals were mangled", () => {
 
 test("parseSession floors a negative elapsed", () => {
   assert.strictEqual(Model.parseSession(JSON.stringify({ elapsedMs: -900 })).elapsedMs, 0)
+})
+
+test("a fresh session is not looping and has skipped nothing", () => {
+  const s = Model.defaultSession()
+  assert.strictEqual(s.loop, false)
+  assert.strictEqual(s.skipMs, 0)
+})
+
+test("parseSession keeps the loop flag and floors a bad skipMs", () => {
+  assert.strictEqual(Model.parseSession(JSON.stringify({ loop: true })).loop, true)
+  assert.strictEqual(Model.parseSession(JSON.stringify({ loop: "yes" })).loop, false, "only a real true is looping")
+  assert.strictEqual(Model.parseSession(JSON.stringify({ skipMs: -5 })).skipMs, 0)
+  assert.strictEqual(Model.parseSession(JSON.stringify({ skipMs: 60000 })).skipMs, 60000)
+})
+
+test("parseConfig defaults loop off and keeps a stored one", () => {
+  assert.strictEqual(Model.parseConfig("{}").loop, false)
+  assert.strictEqual(Model.parseConfig(JSON.stringify({ loop: true })).loop, true)
+  assert.strictEqual(Model.parseConfig(JSON.stringify({ loop: 1 })).loop, false)
 })
 
 test("serializeConfig round-trips through parseConfig", () => {

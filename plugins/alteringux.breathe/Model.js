@@ -162,6 +162,30 @@ var TECHNIQUES = [
     ]
   },
   {
+    id: "vortex",
+    name: "Vortex",
+    pattern: "13-8-5-3-2-1",
+    family: "energising",
+    tone: "info",
+    blurb: "A descending run down the Fibonacci sequence — 13, 8, 5, 3, 2, 1 seconds a breath, each one lighter than the last. The shortening pace does the settling; you just follow it down.",
+    use: "Morning practice, clearing a busy head, dropping into a rhythm without counting. Let the short breaths stay light — no need to force them.",
+    defaultCycles: 4,
+    phases: [
+      { kind: "INHALE", seconds: 6.5, label: "Inhale" },
+      { kind: "EXHALE", seconds: 6.5, label: "Exhale" },
+      { kind: "INHALE", seconds: 4, label: "Inhale" },
+      { kind: "EXHALE", seconds: 4, label: "Exhale" },
+      { kind: "INHALE", seconds: 2.5, label: "Inhale" },
+      { kind: "EXHALE", seconds: 2.5, label: "Exhale" },
+      { kind: "INHALE", seconds: 1.5, label: "Inhale" },
+      { kind: "EXHALE", seconds: 1.5, label: "Exhale" },
+      { kind: "INHALE", seconds: 1, label: "Inhale" },
+      { kind: "EXHALE", seconds: 1, label: "Exhale" },
+      { kind: "INHALE", seconds: 0.5, label: "Inhale" },
+      { kind: "EXHALE", seconds: 0.5, label: "Exhale" }
+    ]
+  },
+  {
     id: "buteyko",
     name: "Buteyko",
     pattern: "3-4-5",
@@ -428,7 +452,13 @@ function defaultSession() {
     startedAtMs: 0,
     savedAtMs: 0,
     elapsedMs: 0,
-    silent: false
+    silent: false,
+    // Keep restarting the same technique when a pass finishes, until the
+    // captain stops it. Set from --loop or the config default at start.
+    loop: false,
+    // Milliseconds jumped past by "skip a hold". Banked here so crediting can
+    // subtract time that was skipped rather than breathed.
+    skipMs: 0
   }
 }
 
@@ -442,6 +472,8 @@ function parseSession(raw) {
     }
   } catch (e) { /* keep defaults — a torn write must not take the bar down */ }
   parsed.elapsedMs = Math.max(0, num(parsed.elapsedMs, 0))
+  parsed.skipMs = Math.max(0, num(parsed.skipMs, 0))
+  parsed.loop = parsed.loop === true
   parsed.cycles = Math.max(0, Math.round(num(parsed.cycles, 0)))
   return parsed
 }
@@ -649,6 +681,7 @@ function defaultConfig() {
     defaultTechniqueId: "box",
     defaultCycles: 8,
     silent: false,
+    loop: false,
     phaseSound: "",
     endSound: "",
     notifyOnEnd: true,
@@ -691,6 +724,7 @@ function parseConfig(raw) {
   } catch (e) { /* keep defaults */ }
 
   if (!parsed.customTechniques || !parsed.customTechniques.length) parsed.customTechniques = []
+  parsed.loop = parsed.loop === true
   parsed.overlayDim = clamp(num(parsed.overlayDim, 0.82), 0, 1)
   parsed.defaultCycles = Math.max(1, Math.round(num(parsed.defaultCycles, 8)))
   return parsed

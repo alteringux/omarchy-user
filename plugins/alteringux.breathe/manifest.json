@@ -4,7 +4,7 @@
   "name": "Breathe",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "Guided breathing — eleven techniques from box breathing to Wim Hof, a fullscreen animated breath guide, a compact in-panel guide, custom pattern builder, and streak/technique/time-of-day metrics",
+  "description": "Guided breathing — twelve techniques from box breathing to Wim Hof, a fullscreen animated breath guide, a compact in-panel guide, custom pattern builder, loopable sessions, skippable holds, and streak/technique/time-of-day metrics",
   "kinds": [
     "bar-widget"
   ],

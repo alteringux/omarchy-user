@@ -1,8 +1,9 @@
 # alteringux.breathe
 
-Guided breathing on the bar: eleven techniques, a fullscreen animated breath
+Guided breathing on the bar: twelve techniques, a fullscreen animated breath
 guide, a compact guide in the panel, a custom pattern builder, and metrics that
-are worth opening.
+are worth opening. Sessions can loop, and a long hold can be cut short without
+ending the session.
 
 ```
  󰡾  Inhale 4  1/8        ← the bar, mid-session
@@ -30,8 +31,12 @@ writes it ([ADR-0006](../../docs/adr/0006-cli-first-plugins.md) rule 4).
 
 **Core** — Box 4-4-4-4 · 4-7-8 Relaxing · Coherent 5-5 · Physiological Sigh ·
 Extended Exhale 4-8
-**Energising** — Wim Hof · Bellows · Triangle
+**Energising** — Wim Hof · Bellows · Triangle · Vortex 13-8-5-3-2-1
 **Clinical** — Buteyko · Alternate Nostril · Pursed Lip
+
+Vortex is a descending Fibonacci run — each number is one full breath, split
+evenly inhale/exhale, no holds — that repeats every cycle. Its 0.5s tail is the
+fastest phase in the catalogue; the CLI↔Model resolver cross-check covers it.
 
 A technique is data. Adding one means adding an entry to `techniques.json` (and
 its two embedded copies — see below); no animation code is involved, because
@@ -66,17 +71,35 @@ finish and a stray keystroke ended a live session.
 
 ```bash
 omarchy-breathe start box --cycles 8    # or: toggle | pause | resume | stop | reset
+omarchy-breathe start box --loop        # restart the pattern until stopped
+omarchy-breathe skip                    # during a hold, jump to the next phase
 omarchy-breathe status                  # live JSON
 omarchy-breathe techniques              # catalogue incl. the user's customs
 omarchy-breathe stats | history
 ```
+
+**Loop** is a per-session `--loop` flag or a panel toggle the CLI reads as its
+default (never writes — [ADR-0006](../../docs/adr/0006-cli-first-plugins.md)
+rule 4). When a pass finishes it is credited like any completed session, then
+the clock rolls back to cycle 1 — no completion sound, no notification. `stop`
+ends a looped session normally. A machine that was off across the end of a loop
+session credits one pass and parks, rather than resuming an endless timer.
+
+**Skip a hold** advances `elapsedMs` to the end of the current phase and banks
+the jumped time in `session.skipMs`, so a shortened retention counts toward
+cycle progress but not toward the seconds credited. It is a no-op outside a
+breath-hold and never ends a session. In the fullscreen guide it is the Right
+arrow, live only while a hold is running; in the panel it is a button that
+appears during a hold.
 
 From the shell, a keybind, or a conductor ritual:
 
 ```bash
 omarchy-shell -q alteringux.breathe toggle
 omarchy-shell -q alteringux.breathe start physiological-sigh
-omarchy-shell -q alteringux.breathe guide     # raise/hide the overlay
+omarchy-shell -q alteringux.breathe skip       # cut a hold short
+omarchy-shell -q alteringux.breathe loop       # toggle the loop default
+omarchy-shell -q alteringux.breathe guide      # raise/hide the overlay
 omarchy-shell -q alteringux.breathe panel
 ```
 
@@ -113,10 +136,13 @@ crediting and streak maths run without spawning a unit or firing notifications.
 
 - **The daemon's cost.** It resolves the phase in pure bash from an array read
   once per session. Reintroducing a `jq` fork into the tick loop costs ~10× the
-  CPU (measured: 22% of a core versus 2%). Bellows' one-second phases are the
-  worst case.
+  CPU (measured: 22% of a core versus 2%). Vortex's 0.5s tail is the worst case
+  (Bellows' one-second phases were, before it), and the tick wait floors at
+  40ms, so it never busy-spins.
 - **`reset` credits nothing; `stop` credits if a whole cycle ran.** That
-  asymmetry is deliberate and tested.
+  asymmetry is deliberate and tested. A `--loop` pass credits on every roll;
+  time jumped past with `skip` is subtracted from the seconds credited but not
+  from cycle progress.
 - **Restarting the shell** races itself: `omarchy restart shell` can report
   "did not become ready" when the old instance has not released. `omarchy-shell`
   is the IPC *client*; `omarchy-launch-shell` is what starts one.

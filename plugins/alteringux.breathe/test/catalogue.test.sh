@@ -108,7 +108,7 @@ else
   "$CLI" get >/dev/null 2>&1
   mismatches=0
   points=0
-  for technique in box relaxing478 wim-hof nadi-shodhana bellows physiological-sigh buteyko; do
+  for technique in box relaxing478 wim-hof nadi-shodhana bellows physiological-sigh buteyko vortex; do
     "$CLI" start "$technique" >/dev/null 2>&1 || continue
     planned="$(jq -r '.cycles' "$resolver_state/breathe-session.json")"
     for ms in 0 1500 4000 12500 31000 65000 91000 150000; do

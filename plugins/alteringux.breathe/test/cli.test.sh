@@ -321,7 +321,7 @@ t_restore_on_idle_is_a_noop() {
 # ── techniques ────────────────────────────────────────────────────────
 t_techniques() {
   fresh
-  check "the catalogue has the eleven built-ins" "$(b techniques | jq 'length')" 11
+  check "the catalogue has the twelve built-ins" "$(b techniques | jq 'length')" 12
   check "every technique has phases"             "$(b techniques | jq '[.[] | select((.phases|length) == 0)] | length')" 0
   check "ids are unique"                         "$(b techniques | jq '[.[].id] | (length - (unique | length))')" 0
 }
@@ -333,7 +333,7 @@ t_custom_techniques() {
       defaultCycles:3, phases:[{kind:"INHALE",seconds:6,label:"In"},{kind:"EXHALE",seconds:10,label:"Out"}]}]' \
     "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
     && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
-  check "a custom technique joins the catalogue" "$(b techniques | jq 'length')" 12
+  check "a custom technique joins the catalogue" "$(b techniques | jq 'length')" 13
   check "and is startable by id"                 "$(b start custom-slow | jq -r '.techniqueName')" Slow
   check "with its own cycle length"              "$(b status | jq -r '.sessionDurationMs')" 48000
 }
@@ -393,6 +393,94 @@ t_silent_flag() {
   check "--silent is recorded on the session" "$(sfield '.silent')" true
 }
 
+# ── loop ──────────────────────────────────────────────────────────────
+t_loop_flag() {
+  fresh
+  b start box --loop >/dev/null
+  check "--loop is recorded on the session"   "$(sfield '.loop')" true
+  check "a fresh loop session has skipped nothing" "$(sfield '.skipMs')" 0
+}
+
+t_loop_defaults_from_config() {
+  fresh
+  b get >/dev/null
+  jq '.loop=true' "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start box >/dev/null
+  check "a bare start inherits the configured loop default" "$(sfield '.loop')" true
+}
+
+t_stop_ends_a_looping_session() {
+  fresh
+  b start box --cycles 2 --loop >/dev/null
+  park_at 32000                       # exactly one planned pass
+  b stop >/dev/null
+  check "stop ends a looped session rather than rolling it" "$(sfield '.state')" DONE
+  check "and the finished pass is still credited"           "$(statfield '.totals.sessions')" 1
+}
+
+# The daemon's own roll path: a loop session that reaches its planned length
+# while the daemon is live is credited and kept RUNNING, not parked in DONE.
+# Start the clock just short of one pass with a fresh heartbeat (so `restore`
+# leaves it live), then let the real daemon tick past the boundary.
+t_daemon_rolls_a_loop() {
+  fresh
+  b get >/dev/null
+  jq '.customTechniques=[{id:"custom-fast",name:"Fast",family:"custom",tone:"info",defaultCycles:2,
+      phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}]' \
+    "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start custom-fast --cycles 2 --loop >/dev/null      # 2 x 2s = 4s a pass
+
+  jq --argjson n "$(date +%s%3N)" '.state="RUNNING" | .elapsedMs=3600 | .savedAtMs=$n' \
+    "$OMARCHY_STATE_DIR/breathe-session.json" > "$OMARCHY_STATE_DIR/.s" \
+    && mv "$OMARCHY_STATE_DIR/.s" "$OMARCHY_STATE_DIR/breathe-session.json"
+
+  timeout 3 "$CLI" __run >/dev/null 2>&1
+
+  check "a loop pass does not park the session in DONE" "$(sfield '.state')" RUNNING
+  check "the finished pass was credited to history"     "$([ "$(histfield '.sessions | length')" -ge 1 ] && echo yes)" yes
+  check "the rolled pass is marked completed"           "$(histfield '.sessions[0].completed')" true
+  check "and the clock was dropped back for the next pass" "$([ "$(sfield '.elapsedMs')" -lt 3600 ] && echo yes)" yes
+}
+
+# ── skip a hold ───────────────────────────────────────────────────────
+t_skip_advances_a_hold() {
+  fresh
+  b start box --cycles 4 >/dev/null       # INHALE4 HOLD_IN4 EXHALE4 HOLD_OUT4
+  park_at 5000                             # 1s into the HOLD_IN
+  b skip >/dev/null
+  check "skip jumps to the end of the hold"     "$(sfield '.elapsedMs')" 8000
+  check "and banks the skipped milliseconds"    "$(sfield '.skipMs')" 3000
+  check "the next phase is the exhale"          "$(b status | jq -r '.phaseKind')" EXHALE
+}
+
+t_skip_is_a_noop_outside_a_hold() {
+  fresh
+  b start box --cycles 4 >/dev/null
+  park_at 1000                             # 1s into the INHALE
+  local rc; b skip >/dev/null 2>&1; rc=$?
+  check "skip outside a hold changes nothing" "$(sfield '.elapsedMs')" 1000
+  check "and skips no time"                   "$(sfield '.skipMs')" 0
+}
+
+t_skip_refused_when_idle() {
+  fresh
+  b skip >/dev/null 2>&1
+  check "skip on a fresh install stays IDLE" "$(sfield '.state')" IDLE
+}
+
+t_skipped_hold_time_is_not_credited_as_seconds() {
+  fresh
+  b start box --cycles 4 >/dev/null       # 4 x 16s = 64s planned
+  park_at 4000                             # start of the HOLD_IN
+  b skip >/dev/null                        # -> elapsed 8000, skipMs 4000
+  park_at 40000                            # park_at preserves skipMs
+  b stop >/dev/null
+  check "skipped hold time is dropped from the seconds credited" "$(statfield '.totals.seconds')" 36
+  check "but the cycles progressed through still count"          "$(statfield '.totals.cycles')" 2
+}
+
 for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_config \
          t_pause_freezes t_toggle_cycles_states t_pause_resume_are_idempotent \
          t_stop_before_a_cycle_credits_nothing t_stop_after_a_cycle_credits \
@@ -403,7 +491,10 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_restore_finished_while_offline t_restore_still_live t_restore_missing_technique \
          t_restore_on_idle_is_a_noop t_techniques t_custom_techniques \
          t_unknown_technique_refused t_bad_cycles_refused \
-         t_garbage_state_files t_garbage_config t_status_shape t_silent_flag; do
+         t_garbage_state_files t_garbage_config t_status_shape t_silent_flag \
+         t_loop_flag t_loop_defaults_from_config t_stop_ends_a_looping_session \
+         t_daemon_rolls_a_loop t_skip_advances_a_hold t_skip_is_a_noop_outside_a_hold \
+         t_skip_refused_when_idle t_skipped_hold_time_is_not_credited_as_seconds; do
   printf '\n\033[1m%s\033[0m\n' "${t#t_}"
   "$t"
 done

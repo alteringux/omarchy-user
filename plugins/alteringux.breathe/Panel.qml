@@ -249,6 +249,13 @@ Panel {
                   onClicked: if (root.hostWidget) root.hostWidget.toggleSession()
                 }
                 Button {
+                  text: "Skip hold"
+                  bordered: true
+                  foreground: root.barForeground
+                  visible: root.running && root.live && root.live.isHold
+                  onClicked: if (root.hostWidget) root.hostWidget.skipHold()
+                }
+                Button {
                   text: "Finish"
                   bordered: true
                   foreground: root.barForeground
@@ -521,6 +528,15 @@ Panel {
               checked: root.config.silent === true
               foreground: root.barForeground
               onClicked: root.updateConfig({ silent: !root.config.silent })
+            }
+
+            Toggle {
+              width: parent.width
+              label: "Loop"
+              description: "When a session finishes, start it again until you stop"
+              checked: root.config.loop === true
+              foreground: root.barForeground
+              onClicked: root.updateConfig({ loop: !root.config.loop })
             }
 
             Toggle {

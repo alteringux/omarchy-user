@@ -110,6 +110,12 @@ Item {
         } else if (event.key === Qt.Key_Space) {
           if (!root.done) root.act("space", function () { root.hostWidget.toggleSession() })
           event.accepted = true
+        } else if (event.key === Qt.Key_Right) {
+          // Skip the rest of a hold when you cannot last it out. Gated to an
+          // active hold and to an arrow key (deliberate, not a stray letter),
+          // and it only advances the breath — it never ends the session.
+          if (root.running && root.isHold) root.act("skip", function () { root.hostWidget.skipHold() })
+          event.accepted = true
         }
         // Deliberately no key that ENDS a session. This surface takes
         // compositor keyboard focus while it is up, so a stray keystroke
@@ -439,7 +445,7 @@ Item {
       anchors.bottom: parent.bottom
       anchors.bottomMargin: Style.space(28)
       visible: !root.done
-      text: "Space pause · Esc hide"
+      text: (root.running && root.isHold ? "→ skip · " : "") + "Space pause · Esc hide"
       color: Kit.Palette.faint
       font.family: Style.font.family
       font.pixelSize: Style.font.caption

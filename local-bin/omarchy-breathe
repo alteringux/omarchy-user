@@ -13,14 +13,18 @@
 #
 #   omarchy-breathe get                 print breathe-session.json
 #   omarchy-breathe status              live { state, phaseKind, phaseRemainingMs, ... }
-#   omarchy-breathe start [id] [--cycles N] [--silent]
+#   omarchy-breathe start [id] [--cycles N] [--silent] [--loop]
 #   omarchy-breathe toggle              IDLE->start · RUNNING<->PAUSED · DONE->start again
 #   omarchy-breathe pause | resume      the explicit forms of toggle
+#   omarchy-breathe skip                during a breath-hold, jump to the next phase
 #   omarchy-breathe stop                end now; credited if at least one cycle ran
 #   omarchy-breathe reset               back to IDLE, stop the daemon, credit nothing
 #   omarchy-breathe restore             reconcile a session persisted across a reboot
 #   omarchy-breathe techniques          the catalogue (built-ins + customs) as JSON
 #   omarchy-breathe stats | history     print those files
+#
+#   --loop keeps restarting the same technique when a pass finishes (each
+#   completed pass is credited); the config default is widget-owned.
 #
 # Env: OMARCHY_STATE_DIR overrides the state dir (tests).
 #      OMARCHY_BREATHE_NO_DAEMON=1 skips all systemd calls (tests).
@@ -39,8 +43,8 @@ SESSION_HISTORY_MAX=300
 DEFAULT_SOUND="/usr/share/sounds/freedesktop/stereo/message.oga"
 DEFAULT_END_SOUND="/usr/share/sounds/freedesktop/stereo/complete.oga"
 
-DEFAULT_CONFIG='{"version":1,"defaultTechniqueId":"box","defaultCycles":8,"silent":false,"phaseSound":"","endSound":"","notifyOnEnd":true,"overlayOnStart":true,"overlayDim":0.82,"reduceMotion":false,"showBarCountdown":true,"nudge":{"enabled":false,"everyMinutes":90,"quietFrom":"22:00","quietTo":"08:00","techniqueId":"physiological-sigh"},"customTechniques":[]}'
-DEFAULT_SESSION='{"version":1,"state":"IDLE","techniqueId":"","cycles":0,"sessionId":"","startedAtMs":0,"savedAtMs":0,"elapsedMs":0,"silent":false}'
+DEFAULT_CONFIG='{"version":1,"defaultTechniqueId":"box","defaultCycles":8,"silent":false,"loop":false,"phaseSound":"","endSound":"","notifyOnEnd":true,"overlayOnStart":true,"overlayDim":0.82,"reduceMotion":false,"showBarCountdown":true,"nudge":{"enabled":false,"everyMinutes":90,"quietFrom":"22:00","quietTo":"08:00","techniqueId":"physiological-sigh"},"customTechniques":[]}'
+DEFAULT_SESSION='{"version":1,"state":"IDLE","techniqueId":"","cycles":0,"sessionId":"","startedAtMs":0,"savedAtMs":0,"elapsedMs":0,"silent":false,"loop":false,"skipMs":0}'
 DEFAULT_STATS='{"version":1,"streak":0,"bestStreak":0,"lastActiveDate":"","daily":{},"totals":{"sessions":0,"seconds":0,"cycles":0}}'
 DEFAULT_HISTORY='{"version":1,"sessions":[]}'
 
@@ -268,6 +272,30 @@ read -r -d '' BUILTIN_TECHNIQUES <<'CATALOGUE_JSON' || true
         "seconds": 4,
         "label": "Exhale"
       }
+    ]
+  },
+  {
+    "id": "vortex",
+    "name": "Vortex",
+    "pattern": "13-8-5-3-2-1",
+    "family": "energising",
+    "tone": "info",
+    "blurb": "A descending run down the Fibonacci sequence — 13, 8, 5, 3, 2, 1 seconds a breath, each one lighter than the last. The shortening pace does the settling; you just follow it down.",
+    "use": "Morning practice, clearing a busy head, dropping into a rhythm without counting. Let the short breaths stay light — no need to force them.",
+    "defaultCycles": 4,
+    "phases": [
+      { "kind": "INHALE", "seconds": 6.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 6.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 4, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 2.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 2.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 1.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 1.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 1, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 1, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 0.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 0.5, "label": "Exhale" }
     ]
   },
   {
@@ -519,7 +547,7 @@ stop_daemon() {
 # is not a breathing session, and crediting it would make the streak lie.
 credit_session() {   # $1 = session JSON, $2 = elapsedMs, $3 = completed(true|false)
   local sess="$1" elapsed="$2" completed="$3"
-  local tid technique cycleMs cycles seconds doneCycles name
+  local tid technique cycleMs cycles seconds doneCycles name skipMs breathedMs
   tid="$(jq -r '.techniqueId' <<<"$sess")"
   technique="$(technique_by_id "$tid")"
   [ -n "$technique" ] || return 0
@@ -540,7 +568,14 @@ credit_session() {   # $1 = session JSON, $2 = elapsedMs, $3 = completed(true|fa
   doneCycles=$(( elapsed / cycleMs ))
   (( doneCycles < 1 )) && return 0
   (( doneCycles > cycles )) && doneCycles=$cycles
-  seconds=$(( (elapsed + 500) / 1000 ))
+
+  # Time skipped past during a hold was progressed through but not breathed, so
+  # it counts toward cycles completed but not toward the seconds credited.
+  skipMs="$(jq -r '.skipMs // 0' <<<"$sess")"
+  case "$skipMs" in (*[!0-9]*|"") skipMs=0 ;; esac
+  breathedMs=$(( elapsed - skipMs ))
+  (( breathedMs < 0 )) && breathedMs=0
+  seconds=$(( (breathedMs + 500) / 1000 ))
   name="$(jq -r '.name' <<<"$technique")"
 
   read_history | jq \
@@ -591,11 +626,12 @@ credit_session() {   # $1 = session JSON, $2 = elapsedMs, $3 = completed(true|fa
 
 # ── verbs ─────────────────────────────────────────────────────────────
 cmd_start() {
-  local tid="" cycles="" silent="false"
+  local tid="" cycles="" silent="false" loop=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --cycles) cycles="${2:-}"; shift 2 ;;
       --silent) silent="true"; shift ;;
+      --loop) loop="true"; shift ;;
       --*) echo "omarchy-breathe: unknown option '$1'" >&2; exit 2 ;;
       *) tid="$1"; shift ;;
     esac
@@ -618,12 +654,14 @@ cmd_start() {
   [ "$cycles" -ge 1 ] || { echo "omarchy-breathe: --cycles needs a positive integer" >&2; exit 2; }
 
   [ "$silent" = "true" ] || silent="$(jq -r '.silent // false' <<<"$cfg")"
+  # Loop is per-session from --loop, else the widget-owned config default.
+  [ -n "$loop" ] || loop="$(jq -r 'if (.loop // false) then "true" else "false" end' <<<"$cfg")"
 
   local now; now="$(now_ms)"
   jq -n --arg tid "$tid" --argjson cycles "$cycles" --arg sid "$(new_id)" \
-        --argjson now "$now" --argjson silent "$silent" '
+        --argjson now "$now" --argjson silent "$silent" --argjson loop "$loop" '
     {version:1, state:"RUNNING", techniqueId:$tid, cycles:$cycles, sessionId:$sid,
-     startedAtMs:$now, savedAtMs:$now, elapsedMs:0, silent:$silent}
+     startedAtMs:$now, savedAtMs:$now, elapsedMs:0, silent:$silent, loop:$loop, skipMs:0}
   ' | put_session
   ensure_daemon
   cmd_status
@@ -694,6 +732,81 @@ finish_session() {   # $1 = credit(true|false)
   fi
 }
 
+# A --loop pass reached its planned length: credit it exactly like a completed
+# session, then drop the clock back to the start and keep the session RUNNING.
+# No end cue and no notification — a chime every couple of minutes is not what
+# looping is for. `stop` still ends a looped session the normal way.
+roll_session() {
+  local sess technique totalMs
+  sess="$(read_session)"
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  if [ -z "$technique" ]; then finish_session true; return 0; fi
+
+  totalMs=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * $(jq -r '.cycles' <<<"$sess") ))
+  credit_session "$sess" "$totalMs" true >/dev/null
+
+  jq --arg sid "$(new_id)" --argjson n "$(now_ms)" '
+    .state = "RUNNING" | .sessionId = $sid
+    | .startedAtMs = $n | .savedAtMs = $n | .elapsedMs = 0 | .skipMs = 0
+  ' <<<"$sess" | put_session
+}
+
+# "I cannot hold this any longer." During a breath-hold, jump straight to the
+# start of the next phase. The skipped milliseconds are banked in .skipMs so
+# crediting counts them toward cycle progress but not toward seconds breathed.
+# A no-op outside a hold, and it never ends the session (bar the rare case of a
+# hold that is literally the last phase of the last cycle, which legitimately
+# completes it).
+cmd_skip() {
+  local sess state technique now base saved cycles elapsed
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  case "$state" in
+    RUNNING|PAUSED) ;;
+    *) cmd_status; return 0 ;;
+  esac
+
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  [ -n "$technique" ] || { cmd_status; return 0; }
+
+  now="$(now_ms)"
+  base="$(jq -r '.elapsedMs' <<<"$sess")"
+  saved="$(jq -r '.savedAtMs' <<<"$sess")"
+  cycles="$(jq -r '.cycles' <<<"$sess")"
+  elapsed=$base
+  [ "$state" = "RUNNING" ] && elapsed=$(( base + now - saved ))
+  (( elapsed < 0 )) && elapsed=0
+
+  local r kind pElapsed pDur remaining skipMs total
+  r="$(jq -c --argjson e "$elapsed" --argjson c "$cycles" "$PLIB"'resolve($e; $c)' <<<"$technique")"
+  kind="$(jq -r '.phaseKind' <<<"$r")"
+  pElapsed="$(jq -r '.phaseElapsedMs' <<<"$r")"
+  pDur="$(jq -r '.phaseDurationMs' <<<"$r")"
+
+  case "$kind" in
+    HOLD_IN|HOLD_OUT|RETENTION|RECOVERY) ;;
+    *) echo "omarchy-breathe: skip only works during a breath-hold (now: ${kind:-none})" >&2
+       cmd_status; return 0 ;;
+  esac
+
+  remaining=$(( pDur - pElapsed ))
+  (( remaining <= 0 )) && { cmd_status; return 0; }
+
+  elapsed=$(( elapsed + remaining ))
+  skipMs=$(( $(jq -r '.skipMs // 0' <<<"$sess") + remaining ))
+
+  jq --argjson e "$elapsed" --argjson s "$skipMs" --argjson n "$now" \
+    '.elapsedMs = $e | .skipMs = $s | .savedAtMs = $n' <<<"$sess" | put_session
+
+  # If the jump landed at or past the end, finish now (or roll, when looping)
+  # rather than leaving a past-the-end position for the daemon to trip over.
+  total=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * cycles ))
+  if (( total > 0 && elapsed >= total )); then
+    if [ "$(jq -r '.loop // false' <<<"$sess")" = "true" ]; then roll_session; else finish_session true; fi
+  fi
+  cmd_status
+}
+
 cmd_reset() {
   printf '%s' "$DEFAULT_SESSION" | put_session
   stop_daemon
@@ -760,6 +873,7 @@ cmd_status() {
          techniqueName: (($technique.name) // ""),
          cycles: $cycles,
          silent: ($session.silent // false),
+         loop: ($session.loop // false),
          elapsedMs: $elapsed,
          phaseKind: (($r.phaseKind) // ""),
          phaseLabel: (($r.phaseLabel) // ""),
@@ -817,12 +931,12 @@ run_loop() {
   cue_path="$(jq -r '.phaseSound // ""' <<<"$cfg")"
   [ -n "$cue_path" ] || cue_path="$DEFAULT_SOUND"
 
-  local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms
+  local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf
 
   while :; do
     # One jq call per tick, reading every field at once.
-    IFS=$'\t' read -r state base saved cycles < <(
-      jq -r '[(.state // "IDLE"), (.elapsedMs // 0 | floor), (.savedAtMs // 0 | floor), (.cycles // 0 | floor)] | @tsv' \
+    IFS=$'\t' read -r state base saved cycles loopf < <(
+      jq -r '[(.state // "IDLE"), (.elapsedMs // 0 | floor), (.savedAtMs // 0 | floor), (.cycles // 0 | floor), (if (.loop // false) then "loop" else "once" end)] | @tsv' \
         "$SESSION_FILE" 2>/dev/null
     ) || break
     [ -n "$state" ] || break
@@ -838,6 +952,15 @@ run_loop() {
     total_ms=$(( cycle_ms * cycles ))
 
     if (( total_ms > 0 && elapsed >= total_ms )); then
+      if [ "$loopf" = "loop" ]; then
+        # Credit the finished pass and drop the clock back to zero, then keep
+        # ticking. -1 so the first phase of the new pass is not heard as a
+        # spurious boundary cue.
+        roll_session
+        last_index=-1
+        hb=0
+        continue
+      fi
       finish_session true
       break
     fi
@@ -882,12 +1005,13 @@ case "${1:-get}" in
   toggle)          cmd_toggle ;;
   pause)           cmd_pause ;;
   resume)          cmd_resume ;;
+  skip)            cmd_skip ;;
   stop)            finish_session true; cmd_status ;;
   reset)           cmd_reset ;;
   restore)         restore_and_ensure ;;
   techniques)      read_techniques ;;
   stats)           read_stats | jq . ;;
   history)         read_history | jq . ;;
-  -h|--help|help)  sed -n '2,29p' "$0" ;;
+  -h|--help|help)  sed -n '2,33p' "$0" ;;
   *) echo "omarchy-breathe: unknown command '${1}' (try --help)" >&2; exit 2 ;;
 esac
