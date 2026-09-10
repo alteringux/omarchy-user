@@ -491,17 +491,23 @@ play_file() {   # $1 = path
   local path="$1"
   [ -n "$path" ] || return 0
   [ -f "$path" ] || return 0
-  # Gate on the shared mute helper so a cue never wakes a device the user
-  # deliberately silenced; a broken sound stack fails open and still plays.
-  if [ -r "$HOME/.local/bin/omarchy-audio-lib" ]; then
-    # shellcheck disable=SC1091
-    source "$HOME/.local/bin/omarchy-audio-lib"
-    omarchy_output_muted && return 0
-  fi
-  ( command -v mpv >/dev/null 2>&1 && exec mpv --no-video --really-quiet "$path"
-    command -v paplay >/dev/null 2>&1 && exec paplay "$path"
-    command -v pw-play >/dev/null 2>&1 && exec pw-play "$path"
-    exec canberra-gtk-play -f "$path" ) >/dev/null 2>&1 &
+  # Everything here runs in the background: an earlier version did the shared
+  # mute helper's three-fork pactl probe AND a fresh mpv spawn synchronously on
+  # every phase boundary. That jittered the daemon tick and let heavyweight mpv
+  # processes stack up fighting over the sink, so cues doubled or dropped. Thin
+  # PipeWire/Pulse clients are tried first; mpv is only a last resort. The mute
+  # helper still fails open (a broken sound stack still plays).
+  (
+    if [ -r "$HOME/.local/bin/omarchy-audio-lib" ]; then
+      # shellcheck disable=SC1091
+      source "$HOME/.local/bin/omarchy-audio-lib"
+      omarchy_output_muted && exit 0
+    fi
+    command -v pw-play          >/dev/null 2>&1 && exec pw-play "$path"
+    command -v paplay           >/dev/null 2>&1 && exec paplay "$path"
+    command -v canberra-gtk-play >/dev/null 2>&1 && exec canberra-gtk-play -f "$path"
+    exec mpv --no-video --really-quiet "$path"
+  ) >/dev/null 2>&1 &
 }
 
 play_phase_cue() {
@@ -947,7 +953,7 @@ run_loop() {
   cue_path="$(jq -r '.phaseSound // ""' <<<"$cfg")"
   [ -n "$cue_path" ] || cue_path="$DEFAULT_SOUND"
 
-  local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf
+  local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf cue_pid=""
 
   while :; do
     # One jq call per tick, reading every field at once.
@@ -994,7 +1000,11 @@ run_loop() {
     index=$(( (elapsed / cycle_ms) * phase_count + idx ))
     if (( last_index >= 0 && index != last_index )) && [ "$silent" != "true" ] \
        && [ "${OMARCHY_BREATHE_QUIET:-0}" != 1 ]; then
+      # One blip at a time: stop any still-running previous cue before the next
+      # so a slow player or a short phase can never stack them into a stutter.
+      [ -n "$cue_pid" ] && kill "$cue_pid" 2>/dev/null || true
       play_file "$cue_path"
+      cue_pid=$!
     fi
     last_index=$index
 

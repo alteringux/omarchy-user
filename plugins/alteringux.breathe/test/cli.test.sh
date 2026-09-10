@@ -184,6 +184,41 @@ t_daemon_completes_and_clamps() {
   check "marked completed"                              "$(histfield '.sessions[0].completed')" true
 }
 
+# Phase cues must fire once per boundary and never stack. The daemon kills the
+# previous blip before starting the next, so a player slower than the phase (the
+# shim sleeps 1.5s inside 1s phases) is cut off rather than left to pile up and
+# stutter. Runs the real daemon with a shimmed player on PATH and cues enabled.
+t_phase_cues_fire_once_and_do_not_stack() {
+  fresh
+  local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/cues.log"
+  mkdir -p "$shim"
+  cat > "$shim/pw-play" <<EOF
+#!/usr/bin/env bash
+echo "START" >> "$log"
+sleep 1.5
+echo "END" >> "$log"
+EOF
+  chmod +x "$shim/pw-play"
+  : > "$log"
+
+  b get >/dev/null
+  jq '.customTechniques=[{id:"cue-fast",name:"CueFast",family:"custom",tone:"info",defaultCycles:6,
+      phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}]' \
+    "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start cue-fast --cycles 6 >/dev/null            # 6 x 2s = 12s, a boundary every 1s
+
+  PATH="$shim:$PATH" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
+    timeout 8 "$CLI" __run >/dev/null 2>&1
+
+  # grep -c prints a count but exits 1 on zero matches; keep just the number.
+  local blips ends
+  blips=$(grep -c START "$log" 2>/dev/null || true)
+  ends=$(grep -c END "$log" 2>/dev/null || true)
+  check "phase cues actually fire"                   "$([ "${blips:-0}" -ge 3 ] && echo yes)" yes
+  check "a slow prior cue is cut off, not stacked"   "$([ "${ends:-0}" -lt "${blips:-0}" ] && echo yes)" yes
+}
+
 # The invariant that matters, enforced where the record is written: no session
 # may ever credit more time than the exercise actually lasts, whichever path
 # got there.
@@ -502,6 +537,7 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_pause_freezes t_toggle_cycles_states t_pause_resume_are_idempotent \
          t_stop_before_a_cycle_credits_nothing t_stop_after_a_cycle_credits \
          t_full_run_completes t_overrun_is_clamped t_daemon_completes_and_clamps \
+         t_phase_cues_fire_once_and_do_not_stack \
          t_never_credits_more_than_planned t_reset_credits_nothing \
          t_streak_starts_at_one t_streak_same_day_idempotent t_streak_consecutive_day \
          t_streak_gap_resets t_history_cap t_daily_cap \

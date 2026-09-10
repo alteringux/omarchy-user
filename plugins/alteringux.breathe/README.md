@@ -142,6 +142,13 @@ crediting and streak maths run without spawning a unit or firing notifications.
   CPU (measured: 22% of a core versus 2%). Vortex's 0.5s tail is the worst case
   (Bellows' one-second phases were, before it), and the tick wait floors at
   40ms, so it never busy-spins.
+- **The phase cue is fire-and-forget and single-flight.** `play_file` backgrounds
+  the whole thing — the `omarchy-audio-lib` mute probe (three `pactl` forks) and
+  the player — so the tick never blocks on it, and prefers the thin
+  PipeWire/Pulse clients over `mpv`. `run_loop` also kills the previous blip
+  before starting the next, so a slow player or a short phase can't stack cues
+  into a stutter or starve one out. Running the probe or `mpv` synchronously per
+  boundary is what made cues double up and drop.
 - **`reset` credits nothing; `stop` credits if a whole cycle ran.** That
   asymmetry is deliberate and tested. A `--loop` pass credits on every roll;
   time jumped past with `skip` is subtracted from the seconds credited but not
