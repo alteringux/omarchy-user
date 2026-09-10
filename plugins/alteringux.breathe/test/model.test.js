@@ -430,6 +430,12 @@ test("parseConfig defaults loop off and keeps a stored one", () => {
   assert.strictEqual(Model.parseConfig(JSON.stringify({ loop: 1 })).loop, false)
 })
 
+test("parseConfig defaults spoken cues off and coerces to a real boolean", () => {
+  assert.strictEqual(Model.parseConfig("{}").cueVoice, false)
+  assert.strictEqual(Model.parseConfig(JSON.stringify({ cueVoice: true })).cueVoice, true)
+  assert.strictEqual(Model.parseConfig(JSON.stringify({ cueVoice: "yes" })).cueVoice, false)
+})
+
 test("serializeConfig round-trips through parseConfig", () => {
   const c = Model.defaultConfig()
   c.defaultTechniqueId = "wim-hof"

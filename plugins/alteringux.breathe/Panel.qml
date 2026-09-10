@@ -541,6 +541,15 @@ Panel {
 
             Toggle {
               width: parent.width
+              label: "Spoken cues"
+              description: "Say \"In\", \"Out\", \"Hold\" at each phase instead of a chime"
+              checked: root.config.cueVoice === true
+              foreground: root.barForeground
+              onClicked: root.updateConfig({ cueVoice: !root.config.cueVoice })
+            }
+
+            Toggle {
+              width: parent.width
               label: "Notify when a session finishes"
               checked: root.config.notifyOnEnd === true
               foreground: root.barForeground

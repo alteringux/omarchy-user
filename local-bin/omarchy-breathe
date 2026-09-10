@@ -42,9 +42,17 @@ UNIT="omarchy-breathe"
 DAILY_HISTORY_DAYS=90
 SESSION_HISTORY_MAX=300
 DEFAULT_SOUND="/usr/share/sounds/freedesktop/stereo/message.oga"
-DEFAULT_END_SOUND="/usr/share/sounds/freedesktop/stereo/complete.oga"
+# Deliberately NOT complete.oga: omarchy-stopwatch rings that at every interval,
+# so sharing it made a finished breathing session sound like a stopwatch tick.
+DEFAULT_END_SOUND="/usr/share/sounds/freedesktop/stereo/service-login.oga"
 
-DEFAULT_CONFIG='{"version":1,"defaultTechniqueId":"box","defaultCycles":8,"silent":false,"loop":false,"phaseSound":"","endSound":"","notifyOnEnd":true,"overlayOnStart":true,"overlayDim":0.82,"reduceMotion":false,"showBarCountdown":true,"nudge":{"enabled":false,"everyMinutes":90,"quietFrom":"22:00","quietTo":"08:00","techniqueId":"physiological-sigh"},"customTechniques":[]}'
+# Spoken phase cues (opt-in via config.cueVoice). Same Piper voice and cache
+# style as omarchy-stopwatch / omarchy-countdown.
+VOICE_MODEL="$HOME/.local/share/piper-voices/en_US-lessac-medium.onnx"
+PIPER_BIN="$HOME/.local/bin/piper"
+VOICE_CACHE_DIR="$STATE_DIR/breathe-voice"
+
+DEFAULT_CONFIG='{"version":1,"defaultTechniqueId":"box","defaultCycles":8,"silent":false,"loop":false,"cueVoice":false,"phaseSound":"","endSound":"","notifyOnEnd":true,"overlayOnStart":true,"overlayDim":0.82,"reduceMotion":false,"showBarCountdown":true,"nudge":{"enabled":false,"everyMinutes":90,"quietFrom":"22:00","quietTo":"08:00","techniqueId":"physiological-sigh"},"customTechniques":[]}'
 DEFAULT_SESSION='{"version":1,"state":"IDLE","techniqueId":"","cycles":0,"sessionId":"","startedAtMs":0,"savedAtMs":0,"elapsedMs":0,"silent":false,"loop":false,"skipMs":0}'
 DEFAULT_STATS='{"version":1,"streak":0,"bestStreak":0,"lastActiveDate":"","daily":{},"totals":{"sessions":0,"seconds":0,"cycles":0}}'
 DEFAULT_HISTORY='{"version":1,"sessions":[]}'
@@ -517,6 +525,35 @@ play_phase_cue() {
   play_file "${configured:-$DEFAULT_SOUND}"
 }
 
+# ── spoken phase cues ────────────────────────────────────────────────
+# The word to say when a phase begins, or "" for a phase that gets no voice.
+phase_word() {   # $1 = phase kind
+  case "$1" in
+    INHALE)                              echo "In" ;;
+    EXHALE)                              echo "Out" ;;
+    HOLD_IN|HOLD_OUT|RETENTION|RECOVERY) echo "Hold" ;;
+    INHALE_TOP)                          echo "Sip" ;;
+    SWITCH)                              echo "Switch" ;;
+    POWER_BREATHS)                       echo "Breathe" ;;
+    *)                                   echo "" ;;
+  esac
+}
+
+# Path to the cached Piper clip for a word, rendering it once if missing. Prints
+# nothing when the voice or the binary is unavailable, so callers fall back to
+# the chime. Same voice/cache approach as omarchy-stopwatch.
+voice_wav() {   # $1 = word
+  local word="$1" wav
+  [ -n "$word" ] || return 0
+  [ -x "$PIPER_BIN" ] && [ -f "$VOICE_MODEL" ] || return 0
+  wav="$VOICE_CACHE_DIR/$word.wav"
+  if [ ! -s "$wav" ]; then
+    mkdir -p "$VOICE_CACHE_DIR"
+    "$PIPER_BIN" --model "$VOICE_MODEL" --output_file "$wav" --quiet <<<"$word" >/dev/null 2>&1 || true
+  fi
+  [ -s "$wav" ] && printf '%s' "$wav"
+}
+
 play_end_cue() {
   [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ] && return 0
   session_is_silent && return 0
@@ -946,12 +983,26 @@ run_loop() {
 
   # Cue policy is config, which is widget-owned and effectively static for the
   # length of one session, so resolve it here instead of per boundary.
-  local cue_path silent cfg
+  local cue_path silent cfg voice
   cfg="$(read_config)"
   silent="$(jq -r '.silent // false' <<<"$cfg")"
   [ "$(jq -r '.silent // false' <<<"$sess")" = "true" ] && silent=true
   cue_path="$(jq -r '.phaseSound // ""' <<<"$cfg")"
   [ -n "$cue_path" ] || cue_path="$DEFAULT_SOUND"
+  voice="$(jq -r 'if (.cueVoice // false) then "true" else "false" end' <<<"$cfg")"
+
+  # Per-phase cue target: the spoken clip for that phase when cueVoice is on and
+  # the voice renders, otherwise the chime. Resolved (and the clips pre-rendered)
+  # once here so the tick just plays cue_wav[idx] through the same path.
+  local -a phase_kind=() cue_wav=()
+  mapfile -t phase_kind < <(jq -r '.phases[].kind' <<<"$technique")
+  local k w wav
+  for k in "${phase_kind[@]}"; do
+    wav=""
+    [ "$voice" = "true" ] && { w="$(phase_word "$k")"; wav="$(voice_wav "$w")"; }
+    [ -n "$wav" ] || wav="$cue_path"
+    cue_wav+=("$wav")
+  done
 
   local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf cue_pid=""
 
@@ -1003,7 +1054,7 @@ run_loop() {
       # One blip at a time: stop any still-running previous cue before the next
       # so a slow player or a short phase can never stack them into a stutter.
       [ -n "$cue_pid" ] && kill "$cue_pid" 2>/dev/null || true
-      play_file "$cue_path"
+      play_file "${cue_wav[idx]:-$cue_path}"
       cue_pid=$!
     fi
     last_index=$index

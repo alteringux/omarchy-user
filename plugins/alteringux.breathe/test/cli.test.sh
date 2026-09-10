@@ -219,6 +219,69 @@ EOF
   check "a slow prior cue is cut off, not stacked"   "$([ "${ends:-0}" -lt "${blips:-0}" ] && echo yes)" yes
 }
 
+# A fake HOME carrying a stub piper + voice model, so the voice path is exercised
+# without the real Piper install. VOICE_MODEL / PIPER_BIN are $HOME-relative.
+_voice_home() {   # $1 = dir, $2 = "with-piper" | "no-piper"
+  local fh="$1"
+  mkdir -p "$fh/.local/bin" "$fh/.local/share/piper-voices"
+  if [ "$2" = "with-piper" ]; then
+    printf 'model' > "$fh/.local/share/piper-voices/en_US-lessac-medium.onnx"
+    cat > "$fh/.local/bin/piper" <<'EOF'
+#!/usr/bin/env bash
+out=""; while [ $# -gt 0 ]; do [ "$1" = "--output_file" ] && { out="$2"; shift; }; shift; done
+[ -n "$out" ] && printf 'wav' > "$out"
+EOF
+    chmod +x "$fh/.local/bin/piper"
+  fi
+}
+
+t_spoken_cues_play_words_not_the_chime() {
+  fresh
+  local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/plays.log" fh="$OMARCHY_STATE_DIR/home"
+  mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s"\n' "$log" > "$shim/pw-play"
+  chmod +x "$shim/pw-play"
+  : > "$log"
+  _voice_home "$fh" with-piper
+
+  b get >/dev/null
+  jq '.cueVoice=true' "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start box --cycles 3 >/dev/null                 # In / Hold / Out / Hold
+
+  PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
+    timeout 12 "$CLI" __run >/dev/null 2>&1
+
+  local voiced chimed
+  voiced=$(grep -c 'breathe-voice' "$log" 2>/dev/null || true)
+  chimed=$(grep -c '\.oga' "$log" 2>/dev/null || true)
+  check "spoken cues play the rendered words" "$([ "${voiced:-0}" -ge 2 ] && echo yes)" yes
+  check "and never the chime"                 "${chimed:-0}" 0
+  check "the words were rendered to the cache" \
+    "$([ -s "$OMARCHY_STATE_DIR/breathe-voice/Hold.wav" ] && echo yes)" yes
+}
+
+t_spoken_cues_fall_back_to_chime_without_tts() {
+  fresh
+  local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/plays.log" fh="$OMARCHY_STATE_DIR/home"
+  mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s"\n' "$log" > "$shim/pw-play"
+  chmod +x "$shim/pw-play"
+  : > "$log"
+  _voice_home "$fh" no-piper                        # HOME with no piper binary
+
+  b get >/dev/null
+  jq '.cueVoice=true' "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start box --cycles 2 >/dev/null
+
+  PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
+    timeout 8 "$CLI" __run >/dev/null 2>&1
+
+  check "voice on but no TTS still cues, via the chime" \
+    "$([ "$(grep -c '\.oga' "$log" 2>/dev/null || true)" -ge 1 ] && echo yes)" yes
+}
+
 # The invariant that matters, enforced where the record is written: no session
 # may ever credit more time than the exercise actually lasts, whichever path
 # got there.
@@ -538,6 +601,7 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_stop_before_a_cycle_credits_nothing t_stop_after_a_cycle_credits \
          t_full_run_completes t_overrun_is_clamped t_daemon_completes_and_clamps \
          t_phase_cues_fire_once_and_do_not_stack \
+         t_spoken_cues_play_words_not_the_chime t_spoken_cues_fall_back_to_chime_without_tts \
          t_never_credits_more_than_planned t_reset_credits_nothing \
          t_streak_starts_at_one t_streak_same_day_idempotent t_streak_consecutive_day \
          t_streak_gap_resets t_history_cap t_daily_cap \

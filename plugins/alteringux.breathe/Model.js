@@ -682,6 +682,9 @@ function defaultConfig() {
     defaultCycles: 8,
     silent: false,
     loop: false,
+    // Speak the phase ("In", "Out", "Hold", …) at each boundary instead of
+    // ringing the chime. Falls back to the chime if the TTS voice is missing.
+    cueVoice: false,
     phaseSound: "",
     endSound: "",
     notifyOnEnd: true,
@@ -725,6 +728,7 @@ function parseConfig(raw) {
 
   if (!parsed.customTechniques || !parsed.customTechniques.length) parsed.customTechniques = []
   parsed.loop = parsed.loop === true
+  parsed.cueVoice = parsed.cueVoice === true
   parsed.overlayDim = clamp(num(parsed.overlayDim, 0.82), 0, 1)
   parsed.defaultCycles = Math.max(1, Math.round(num(parsed.defaultCycles, 8)))
   return parsed

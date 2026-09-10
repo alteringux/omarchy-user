@@ -95,6 +95,18 @@ breath-hold and never ends a session. In the fullscreen guide it is the Right
 arrow or the **Skip hold** control (shown only during a hold); in the panel it
 is a button that appears during a hold.
 
+**Cues.** By default each phase boundary rings `phaseSound` (a soft
+`message.oga`) and completion rings `endSound`. The completion default is
+`service-login.oga`, deliberately *not* `complete.oga` — `omarchy-stopwatch`
+rings that at every interval, and sharing it made a finished session sound like
+a stopwatch tick. Turn on **Spoken cues** (`config.cueVoice`) and the phase
+chime is replaced by a spoken word — "In", "Out", "Hold", "Sip", "Switch",
+"Breathe" — rendered once by Piper (the same voice and cache approach as
+`omarchy-stopwatch` / `omarchy-countdown`) into `breathe-voice/` under the state
+dir and pre-warmed when the daemon starts. If Piper or its voice model is
+missing it silently falls back to the chime. The completion cue stays a chime
+either way.
+
 From the shell, a keybind, or a conductor ritual:
 
 ```bash
