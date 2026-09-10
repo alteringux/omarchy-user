@@ -167,9 +167,9 @@ BarWidget {
   function stopSession()   { usage.record("stop");   root.runVerb(["stop"]) }
   function resetSession()  { usage.record("reset");  root.runVerb(["reset"]) }
 
-  function toggleLoop() {
-    root.updateConfig({ loop: !(root.configLoaded && root.config.loop === true) })
-  }
+  // Flip looping on the session in flight. The saved default (what new sessions
+  // start with) is the panel's "Loop" toggle; this is the live one.
+  function toggleSessionLoop() { usage.record("loop"); root.runVerb(["loop"]) }
 
   // ---- the fullscreen guide -------------------------------------------
   property bool guideVisible: false
@@ -249,7 +249,7 @@ BarWidget {
     function skip(): void { root.skipHold() }
     function stop(): void { root.stopSession() }
     function reset(): void { root.resetSession() }
-    function loop(): void { root.toggleLoop() }
+    function loop(): void { root.toggleSessionLoop() }
     function guide(): void { root.toggleGuide() }
     function open(): void { root.open() }
     function close(): void { root.close() }

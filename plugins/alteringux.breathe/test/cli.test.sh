@@ -419,6 +419,23 @@ t_stop_ends_a_looping_session() {
   check "and the finished pass is still credited"           "$(statfield '.totals.sessions')" 1
 }
 
+t_loop_verb_toggles_the_running_session() {
+  fresh
+  b start box --cycles 4 >/dev/null
+  check "a session starts un-looped"  "$(sfield '.loop')" false
+  b loop >/dev/null
+  check "the loop verb flips it on"   "$(sfield '.loop')" true
+  b loop >/dev/null
+  check "and flips it back off"       "$(sfield '.loop')" false
+}
+
+t_loop_verb_is_a_noop_when_idle() {
+  fresh
+  b loop >/dev/null
+  check "the loop verb does nothing with no session" "$(sfield '.state')" IDLE
+  check "and sets no stray flag"                     "$(sfield '.loop')" false
+}
+
 # The daemon's own roll path: a loop session that reaches its planned length
 # while the daemon is live is credited and kept RUNNING, not parked in DONE.
 # Start the clock just short of one pass with a fresh heartbeat (so `restore`
@@ -493,6 +510,7 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_unknown_technique_refused t_bad_cycles_refused \
          t_garbage_state_files t_garbage_config t_status_shape t_silent_flag \
          t_loop_flag t_loop_defaults_from_config t_stop_ends_a_looping_session \
+         t_loop_verb_toggles_the_running_session t_loop_verb_is_a_noop_when_idle \
          t_daemon_rolls_a_loop t_skip_advances_a_hold t_skip_is_a_noop_outside_a_hold \
          t_skip_refused_when_idle t_skipped_hold_time_is_not_credited_as_seconds; do
   printf '\n\033[1m%s\033[0m\n' "${t#t_}"

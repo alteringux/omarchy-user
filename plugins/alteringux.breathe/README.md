@@ -78,19 +78,22 @@ omarchy-breathe techniques              # catalogue incl. the user's customs
 omarchy-breathe stats | history
 ```
 
-**Loop** is a per-session `--loop` flag or a panel toggle the CLI reads as its
-default (never writes — [ADR-0006](../../docs/adr/0006-cli-first-plugins.md)
-rule 4). When a pass finishes it is credited like any completed session, then
-the clock rolls back to cycle 1 — no completion sound, no notification. `stop`
-ends a looped session normally. A machine that was off across the end of a loop
-session credits one pass and parks, rather than resuming an endless timer.
+**Loop.** Two separate things: the panel's **Loop** toggle is the *default* new
+sessions start with (widget-owned config; the CLI reads it but never writes it —
+[ADR-0006](../../docs/adr/0006-cli-first-plugins.md) rule 4), and `--loop` /
+`omarchy-breathe loop` / the fullscreen guide's **Loop** control / `L` in the
+guide all flip the flag on the *session in flight*. When a looped pass finishes
+it is credited like any completed session, then the clock rolls back to cycle 1
+— no completion sound, no notification. `stop` ends a looped session normally. A
+machine that was off across the end of a loop session credits one pass and
+parks, rather than resuming an endless timer.
 
 **Skip a hold** advances `elapsedMs` to the end of the current phase and banks
 the jumped time in `session.skipMs`, so a shortened retention counts toward
 cycle progress but not toward the seconds credited. It is a no-op outside a
 breath-hold and never ends a session. In the fullscreen guide it is the Right
-arrow, live only while a hold is running; in the panel it is a button that
-appears during a hold.
+arrow or the **Skip hold** control (shown only during a hold); in the panel it
+is a button that appears during a hold.
 
 From the shell, a keybind, or a conductor ritual:
 
@@ -98,7 +101,7 @@ From the shell, a keybind, or a conductor ritual:
 omarchy-shell -q alteringux.breathe toggle
 omarchy-shell -q alteringux.breathe start physiological-sigh
 omarchy-shell -q alteringux.breathe skip       # cut a hold short
-omarchy-shell -q alteringux.breathe loop       # toggle the loop default
+omarchy-shell -q alteringux.breathe loop       # flip looping on the running session
 omarchy-shell -q alteringux.breathe guide      # raise/hide the overlay
 omarchy-shell -q alteringux.breathe panel
 ```

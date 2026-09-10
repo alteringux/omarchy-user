@@ -17,6 +17,7 @@
 #   omarchy-breathe toggle              IDLE->start · RUNNING<->PAUSED · DONE->start again
 #   omarchy-breathe pause | resume      the explicit forms of toggle
 #   omarchy-breathe skip                during a breath-hold, jump to the next phase
+#   omarchy-breathe loop                flip looping on the running session
 #   omarchy-breathe stop                end now; credited if at least one cycle ran
 #   omarchy-breathe reset               back to IDLE, stop the daemon, credit nothing
 #   omarchy-breathe restore             reconcile a session persisted across a reboot
@@ -807,6 +808,21 @@ cmd_skip() {
   cmd_status
 }
 
+# Flip looping on the CURRENT session. The config default that new sessions
+# inherit is widget-owned (set from the panel); this only touches the session
+# in flight, and is a no-op when nothing is running.
+cmd_loop() {
+  local sess state
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  case "$state" in
+    RUNNING|PAUSED) ;;
+    *) cmd_status; return 0 ;;
+  esac
+  jq 'if (.loop // false) then .loop = false else .loop = true end' <<<"$sess" | put_session
+  cmd_status
+}
+
 cmd_reset() {
   printf '%s' "$DEFAULT_SESSION" | put_session
   stop_daemon
@@ -1006,12 +1022,13 @@ case "${1:-get}" in
   pause)           cmd_pause ;;
   resume)          cmd_resume ;;
   skip)            cmd_skip ;;
+  loop)            cmd_loop ;;
   stop)            finish_session true; cmd_status ;;
   reset)           cmd_reset ;;
   restore)         restore_and_ensure ;;
   techniques)      read_techniques ;;
   stats)           read_stats | jq . ;;
   history)         read_history | jq . ;;
-  -h|--help|help)  sed -n '2,33p' "$0" ;;
+  -h|--help|help)  sed -n '2,34p' "$0" ;;
   *) echo "omarchy-breathe: unknown command '${1}' (try --help)" >&2; exit 2 ;;
 esac

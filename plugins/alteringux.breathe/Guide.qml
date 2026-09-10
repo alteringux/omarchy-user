@@ -44,6 +44,12 @@ Item {
   readonly property bool isSwitch: root.phaseKind === Model.PHASE.SWITCH
   readonly property bool isPowerBreaths: root.phaseKind === Model.PHASE.POWER_BREATHS
 
+  // Whether the session in flight is set to keep restarting. This is the live
+  // session's own flag, not the config default — the guide flips the session,
+  // the panel sets what new sessions inherit.
+  readonly property bool looping: !!(root.hostWidget && root.hostWidget.session
+    && root.hostWidget.session.loop === true)
+
   // A technique carrying a caution shows it before the first cycle turns over,
   // then gets out of the way — a warning that stays on screen for eight
   // minutes stops being read.
@@ -115,6 +121,11 @@ Item {
           // active hold and to an arrow key (deliberate, not a stray letter),
           // and it only advances the breath — it never ends the session.
           if (root.running && root.isHold) root.act("skip", function () { root.hostWidget.skipHold() })
+          event.accepted = true
+        } else if (event.key === Qt.Key_L) {
+          // Toggle looping on the running session. Fully reversible — press
+          // again to undo — so it is safe here even though it is a letter.
+          if (!root.done) root.act("loop", function () { root.hostWidget.toggleSessionLoop() })
           event.accepted = true
         }
         // Deliberately no key that ENDS a session. This surface takes
@@ -439,17 +450,94 @@ Item {
       onTriggered: if (root.hostWidget) root.hostWidget.hideGuide()
     }
 
-    // ---- hint ------------------------------------------------------------
-    Text {
+    // ---- controls + hint ----------------------------------------------------
+    // The overlay owns the screen, so a plain click still lands on pause; these
+    // sit above that MouseArea and consume their own clicks. Nothing here ends
+    // a session — skip advances a hold, loop toggles the running session.
+    Column {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
-      anchors.bottomMargin: Style.space(28)
+      anchors.bottomMargin: Style.space(24)
       visible: !root.done
-      text: (root.running && root.isHold ? "→ skip · " : "") + "Space pause · Esc hide"
-      color: Kit.Palette.faint
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
-      opacity: 0.7
+      spacing: Style.space(10)
+
+      Row {
+        anchors.horizontalCenter: parent.horizontalCenter
+        spacing: Style.space(12)
+
+        // Skip — only offered while a hold is running.
+        Rectangle {
+          id: skipCtl
+          visible: root.running && root.isHold
+          implicitWidth: skipLabel.implicitWidth + Style.space(20)
+          implicitHeight: skipLabel.implicitHeight + Style.space(10)
+          radius: height / 2
+          color: skipMouse.containsMouse
+            ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.18) : "transparent"
+          border.width: 1
+          border.color: Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4)
+
+          Text {
+            id: skipLabel
+            anchors.centerIn: parent
+            text: "Skip hold  →"
+            color: Color.foreground
+            opacity: 0.85
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          MouseArea {
+            id: skipMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.act("skip", function () { root.hostWidget.skipHold() })
+          }
+        }
+
+        // Loop — flips the session in flight, not the saved default.
+        Rectangle {
+          id: loopCtl
+          implicitWidth: loopLabel.implicitWidth + Style.space(20)
+          implicitHeight: loopLabel.implicitHeight + Style.space(10)
+          radius: height / 2
+          color: root.looping
+            ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.22)
+            : (loopMouse.containsMouse
+               ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.12) : "transparent")
+          border.width: 1
+          border.color: root.looping
+            ? root.tone : Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4)
+
+          Text {
+            id: loopLabel
+            anchors.centerIn: parent
+            text: root.looping ? "↻  Looping" : "↻  Loop"
+            color: Color.foreground
+            opacity: root.looping ? 1 : 0.85
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          MouseArea {
+            id: loopMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.act("loop", function () { root.hostWidget.toggleSessionLoop() })
+          }
+        }
+      }
+
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        text: (root.running && root.isHold ? "→ skip · " : "") + "L loop · Space pause · Esc hide"
+        color: Kit.Palette.faint
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        opacity: 0.7
+      }
     }
   }
 }
