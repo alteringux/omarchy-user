@@ -20,6 +20,7 @@ export XDG_STATE_HOME="$WORK/state"
 
 # shellcheck disable=SC1090
 source "$SCRIPT"
+cli_signed_in() { return 0; }  # auth gate is covered in auth.test.sh
 mkdir -p "$STATE_DIR"
 
 pass=0 fail=0
@@ -40,6 +41,7 @@ current_server() { echo "JP-FREE#1"; }
 cli_connect_retry() { echo "Connected to JP-FREE#1. Your new IP address is x."; return 0; }
 probe_ip()       { printf '%s\tJP\tTokyo\tProbe Org\n' "$(cat "$NEXT_IP_F")"; }
 sleep()          { :; }
+wifi_state_str() { echo connected; }   # wifi gate is covered in wifi.test.sh; keep do_connect flowing here
 
 seed_state() {  # connected exitIp
   cat >"$STATE_FILE" <<EOF

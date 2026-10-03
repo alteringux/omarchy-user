@@ -7,39 +7,30 @@
 # reply on stdout; on ANY failure it prints a one-line reason to stderr and
 # exits non-zero *quietly* so callers keep whatever fallback they already have.
 #
-# History: this used to POST to a hosted inference API to keep these off the
-# Claude subscription. That was swapped for `claude -p`. It now prefers the
-# `hermes` CLI (one-shot `-z` mode, backed by NanoGPT) so the volume of tiny
-# blurb calls stays off the Claude subscription again, and falls back to
-# `claude -p` when hermes is unavailable or errors. Callers are unchanged.
-#
-# Backend selection:
-#   LLM_BACKEND / LLM_BLURB_BACKEND = auto (default) | hermes | claude
-#   LLM_HERMES_PROVIDER            = a hermes provider to pin (e.g. claude-cli for
-#                                   the Claude subscription; else hermes default = NanoGPT)
-#   LLM_HERMES_MODEL              = a model id to force (else the provider default)
+# Uses `hermes -z` (one-shot mode) backed by the NanoGPT adapter (port 4142).
+# Web search is available by default; pass `--no-search` for a local-only
+# completion. Set LLM_HERMES_PROVIDER and LLM_BLURB_BACKEND in environment to
+# pin the backend; defaults route through the NanoGPT adapter.
 #
 # Usage:
 #   llm-blurb [options] "PROMPT"        # prompt as args, or on stdin if none
 #
-# Options (kept for caller compatibility):
+# Options:
 #   --json            ask the model for one JSON object; stdout is that object
 #   --system TEXT     override the system message
-#   --model NAME      sonnet | haiku | opus, or a legacy hosted-model id. Only
-#                     consulted on the claude fallback path (mapped by family);
-#                     the hermes path uses LLM_HERMES_MODEL or the hermes default.
+#   --model NAME      model hint (passed as -m to hermes)
 #   --max-tokens N    soft length hint appended to the system message
-#   --temp N          accepted and ignored (no temperature knob on either path)
-#   --timeout N       wall-clock cap in seconds per backend call (default 45)
-#
-# Exit codes: 0 ok | 2 bad args | 3 no backend (hermes/claude) on PATH
-#             4 backend failed/timed out | 5 empty reply
+#   --timeout N       wall-clock cap in seconds (default 45)
+#   --no-search       disable web search and use safe mode
+# Exit codes: 0 ok | 2 bad args | 3 hermes not on PATH | 4 backend failed/timed out
+#             5 empty reply
 set -uo pipefail
 
 max_tokens=""
 temp=""
 timeout=45
 want_json=0
+no_search=0
 system=""
 model=""
 
@@ -51,6 +42,7 @@ while (($#)); do
     --max-tokens) max_tokens="${2:-}"; shift 2 ;;
     --temp)       temp="${2:-}"; shift 2 ;;
     --timeout)    timeout="${2:-}"; shift 2 ;;
+    --no-search)  no_search=1; shift ;;
     --)           shift; break ;;
     -*)           echo "llm-blurb: unknown option $1" >&2; exit 2 ;;
     *)            break ;;
@@ -61,72 +53,33 @@ prompt="${*:-}"
 [[ -z "$prompt" ]] && prompt="$(cat)"
 [[ -z "${prompt// }" ]] && { echo "llm-blurb: empty prompt" >&2; exit 2; }
 
-backend="${LLM_BLURB_BACKEND:-${LLM_BACKEND:-auto}}"
-have_hermes=0; command -v hermes >/dev/null 2>&1 && have_hermes=1
-have_claude=0; command -v claude >/dev/null 2>&1 && have_claude=1
-
-case "$backend" in
-  hermes) have_hermes=1 ;;  # honour explicit request; call still fails loudly if absent
-  claude) have_hermes=0 ;;
-esac
-if ((!have_hermes && !have_claude)); then
-  echo "llm-blurb: neither hermes nor claude on PATH" >&2; exit 3
-fi
-
-# Map a model hint to a claude alias (claude fallback path only). Legacy callers
-# still pass hosted-model ids such as Qwen/Qwen3-30B-A3B-Instruct-2507 -- fall
-# through to the CLI default.
-model_args=()
-case "${model,,}" in
-  *haiku*)  model_args=(--model haiku) ;;
-  *opus*)   model_args=(--model opus) ;;
-  *sonnet*) model_args=(--model sonnet) ;;
-  *)        : ;;
-esac
+command -v hermes >/dev/null 2>&1 || { echo "llm-blurb: hermes not on PATH" >&2; exit 3; }
 
 if [[ -z "$system" ]]; then
   if ((want_json)); then
-    system="You output only a single JSON object: no markdown fences, no prose before or after it."
+    system="You output only a single JSON object: no markdown fences, no prose before or after it. Use web search when the request depends on current, recent, or future information, and cross-check time-sensitive facts with authoritative sources."
   else
-    system="You write short, plain-text answers. No markdown, no preamble, no disclaimers, no follow-up suggestions."
+    system="You write short, plain-text answers. No markdown, no preamble, no disclaimers, no follow-up suggestions. Use web search when the request depends on current, recent, or future information, and cross-check time-sensitive facts with authoritative sources."
   fi
 fi
 [[ -n "$max_tokens" ]] && system="$system Keep the reply to roughly ${max_tokens} tokens."
 
-# hermes -z has no --system flag; fold the system message into the prompt.
-# LLM_HERMES_PROVIDER (e.g. claude-cli) + LLM_HERMES_MODEL pin the backend;
-# unset, hermes uses its configured default (NanoGPT).
-gen_hermes() {
-  local m=() hmodel="${LLM_HERMES_MODEL:-}"
-  # `hermes -z --provider X` errors without a model; default one when pinned.
-  [[ -n "${LLM_HERMES_PROVIDER:-}" && -z "$hmodel" ]] && hmodel=sonnet
-  [[ -n "$hmodel" ]] && m=(-m "$hmodel")
-  [[ -n "${LLM_HERMES_PROVIDER:-}" ]] && m+=(--provider "$LLM_HERMES_PROVIDER")
-  timeout -k 5 "$timeout" hermes -z "${system}"$'\n\n'"${prompt}" \
-    --safe-mode --ignore-rules "${m[@]}" </dev/null 2>/dev/null
-}
-gen_claude() {
-  timeout -k 5 "$timeout" claude -p "$prompt" \
-    --system-prompt "$system" "${model_args[@]}" \
-    --output-format text </dev/null 2>/dev/null
-}
+model_args=()
+[[ -n "$model" ]] && model_args=(-m "$model")
 
-raw=""; rc=1; used=""
-if ((have_hermes)) && [[ "$backend" != claude ]]; then
-  raw="$(gen_hermes)"; rc=$?; used=hermes
-fi
-if ((rc != 0)) && [[ "$backend" != hermes ]] && ((have_claude)); then
-  raw="$(gen_claude)"; rc=$?; used=claude
-fi
+hermes_args=(hermes -z "${system}"$'\n\n'"${prompt}" --ignore-rules)
+((no_search)) && hermes_args+=(--safe-mode)
+raw="$(timeout -k 5 "$timeout" "${hermes_args[@]}" "${model_args[@]}" </dev/null 2>/dev/null)"
+rc=$?
 
 if ((rc != 0)); then
-  ((rc == 124)) && { echo "llm-blurb: ${used:-backend} timed out after ${timeout}s" >&2; exit 4; }
-  echo "llm-blurb: ${used:-backend} exited $rc" >&2
+  ((rc == 124)) && { echo "llm-blurb: hermes timed out after ${timeout}s" >&2; exit 4; }
+  echo "llm-blurb: hermes exited $rc" >&2
   exit 4
 fi
 
-# Backends occasionally tack on a "Next steps:" / "Sources:" trailer, a leading
-# "I'll ..." meta line, or wrap the whole answer in quotes. Strip all three.
+# Strip trailing "Next steps:" / "Sources:" trailer, leading "I'll ..." meta lines,
+# and surrounding quotes.
 clean="$(printf '%s' "$raw" | python3 -c '
 import re, sys
 t = sys.stdin.read().strip()

@@ -1,9 +1,35 @@
 .pragma library
 
+function isRecord(v) {
+  return v !== null && typeof v === "object" && !Array.isArray(v)
+}
+
+function recordArray(v) {
+  if (!Array.isArray(v)) return []
+  var out = []
+  for (var i = 0; i < v.length; i++) {
+    if (isRecord(v[i])) out.push(v[i])
+  }
+  return out
+}
+
 function parseState(raw) {
   try {
     var v = (raw && raw.length) ? JSON.parse(raw) : null
-    if (!v || typeof v !== "object") return defaultState()
+    if (!isRecord(v)) return defaultState()
+
+    // The collector writes arrays of records. Keep malformed rows out of
+    // QML delegates: a null row can otherwise throw while a panel is open.
+    v.ready = v.ready === true
+    v.plan = isRecord(v.plan) ? v.plan : {}
+    v.today = isRecord(v.today) ? v.today : {}
+    v.allTime = isRecord(v.allTime) ? v.allTime : {}
+    v.tokenComposition = isRecord(v.tokenComposition) ? v.tokenComposition : {}
+    v.week = recordArray(v.week)
+    v.models = recordArray(v.models)
+    for (var i = 0; i < v.models.length; i++) {
+      v.models[i].recentDays = recordArray(v.models[i].recentDays)
+    }
     return v
   } catch (e) {
     return defaultState()
@@ -172,4 +198,18 @@ function costPerMtok(m) {
 function avgTokensPerPrompt(m) {
   if (!m || !m.messages) return 0
   return Math.round(Number(m.total || 0) / m.messages)
+}
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    defaultState: defaultState,
+    parseState: parseState,
+    quotaRatio: quotaRatio,
+    weekPeak: weekPeak,
+    modelPeak: modelPeak,
+    costPeak: costPeak,
+    hourPeak: hourPeak,
+    compositionPercents: compositionPercents,
+    modelCompositionPercents: modelCompositionPercents,
+    modelDayPeak: modelDayPeak,
+  }
 }

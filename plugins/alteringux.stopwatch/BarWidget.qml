@@ -221,7 +221,7 @@ BarWidget {
     dir: root.runtimeDir + "/omarchy-stopwatch/"
     fileName: "state"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     // Poll even while running: FileView's inode watch can go stale against a
     // file the CLI deletes on `cancel` and recreates on the next start (or that
     // `resume` recreates at boot), so a running -> idle edge would otherwise
@@ -270,7 +270,7 @@ BarWidget {
     dir: root.runtimeDir + "/omarchy-stopwatch/"
     fileName: "voice-muted"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseVoiceMuted(raw) }
     onExternallyChanged: function (value) { root.voiceMuted = value }
   }
@@ -284,7 +284,7 @@ BarWidget {
     dir: root.runtimeDir + "/omarchy-stopwatch/"
     fileName: "chime"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseChimeMode(raw) }
     onExternallyChanged: function (value) { root.chimeMode = value }
   }
@@ -292,7 +292,7 @@ BarWidget {
   Timer {
     interval: 1000
     repeat: true
-    running: true
+    running: root.active && !root.paused
     onTriggered: root.recompute()
   }
 

@@ -202,7 +202,7 @@ Panel {
                 Text {
                   anchors.centerIn: parent
                   text: root.live
-                    ? Model.formatClock(root.live.isHold ? root.live.phaseElapsedMs : root.live.phaseRemainingMs)
+                    ? Model.formatClock(root.live.isHold ? root.live.phaseElapsedMs : Model.breathRemainingMs(root.technique, root.live))
                     : ""
                   color: root.barForeground
                   font.family: Style.font.family

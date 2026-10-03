@@ -77,3 +77,24 @@ test("formatRelative buckets minutes, hours, and days", () => {
 test("formatRelative clamps a future timestamp to 'just now'", () => {
   assert.strictEqual(Model.formatRelative(new Date(Date.now() + 60000).toISOString()), "just now")
 })
+
+test("parseState filters malformed items before the panel sees them", () => {
+  const s = Model.parseState(JSON.stringify({
+    notes: { items: [null, "bad", { text: "keep", at: 42 }] },
+    news: { items: [{ title: "keep", url: 7 }, {}, { title: 9 }, "bad"] },
+    system: { items: [{ text: "keep" }, null, { text: 4 }] }
+  }))
+  assert.deepStrictEqual(s.notes.items, [{ text: "keep" }])
+  assert.deepStrictEqual(s.news.items, [{ title: "keep" }])
+  assert.deepStrictEqual(s.system.items, [{ text: "keep" }])
+})
+
+test("parseState ignores non-string timestamps and digest text", () => {
+  const s = Model.parseState(JSON.stringify({
+    news: { updatedAt: 42, items: [] },
+    digest: { text: { nope: true }, updatedAt: ["bad"] }
+  }))
+  assert.strictEqual(s.news.updatedAt, null)
+  assert.strictEqual(s.digest.text, "")
+  assert.strictEqual(s.digest.updatedAt, null)
+})

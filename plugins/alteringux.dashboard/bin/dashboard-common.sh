@@ -15,6 +15,14 @@ DASHBOARD_SEED='{"version":1,"notes":{"items":[]},"news":{"updatedAt":null,"item
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 ensure_state_file() {
-  mkdir -p "$STATE_DIR"
-  [[ -f "$STATE_FILE" ]] || printf '%s\n' "$DASHBOARD_SEED" >"$STATE_FILE"
+  mkdir -p "$STATE_DIR" || return 1
+  (
+    flock 9 || exit 1
+    [[ -f "$STATE_FILE" ]] && exit 0
+    local tmp
+    tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s\n' "$DASHBOARD_SEED" >"$tmp" || exit 1
+    mv "$tmp" "$STATE_FILE"
+  ) 9>"$LOCK_FILE"
 }

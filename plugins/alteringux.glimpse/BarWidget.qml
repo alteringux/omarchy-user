@@ -28,21 +28,21 @@ BarWidget {
     id: cardsStore
     fileName: "glimpse-cards.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseCards(raw) }
   }
   Kit.Store {
     id: stateStore
     fileName: "glimpse-state.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
   Kit.Store {
     id: configStore
     fileName: "glimpse-config.json"
     watch: true
-    pollMs: 8000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 

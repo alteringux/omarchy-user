@@ -13,7 +13,9 @@ Feeds config shape:
       "version": 1,
       "perFeed": 8,          # max headlines kept from each feed
       "maxHeadlines": 40,    # global cap after interleaving
-      "refreshMinutes": 15, # read by the QML side, not here
+      "maxAgeHours": 24,     # articles older than this are hidden on refresh
+      "freshnessFloor": 8,   # recent seen items keep the marquee populated
+      "refreshMinutes": 15,  # read by the QML side, not here
       "feeds": [ { "name": "BBC", "url": "https://...", "category": "World" }, ... ]
     }
     Per-feed "category" is an optional fallback sector; a sector derived from
@@ -40,7 +42,7 @@ import sys
 import tempfile
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
@@ -55,15 +57,16 @@ SEEN_PATH = os.path.join(STATE_DIR, "newsbar-seen.json")
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) omarchy-newsbar-refresh"
 TIMEOUT = 8
-FRESHNESS_FLOOR = 20  # min headlines a refresh shows before backfilling seen ones
+MAX_AGE_HOURS = 24
 
 DEFAULT_CONFIG = {
     "version": 1,
     "perFeed": 8,
     "maxHeadlines": 40,
-    # Refresh shows headlines not on the previous crawl and retires the rest;
-    # if fewer than this remain, the freshest retired ones backfill.
-    "freshnessFloor": FRESHNESS_FLOOR,
+    "maxAgeHours": MAX_AGE_HOURS,
+    "freshnessFloor": 8,
+    # A refresh prefers unseen articles, then backfills with recent seen items
+    # when needed to keep the marquee populated.
     # "category" is an optional fallback sector for a feed whose items don't
     # carry one in their URL or <category>; a per-item sector still wins.
     "feeds": [
@@ -100,7 +103,8 @@ def load_config():
         return {
             "perFeed": int(raw.get("perFeed", DEFAULT_CONFIG["perFeed"]) or 8),
             "maxHeadlines": int(raw.get("maxHeadlines", DEFAULT_CONFIG["maxHeadlines"]) or 40),
-            "freshnessFloor": int(raw.get("freshnessFloor", FRESHNESS_FLOOR) or FRESHNESS_FLOOR),
+            "maxAgeHours": max(0, float(raw.get("maxAgeHours", MAX_AGE_HOURS))),
+            "freshnessFloor": max(0, int(raw.get("freshnessFloor", DEFAULT_CONFIG["freshnessFloor"]) or 0)),
             "feeds": feeds,
         }, False
     except FileNotFoundError:
@@ -115,7 +119,8 @@ def _config_from(raw):
     return {
         "perFeed": raw["perFeed"],
         "maxHeadlines": raw["maxHeadlines"],
-        "freshnessFloor": raw.get("freshnessFloor", FRESHNESS_FLOOR),
+        "maxAgeHours": raw.get("maxAgeHours", MAX_AGE_HOURS),
+        "freshnessFloor": raw.get("freshnessFloor", 8),
         "feeds": [dict(f) for f in raw["feeds"]],
     }
 
@@ -187,6 +192,20 @@ def to_iso(value):
         return ""
 
 
+def is_recent(published, now=None, max_age_hours=MAX_AGE_HOURS):
+    """Return whether an article has a parseable timestamp within the age limit."""
+    if not published:
+        return False
+    try:
+        article_time = datetime.fromisoformat(published.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if article_time.tzinfo is None:
+        article_time = article_time.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return article_time >= current - timedelta(hours=max_age_hours)
+
+
 # Path slugs that name a section, mapped to the label shown on the bar.
 SECTION_SLUGS = {
     "world": "World", "uk": "UK", "us": "US", "us-news": "US", "uk-news": "UK",
@@ -233,9 +252,8 @@ def category_of(explicit, url):
     return ""
 
 
-def parse_feed(source, blob, per_feed, feed_category=""):
-    """Parse one feed's bytes into a list of headline dicts (RSS or Atom).
-    feed_category is the feed-level fallback sector."""
+def parse_feed(source, blob, per_feed, feed_category="", max_age_hours=MAX_AGE_HOURS):
+    """Parse only recent RSS or Atom entries into headline dictionaries."""
     root = ET.fromstring(blob)
     out = []
 
@@ -251,12 +269,13 @@ def parse_feed(source, blob, per_feed, feed_category=""):
         pub = item.findtext("pubDate") or item.findtext(
             "{http://purl.org/dc/elements/1.1/}date"
         )
-        if title and link:
+        published = to_iso(pub)
+        if title and link and is_recent(published, max_age_hours=max_age_hours):
             out.append({
                 "source": source,
                 "title": title,
                 "url": link,
-                "published": to_iso(pub),
+                "published": published,
                 "category": category_of(item.findtext("category"), link) or feed_category,
                 "summary": clean_summary(
                     item.findtext("description") or item.findtext(CE)
@@ -282,14 +301,15 @@ def parse_feed(source, blob, per_feed, feed_category=""):
             if first is not None and first.get("href"):
                 link = first.get("href").strip()
         pub = entry.findtext(f"{ATOM}published") or entry.findtext(f"{ATOM}updated")
+        published = to_iso(pub)
         atom_cat = entry.find(f"{ATOM}category")
         explicit_cat = atom_cat.get("term") if atom_cat is not None else ""
-        if title and link:
+        if title and link and is_recent(published, max_age_hours=max_age_hours):
             out.append({
                 "source": source,
                 "title": title,
                 "url": link,
-                "published": to_iso(pub),
+                "published": published,
                 "category": category_of(explicit_cat, link) or feed_category,
                 "summary": clean_summary(
                     entry.findtext(f"{ATOM}summary")
@@ -359,33 +379,54 @@ def main():
     config, _ = load_config()
     groups = []
     failures = []
+    no_recent = []
+    successful_fetches = 0
     for feed in config["feeds"]:
         try:
             blob = fetch(feed["url"])
-            parsed = parse_feed(feed["name"], blob, config["perFeed"], feed.get("category", ""))
+            successful_fetches += 1
+            parsed = parse_feed(
+                feed["name"], blob, config["perFeed"], feed.get("category", ""),
+                config["maxAgeHours"],
+            )
             if parsed:
                 groups.append(parsed)
             else:
-                failures.append(f"{feed['name']} (no items)")
+                no_recent.append(f"{feed['name']} (no recent items)")
         except Exception as exc:  # noqa: BLE001 - keep going on a single bad feed
             failures.append(f"{feed['name']} ({exc.__class__.__name__})")
 
     headlines = interleave(groups, config["maxHeadlines"])
 
     if not headlines:
-        # Total failure: keep whatever was on screen, just record the error.
+        if successful_fetches:
+            error = ("partial: " + "; ".join(failures)) if failures else None
+            # A successful HTTP response is not necessarily a valid feed. Keep
+            # the last good crawl visible when every candidate failed parsing
+            # (or otherwise failed after fetch); an empty replacement would
+            # make transient upstream markup changes blank the bar.
+            if failures:
+                prev = read_existing_headlines()
+                write_state(prev, error)
+                detail = "; ".join(failures + no_recent)
+                sys.stderr.write(
+                    "newsbar: no recent headlines"
+                    + (f": {detail}" if detail else "") + "\n")
+                return 1
+            write_state([], error)
+            detail = "; ".join(failures + no_recent)
+            sys.stderr.write("newsbar: no recent headlines" + (f": {detail}" if detail else "") + "\n")
+            return 0
         prev = read_existing_headlines()
         write_state(prev, "; ".join(failures) or "no headlines fetched")
         sys.stderr.write("newsbar: no headlines fetched: " + "; ".join(failures) + "\n")
         return 1
 
-    # Freshness rule: show headlines that weren't on the previous crawl and
-    # retire the ones that were; backfill the freshest retired headlines only if
-    # under `freshnessFloor` remain. Record what we actually show so the next
-    # refresh treats it as stale.
+    # Prefer unseen articles; if there are too few, backfill from the freshest
+    # still-recent candidates so the marquee does not go empty between refreshes.
     seen = seen_history.load(SEEN_PATH)
     headlines, shown = seen_history.select_fresh(
-        headlines, seen, config.get("freshnessFloor", FRESHNESS_FLOOR))
+        headlines, seen, floor=config["freshnessFloor"])
 
     error = ("partial: " + "; ".join(failures)) if failures else None
     write_state(headlines, error)

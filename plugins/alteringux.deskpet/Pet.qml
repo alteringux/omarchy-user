@@ -124,10 +124,11 @@ Item {
   // ---- opt-in real screen-vision commentary ---------------------------
   // Separate from the canned ambient chatter above: on its own (much
   // longer) timer, shells out to deskpet-look, which screenshots the
-  // desktop and asks a Featherless vision model for one line in the pet's
+  // desktop and asks a NanoGPT vision model for one line in the pet's
   // voice. Off by default (see Model.defaultState) since it sends actual
   // screen content to a third-party API each time it fires.
   property bool _lookBusy: false
+  property bool _lookFailed: false
   property string _lookSystemPrompt: ""
 
   Process {
@@ -138,7 +139,13 @@ Item {
       waitForEnd: true
       onStreamFinished: root._onLookResult(text)
     }
-    onExited: root._lookBusy = false
+    stderr: StdioCollector { waitForEnd: true }
+    onExited: function (exitCode) {
+      root._lookBusy = false
+      root._lookFailed = exitCode !== 0
+      if (exitCode !== 0 && hostWidget && hostWidget.state.screenWatchEnabled)
+        hostWidget.setScreenWatchEnabled(false)
+    }
   }
 
   function _onLookResult(text) {

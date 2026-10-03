@@ -43,12 +43,21 @@ BarWidget {
     pollMs: 3000
     parse: function (raw) { return Model.parseState(raw) }
   }
+  Kit.Store {
+    id: usageStore
+    fileName: "alteringux-plugin-usage.json"
+    watch: true
+    pollMs: 5000
+    parse: function (raw) { return Model.parseUsage(raw, Date.now()) }
+  }
+
 
   readonly property var activityValue: activityStore.value || Model.defaultActivity()
   readonly property var attentionValue: attentionStore.value || Model.defaultAttention()
   readonly property var readValue: readStore.value || Model.defaultState()
+  readonly property var usageValue: usageStore.value || Model.defaultUsage()
 
-  readonly property var summary: Model.summary(root.activityValue, root.attentionValue, root.readValue)
+  readonly property var summary: Model.summary(root.activityValue, root.attentionValue, root.readValue, root.usageValue)
   readonly property string topLevel: root.summary.topLevel
   readonly property int unread: root.summary.unread
   readonly property int needAction: root.summary.needAction
@@ -71,7 +80,7 @@ BarWidget {
   Process {
     id: actionProc
     running: false
-    onExited: { activityStore.reload(); attentionStore.reload(); readStore.reload() }
+    onExited: { activityStore.reload(); attentionStore.reload(); readStore.reload(); usageStore.reload() }
   }
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
@@ -80,6 +89,17 @@ BarWidget {
       actionProc.running = true
     })
   }
+
+  // Refresh the single Kit.Usage snapshot; the helper also reconciles the
+  // stable plugin-usage attention item without disturbing other items.
+  Timer {
+    interval: 5 * 60 * 1000
+    running: true
+    repeat: true
+    onTriggered: root.runVerb(["usage", "--json"])
+  }
+  Component.onCompleted: root.runVerb(["usage", "--json"])
+
 
   function markRead() { runVerb(["read"]) }
   function clearAll() { runVerb(["clear", "--all"]) }
@@ -122,6 +142,11 @@ BarWidget {
         return JSON.stringify({
           unread: s.unread, total: s.total, needAction: s.needAction,
           topLevel: s.topLevel,
+          usage: s.usage.summary,
+          mostUsed: s.mostUsed.map(function (p) { return p.id + ":" + p.uses }),
+          stalePlugins: s.stalePlugins.map(function (p) {
+            return p.id + ":" + (p.neverUsed ? "never" : p.daysIdle + "d")
+          }),
           nextAction: s.nextAction ? (s.nextAction.plugin + ": " + s.nextAction.label) : ""
         })
       }, "{}")

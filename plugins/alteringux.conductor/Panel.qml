@@ -55,7 +55,7 @@ Panel {
   }
 
   Timer {
-    interval: 8000
+    interval: 60000
     repeat: true
     running: root.opened
     onTriggered: if (hostWidget) hostWidget.refreshSnapshot()

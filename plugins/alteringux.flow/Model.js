@@ -32,7 +32,7 @@ function parseDoc(raw) {
     // a canvas edit round-trips losslessly — only the drawing-derived keys
     // (x/y/label) and the normalised in/edges are overlaid.
     var node = {};
-    for (var k in n) if (n.hasOwnProperty(k)) node[k] = n[k];
+    for (var k in n) if (Object.prototype.hasOwnProperty.call(n, k)) node[k] = n[k];
     node.id = typeof n.id === "string" && n.id ? n.id : fallbackId;
     node.type = typeof n.type === "string" ? n.type : "";
     node.in = normList(n.in);
@@ -64,6 +64,10 @@ function normList(v) {
   }
   return typeof v === "string" && v ? [v] : [];
 }
+function isRecord(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+
 function isFiniteNum(n) {
   return typeof n === "number" && isFinite(n);
 }
@@ -75,14 +79,47 @@ function parseRunState(raw) {
   } catch (e) {
     return { ok: false, nodes: {}, envelopes: [], order: [], error: "invalid JSON" };
   }
-  if (!rs || typeof rs !== "object") {
+  if (!isRecord(rs)) {
     return { ok: false, nodes: {}, envelopes: [], order: [], error: "" };
   }
+
+  // Run state is written by a separate process and may be observed while an
+  // older/manual writer has left a partially-shaped object behind. Keep only
+  // record values so the panel can safely inspect every entry.
+  var nodes = {};
+  if (isRecord(rs.nodes)) {
+    for (var id in rs.nodes) {
+      if (Object.prototype.hasOwnProperty.call(rs.nodes, id) && isRecord(rs.nodes[id])) nodes[id] = rs.nodes[id];
+    }
+  }
+
+  var envelopes = [];
+  if (Array.isArray(rs.envelopes)) {
+    for (var i = 0; i < rs.envelopes.length; i++) {
+      var env = rs.envelopes[i];
+      if (!isRecord(env)) continue;
+      var safe = {};
+      for (var k in env) if (Object.prototype.hasOwnProperty.call(env, k)) safe[k] = env[k];
+      // Panel.qml indexes table rows by column. Drop malformed rows here so a
+      // garbage run file cannot make a delegate throw during refresh.
+      if (safe.shape === "table" && isRecord(safe.data)) {
+        var data = {};
+        for (var dk in safe.data) if (Object.prototype.hasOwnProperty.call(safe.data, dk)) data[dk] = safe.data[dk];
+        data.columns = Array.isArray(data.columns) ? data.columns : [];
+        data.rows = Array.isArray(data.rows) ? data.rows.filter(function (row) {
+          return Array.isArray(row);
+        }) : [];
+        safe.data = data;
+      }
+      envelopes.push(safe);
+    }
+  }
+
   return {
     ok: true,
-    nodes: rs.nodes && typeof rs.nodes === "object" ? rs.nodes : {},
-    envelopes: Array.isArray(rs.envelopes) ? rs.envelopes : [],
-    order: Array.isArray(rs.order) ? rs.order : [],
+    nodes: nodes,
+    envelopes: envelopes,
+    order: Array.isArray(rs.order) ? rs.order.filter(function (id) { return typeof id === "string"; }) : [],
     error: typeof rs.error === "string" ? rs.error : "",
     finishedAt: typeof rs.finishedAt === "string" ? rs.finishedAt : ""
   };
@@ -226,7 +263,7 @@ function serializeDoc(doc) {
     var n = doc.nodes[i];
     var o = {};
     for (var k in n) {
-      if (!n.hasOwnProperty(k) || DERIVED[k]) continue;
+      if (!Object.prototype.hasOwnProperty.call(n, k) || DERIVED[k]) continue;
       var v = n[k];
       // drop the parser's empty defaults so the file stays sparse
       if ((k === "prompt" || k === "cmd" || k === "jq" || k === "shape") && v === "") continue;

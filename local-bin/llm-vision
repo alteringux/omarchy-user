@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# llm-vision -- one-shot image+text prompt via the NanoGPT adapter's API.
+#
+# Sibling of llm-blurb for vision calls: sends an image + text prompt to the
+# NanoGPT adapter (port 4142) using its OpenAI-compatible chat completions
+# endpoint with a vision-capable model. Prints the reply on stdout.
+#
+# Usage:
+#   llm-vision [options] --image PATH "PROMPT"
+#   llm-vision [options] --image PATH        # prompt on stdin
+#
+# Options:
+#   --image PATH      local image file. Required. Repeatable for multi-image.
+#   --json            ask the model for one JSON object; stdout is that object
+#   --system TEXT     override the system message
+#   --model NAME      model id to use (default: qwen/qwen3-coder-plus)
+#   --max-tokens N    max_tokens for the API call (default: 4096)
+#   --timeout N       wall-clock cap in seconds (default: 90)
+#
+# Exit codes: 0 ok | 2 bad args | 4 API failed/timed out | 5 empty reply
+set -uo pipefail
+
+max_tokens=4096
+timeout=90
+want_json=0
+system=""
+model="qwen/qwen3-coder-plus"
+images=()
+
+while (($#)); do
+  case "$1" in
+    --image)      images+=("${2:-}"); shift 2 ;;
+    --json)       want_json=1; shift ;;
+    --system)     system="${2:-}"; shift 2 ;;
+    --model)      model="${2:-}"; shift 2 ;;
+    --max-tokens) max_tokens="${2:-}"; shift 2 ;;
+    --temp)       shift 2 ;;
+    --timeout)    timeout="${2:-}"; shift 2 ;;
+    --)           shift; break ;;
+    -*)           echo "llm-vision: unknown option $1" >&2; exit 2 ;;
+    *)            break ;;
+  esac
+done
+
+[[ ${#images[@]} -gt 0 ]] || { echo "llm-vision: --image PATH is required" >&2; exit 2; }
+
+prompt="${*:-}"
+[[ -z "$prompt" ]] && prompt="$(cat)"
+[[ -z "${prompt// }" ]] && { echo "llm-vision: empty prompt" >&2; exit 2; }
+
+# Resolve NanoGPT key from env or config file
+nano_key="${NANOGPT_API_KEY:-}"
+if [[ -z "$nano_key" && -f "$HOME/.config/nanogpt/key" ]]; then
+  nano_key="$(head -1 "$HOME/.config/nanogpt/key" | tr -d '[:space:]')"
+fi
+if [[ -z "$nano_key" ]]; then
+  echo "llm-vision: no NANOGPT_API_KEY set and ~/.config/nanogpt/key not found" >&2
+  exit 4
+fi
+
+# Build content array: text + images
+content='[{"type":"text","text":'"$(printf '%s' "$prompt" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))')"'}'
+for img in "${images[@]}"; do
+  abs="$(readlink -f "$img")"
+  [[ -r "$abs" ]] || { echo "llm-vision: cannot read image: $abs" >&2; exit 2; }
+  # Base64 the image
+  b64="$(base64 -w0 < "$abs")"
+  # Detect mime type
+  mime="image/$(file --mime-type -b "$abs" 2>/dev/null || echo jpeg)"
+  content="$content"',{"type":"image_url","image_url":{"url":"data:'"$mime"';base64,'"$b64"'"}}'
+done
+content="$content"']'
+
+system_text="${system:-You are a precise visual analyst. Answer only from what is visibly in the image. Plain text, no preamble.}"
+
+payload=$(python3 -c "
+import json
+content = json.loads('''$content'''.strip())
+body = {
+  'model': '${model}',
+  'messages': [{'role': 'user', 'content': content}],
+  'max_tokens': ${max_tokens}
+}
+if '''$system_text'''.strip():
+    body['system'] = '''$system_text'''.strip()
+print(json.dumps(body))
+")
+
+raw="$(timeout -k 5 "$timeout" curl -s \
+  -H "Authorization: Bearer ${nano_key}" \
+  -H "Content-Type: application/json" \
+  -d "${payload}" \
+  "https://nano-gpt.com/api/v1/chat/completions" 2>/dev/null)" || {
+  echo "llm-vision: API call failed after ${timeout}s" >&2; exit 4
+}
+
+text="$(printf '%s' "$raw" | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    content = data["choices"][0]["message"]["content"]
+    print(content.strip())
+except (KeyError, IndexError, json.JSONDecodeError) as e:
+    err = data.get("error", {}).get("message", str(e)) if isinstance(data, dict) else str(e)
+    print(f"ERROR: {err}", file=sys.stderr)
+    sys.exit(1)
+')" || { echo "llm-vision: API returned error, see stderr" >&2; exit 5; }
+
+[[ -z "${text// }" ]] && { echo "llm-vision: empty reply" >&2; exit 5; }
+printf '%s\n' "$text"

@@ -69,6 +69,18 @@ BarWidget {
     ? session.elapsedReadyMs + Math.max(0, displayNowMs - session.savedAtMs)
     : session.elapsedReadyMs
   readonly property int completedPomodorosThisSession: session.completedPomodorosThisSession || 0
+  // Focus accounting only includes the live WORK segment. The CLI banks
+  // completed segments into today's stats; this live value keeps the bar and
+  // panel accurate between heartbeat writes.
+  readonly property real liveWorkMs: phase === Model.PHASE_WORK
+    ? (session.focusedMs || 0) + (running ? Math.max(0, displayNowMs - session.savedAtMs) : 0)
+    : 0
+  readonly property real focusedTodayMs: (root.todayBucket.focusedMs || 0) + root.liveWorkMs
+  readonly property real dailyGoalMs: Math.max(0, (root.config.dailyGoalMinutes || 0) * 60000)
+  readonly property real goalRemainingMs: Model.goalRemainingMs(root.todayBucket.focusedMs || 0, root.config, root.liveWorkMs)
+  readonly property real goalProgress: Model.goalProgress(root.todayBucket.focusedMs || 0, root.config, root.liveWorkMs)
+
+  readonly property string goalText: Model.formatGoalRemaining(root.goalRemainingMs)
 
   readonly property string displayText: {
     if (phase === Model.PHASE_IDLE) return "  Pomodoro"
@@ -108,7 +120,7 @@ BarWidget {
     id: sessionStore
     fileName: "pomodoro-session.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseSession(raw) }
     onExternallyChanged: root.displayNowMs = Date.now()
   }
@@ -117,7 +129,7 @@ BarWidget {
     id: statsStore
     fileName: "pomodoro-stats.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseStats(raw) }
   }
 
@@ -125,7 +137,7 @@ BarWidget {
     id: historyStore
     fileName: "pomodoro-history.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 
@@ -171,7 +183,7 @@ BarWidget {
   Timer {
     interval: 1000
     repeat: true
-    running: root.phase !== Model.PHASE_IDLE
+    running: root.phase !== Model.PHASE_IDLE && (root.running || root.ready)
     onTriggered: root.displayNowMs = Date.now()
   }
 
@@ -200,7 +212,19 @@ BarWidget {
     function toggle(): void { root.togglePanel() }
     function status(): string {
       return guard.call("ipc.status", function() {
-        return JSON.stringify({ phase: root.phase, remainingMs: root.remainingMs, running: root.running, ready: root.ready, elapsedReadyMs: root.elapsedReadyMs, completedToday: root.completedToday, streak: root.streak })
+        return JSON.stringify({
+          phase: root.phase,
+          remainingMs: root.remainingMs,
+          running: root.running,
+          ready: root.ready,
+          elapsedReadyMs: root.elapsedReadyMs,
+          focusedTodayMs: root.focusedTodayMs,
+          dailyGoalMs: root.dailyGoalMs,
+          goalRemainingMs: root.goalRemainingMs,
+          goalReached: root.goalRemainingMs <= 0,
+          completedToday: root.completedToday,
+          streak: root.streak
+        })
       }, "{}")
     }
   }

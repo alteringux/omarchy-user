@@ -16,6 +16,9 @@ BarWidget {
   readonly property var guard: Kit.BugGuard.create("alteringux.sysmon", function(argv) { Quickshell.execDetached(argv) })
 
   readonly property var stat: stateLoaded ? root.state : Model.defaultState()
+  // Date.now() is not a reactive QML dependency. Tick a local clock so a
+  // stopped sampler is visibly marked stale as the sample ages.
+  property double clockMs: Date.now()
 
   readonly property string cpuGlyph: "\udb81\ude1a"   // nf-fae-chip (cpu)
   readonly property string memGlyph: "\udb80\udf5b"   // nf-md-memory
@@ -37,11 +40,9 @@ BarWidget {
     || Model.tempLevel(stat.temp) === "critical"
   readonly property bool anyWarning: (cpuHot || memHot || tempHot) && !anyCritical
 
-  // Model.isStale is tested (test/model.test.js) but was never wired into
-  // either widget. A hung sampler left the bar showing a confident, silently
-  // ageing number. 3 missed ticks is the same "gone quiet" threshold netwatch
-  // already uses for its own staleness label.
-  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+  // Model.isStale marks a sample stale after three missed sampler ticks.
+  // The reactive clock makes this update even when the sampler is hung.
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, root.clockMs, root.sampleIntervalMs * 3)
 
   readonly property string tooltipText: stateLoaded
     ? "CPU " + Model.formatPct(root.stat.cpu.pct)
@@ -89,6 +90,14 @@ BarWidget {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.sampleNow()
+  }
+
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.clockMs = Date.now()
   }
 
   // ---- IPC

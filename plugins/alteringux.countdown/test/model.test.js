@@ -222,6 +222,21 @@ test("formatRemaining phrasing", () => {
   assert.strictEqual(Model.formatRemaining(NaN), "")
 })
 
+test("minutesRemaining rounds toward the next minute while active", () => {
+  assert.strictEqual(Model.minutesRemaining(NOW + 90 * 60000 + 1, NOW), 91)
+  assert.strictEqual(Model.minutesRemaining(NOW - 90 * 60000 - 1, NOW), -91)
+  assert.strictEqual(Model.minutesRemaining(NOW, NOW), 0)
+})
+
+test("formatMinutesRemaining phrasing", () => {
+  assert.strictEqual(Model.formatMinutesRemaining(120), "120 minutes left")
+  assert.strictEqual(Model.formatMinutesRemaining(1), "1 minute left")
+  assert.strictEqual(Model.formatMinutesRemaining(0), "Less than a minute left")
+  assert.strictEqual(Model.formatMinutesRemaining(-1), "1 minute ago")
+  assert.strictEqual(Model.formatMinutesRemaining(-3), "3 minutes ago")
+  assert.strictEqual(Model.formatMinutesRemaining(NaN), "")
+})
+
 test("formatShort is a signed day count with a d suffix", () => {
   assert.strictEqual(Model.formatShort(21), "21d")
   assert.strictEqual(Model.formatShort(0), "0d")

@@ -30,21 +30,21 @@ BarWidget {
     id: tasksStore
     fileName: "grip-tasks.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseTasks(raw) }
   }
   Kit.Store {
     id: stateStore
     fileName: "grip-state.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
   Kit.Store {
     id: configStore
     fileName: "grip-config.json"
     watch: true
-    pollMs: 8000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 

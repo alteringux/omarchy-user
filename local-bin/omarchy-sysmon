@@ -159,9 +159,9 @@ cmd_sample() {
   flock -n 9 || return 0
   local cur_cpus prev_cpus mem load up temp updated
   cur_cpus="$(cpu_totals_json)"
-  prev_cpus="$(read_file "$SAMPLE_FILE")"
+  # A truncated or hand-edited baseline must not prevent a fresh sample.
+  prev_cpus="$(read_file "$SAMPLE_FILE" | jq -c 'if type == "array" then . else [] end' 2>/dev/null || true)"
   [ -z "$prev_cpus" ] && prev_cpus='[]'
-
   mem="$(meminfo_json)"
   load="$(loadavg_json)"
   up="$(uptime_seconds)"
@@ -205,9 +205,13 @@ cmd_sample() {
   # A rolling ~10-minute ring of {ts,cpu,mem,temp} feeds each panel's trend
   # sparkline and its min/avg/max stats. Carried forward from the prior state.
   local prev_hist
-  prev_hist="$(jq -c '.history // []' "$STATE_FILE" 2>/dev/null || true)"
+  # State may have been interrupted while being written or edited by hand.
+  # Keep only an array and cap it before passing it as --argjson; otherwise jq
+  # would try to add an object/string to the new history array and abort.
+  prev_hist="$(jq -c --argjson cap "$HISTORY_CAP" '
+    (.history? // []) | if type == "array" then .[(-$cap):] else [] end
+  ' "$STATE_FILE" 2>/dev/null || true)"
   [ -z "$prev_hist" ] && prev_hist='[]'
-
   jq -n \
     --argjson updatedAt "$updated" \
     --argjson cpuPct "$overall" \

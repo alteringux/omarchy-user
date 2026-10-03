@@ -83,8 +83,27 @@ largest_json="$(OMARCHY_DISKMON_DU_OUTPUT="$DU_FIXTURE" "$CLI" largest /home/use
 [ "$(printf '%s' "$largest_json" | jq -r '.[0].path')" = "/home/user/.cache" ] \
   && ok "largest sorts by size descending" || bad "largest order" "$largest_json"
 
+# Configured largestPath accepts the documented "~" spelling.
+jq '.largestPath = "~"' "$WORK/diskmon-config.json" > "$WORK/config.tmp" \
+  && mv "$WORK/config.tmp" "$WORK/diskmon-config.json"
+TILDE_DU="$(printf '5242880\t%s/Videos\n100\t%s\n' "$HOME" "$HOME")"
+tilde_json="$(OMARCHY_DISKMON_DU_OUTPUT="$TILDE_DU" "$CLI" largest --json)"
+[ "$(printf '%s' "$tilde_json" | jq -r '.[0].path')" = "$HOME/Videos" ] \
+  && ok "largest expands configured ~ before du" || bad "largest tilde expansion" "$tilde_json"
+
+# Wrong-shaped JSON config falls back to safe defaults without blanking state.
+printf '%s\n' '{"warnPct":"oops","excludeFstypes":"oops"}' > "$WORK/diskmon-config.json"
+OMARCHY_DISKMON_DF_OUTPUT="$DF_FIXTURE" "$CLI" sample >/dev/null
+if jq -e . "$WORK/diskmon-state.json" >/dev/null 2>&1 && [ "$(state '.primary.pct')" = "85" ]; then
+  ok "malformed config preserves valid state"
+else
+  bad "malformed config state" "$(cat "$WORK/diskmon-state.json" 2>/dev/null || echo missing)"
+fi
+
 # ── reset wipes state but keeps config ────────────────────────────────────
 "$CLI" reset >/dev/null
+[ ! -e "$WORK/diskmon-state.json" ] && ok "reset removes state" \
+  || bad "reset state" "state still exists"
 [ -f "$WORK/diskmon-config.json" ] && ok "reset keeps config" || bad "reset kept config" "config missing"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

@@ -41,6 +41,11 @@ test("reminderNotification for a ready work phase tells the user to start it", (
   assert.match(n.body, /start/i)
 })
 
+test("reminderNotification includes remaining daily focus when provided", () => {
+  const n = Model.reminderNotification(Model.PHASE_WORK, 90 * 60000)
+  assert.match(n.body, /Focus remaining today: 1h 30m/)
+})
+
 test("readyIcon is distinct from the phase icons so a waiting phase reads differently", () => {
   const icon = Model.readyIcon()
   assert.notStrictEqual(icon, Model.phaseIcon(Model.PHASE_WORK))
@@ -180,11 +185,12 @@ test("restoreSession leaves an idle session idle", () => {
 
 test("restoreSession subtracts downtime from a running phase that still has time left", () => {
   const config = Model.defaultConfig()
-  const saved = { phase: "WORK", running: true, ready: false, remainingMs: 600000, elapsedReadyMs: 0, completedPomodorosThisSession: 1, savedAtMs: 10000 }
+  const saved = { phase: "WORK", running: true, ready: false, remainingMs: 600000, elapsedReadyMs: 0, completedPomodorosThisSession: 1, focusedMs: 12000, savedAtMs: 10000 }
   const r = Model.restoreSession(saved, 10000 + 90000, config) // 90s downtime
   assert.strictEqual(r.phase, "WORK")
   assert.strictEqual(r.running, true)
   assert.strictEqual(r.remainingMs, 600000 - 90000)
+  assert.strictEqual(r.focusedMs, 12000)
   assert.strictEqual(r.workCompletedOffline, false)
 })
 
@@ -296,4 +302,54 @@ test("parseHistory ignores a non-array sessions field", () => {
 
 test("parseHistory degrades to defaults on malformed JSON", () => {
   assert.deepStrictEqual(Model.parseHistory("not json"), Model.defaultHistory())
+})
+
+test("formatRemaining shows seconds-only under 1 minute", () => {
+  assert.strictEqual(Model.formatRemaining(30000), "30s")
+  assert.strictEqual(Model.formatRemaining(5000), "5s")
+  assert.strictEqual(Model.formatRemaining(1000), "1s")
+})
+
+test("formatRemaining shows whole minutes at 1 minute and above (no seconds once >= 5m)", () => {
+  assert.strictEqual(Model.formatRemaining(60000), "1m")
+  assert.strictEqual(Model.formatRemaining(300000), "5m")
+  assert.strictEqual(Model.formatRemaining(1500000), "25m")
+})
+
+test("formatRemaining mixes minutes and seconds under 5 minutes", () => {
+  assert.strictEqual(Model.formatRemaining(90000), "1m 30s")
+  assert.strictEqual(Model.formatRemaining(195000), "3m 15s")
+  assert.strictEqual(Model.formatRemaining(120500), "2m 1s")
+})
+
+test("formatRemaining shows hours when above 1 hour", () => {
+  assert.strictEqual(Model.formatRemaining(3600000), "1h")
+  assert.strictEqual(Model.formatRemaining(5400000), "1h 30m")
+  assert.strictEqual(Model.formatRemaining(7200000), "2h")
+  assert.strictEqual(Model.formatRemaining(7350000), "2h 2m")
+})
+
+test("formatRemaining floors to 0 seconds and never shows negative", () => {
+  assert.strictEqual(Model.formatRemaining(0), "0s")
+  assert.strictEqual(Model.formatRemaining(-5000), "0s")
+})
+
+test("defaultConfig exposes a customizable eight-hour daily focus goal", () => {
+  assert.strictEqual(Model.defaultConfig().dailyGoalMinutes, 480)
+})
+
+test("parseSession preserves the unbanked focused WORK segment", () => {
+  const s = Model.parseSession(JSON.stringify({ phase: "WORK", running: true, focusedMs: 12345 }))
+  assert.strictEqual(s.focusedMs, 12345)
+})
+
+test("goalRemainingMs combines banked focus with the live WORK segment", () => {
+  const config = Object.assign(Model.defaultConfig(), { dailyGoalMinutes: 480 })
+  assert.strictEqual(Model.goalRemainingMs(2 * 3600000, config, 30 * 60000), 330 * 60000)
+})
+
+test("goalRemainingMs clamps at zero and goalProgress clamps at one", () => {
+  const config = Object.assign(Model.defaultConfig(), { dailyGoalMinutes: 60 })
+  assert.strictEqual(Model.goalRemainingMs(60 * 60000, config, 10 * 60000), 0)
+  assert.strictEqual(Model.goalProgress(60 * 60000, config, 10 * 60000), 1)
 })

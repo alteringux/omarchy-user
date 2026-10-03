@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.ask",
+  "name": "Ask NanoGPT",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Type a question, get a NanoGPT answer, and hear it through Piper TTS",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Prompt.qml"
+  }
+}

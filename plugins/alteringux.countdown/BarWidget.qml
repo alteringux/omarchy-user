@@ -86,7 +86,7 @@ BarWidget {
     id: stateStore
     fileName: "countdowns.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
     onLoadedChanged: if (loaded) root.nowMs = Date.now()
     onExternallyChanged: root.nowMs = Date.now()
@@ -98,7 +98,7 @@ BarWidget {
     id: historyStore
     fileName: "countdown-history.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 
@@ -159,7 +159,7 @@ BarWidget {
 
   // ---- tick -------------------------------------------------------
   Timer {
-    interval: 30000
+    interval: 60000
     repeat: true
     running: true
     onTriggered: { root.nowMs = Date.now(); root.checkDueNotifications() }

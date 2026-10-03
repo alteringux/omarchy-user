@@ -20,19 +20,20 @@ Panel {
   readonly property var activityValue: hostWidget ? hostWidget.activityValue : Model.defaultActivity()
   readonly property var attentionValue: hostWidget ? hostWidget.attentionValue : Model.defaultAttention()
   readonly property var readValue: hostWidget ? hostWidget.readValue : Model.defaultState()
+  readonly property var usageValue: hostWidget ? hostWidget.usageValue : Model.defaultUsage()
 
   property double nowMs: Date.now()
   Timer { interval: 20000; repeat: true; running: root.opened; onTriggered: root.nowMs = Date.now() }
 
-  readonly property var summary: Model.summary(root.activityValue, root.attentionValue, root.readValue)
+  readonly property var summary: Model.summary(root.activityValue, root.attentionValue, root.readValue, root.usageValue)
   readonly property var attentionRows: Model.attentionList(root.attentionValue)
   readonly property var events: (root.activityValue.events || []).slice(0, 40)
   readonly property double lastReadTs: root.readValue.lastReadTs || 0
-
   readonly property string metaLine: {
     var bits = []
     if (root.summary.unread > 0) bits.push(root.summary.unread + " new")
     if (root.summary.needAction > 0) bits.push(root.summary.needAction + " need action")
+    if (root.summary.usage.summary.stale > 0) bits.push(root.summary.usage.summary.stale + " plugins stale")
     return bits.length ? bits.join(" · ") : "all caught up"
   }
 
@@ -218,6 +219,36 @@ Panel {
                 }
               }
             }
+          }
+        }
+
+        // ---- plugin usage -----------------------------------------
+        PanelSeparator { visible: root.summary.usage.plugins.length > 0 }
+        PanelSectionHeader {
+          visible: root.summary.usage.plugins.length > 0
+          text: "PLUGIN USAGE"
+          foreground: root.barForeground
+        }
+        Text {
+          width: parent.width
+          visible: root.summary.usage.plugins.length > 0
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+          text: {
+            var most = root.summary.mostUsed.slice(0, 3).map(function (p) {
+              return p.id.replace(/^alteringux\./, "") + " " + p.uses
+            }).join(" · ")
+            var least = root.summary.leastUsed.slice(0, 3).map(function (p) {
+              return p.id.replace(/^alteringux\./, "") + " " + (p.neverUsed ? "never" : p.uses)
+            }).join(" · ")
+            var stale = root.summary.stalePlugins.map(function (p) {
+              return p.id.replace(/^alteringux\./, "") + " (" +
+                (p.neverUsed ? "never used" : Math.floor(p.daysIdle) + "d idle") + ")"
+            }).join(" · ")
+            var line = "Most: " + (most || "—") + "   Least: " + (least || "—")
+            return stale ? line + "\nStale: " + stale : line
           }
         }
 

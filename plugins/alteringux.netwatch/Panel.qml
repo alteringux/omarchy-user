@@ -379,8 +379,9 @@ Panel {
               width: parent.width
               text: {
                 var e = []
-                for (var k in root.topData.byState) e.push(k + " " + root.topData.byState[k])
-                return e.join("   ")
+                for (var k in root.topData.byState) e.push({ k: k, n: root.topData.byState[k] })
+                e.sort(function (a, b) { return b.n - a.n })
+                return e.map(function (x) { return x.k + " " + x.n }).join("   ")
               }
               visible: text.length > 0
               color: Qt.darker(root.barForeground, 1.4)

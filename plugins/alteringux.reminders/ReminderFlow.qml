@@ -18,6 +18,7 @@ Item {
   property string step: "minutes"
   property string minutes: ""
   property string filterText: ""
+  property string validationError: ""
   property bool repeat: false
   property string fontFamily: Style.font.menuFamily
 
@@ -30,7 +31,10 @@ Item {
   property int contentMargin: Style.spacing.panelPadding
   property int headerHeight: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
   property int cardWidth: Math.min(Style.space(300), panel.width - Style.gapsOut * 2)
-  property int cardHeight: Math.min(contentMargin * 2 + headerHeight, panel.height - Style.gapsOut * 2)
+  readonly property int validationHeight: root.validationError.length > 0
+    ? Style.font.caption + Style.spacing.panelGap
+    : 0
+  property int cardHeight: Math.min(contentMargin * 2 + headerHeight + validationHeight, panel.height - Style.gapsOut * 2)
   readonly property string promptText: root.step === "message" ? "Reminder message" : "Remind in minutes"
 
   readonly property var guard: Kit.BugGuard.create("alteringux.reminders", function(argv) { Quickshell.execDetached(argv) })
@@ -50,6 +54,7 @@ Item {
       root.step = "minutes"
       root.minutes = ""
       root.filterText = ""
+      root.validationError = ""
       root.repeat = false
 
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -73,6 +78,7 @@ Item {
 
   function setFilter(nextFilter) {
     root.filterText = nextFilter
+    root.validationError = ""
   }
 
   // Feature: step back to the minutes prompt instead of only being able to
@@ -80,7 +86,7 @@ Item {
   // they're easy to correct rather than retyped from scratch.
   function backToMinutes() {
     root.step = "minutes"
-    root.filterText = root.minutes
+    root.setFilter(root.minutes)
     root.minutes = ""
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
@@ -98,7 +104,7 @@ Item {
         }
 
         if (!nextMinutes) {
-          Quickshell.execDetached([root.omarchyPath + "/bin/omarchy-notification-send", "Invalid reminder", "Enter the number of minutes"])
+          root.validationError = "Enter a positive whole number of minutes."
           return
         }
 
@@ -183,7 +189,7 @@ Item {
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
-        anchors.bottomMargin: card.contentBottomInset
+        anchors.bottomMargin: card.contentBottomInset + root.validationHeight
         anchors.leftMargin: card.contentLeftInset
 
         Text {
@@ -260,6 +266,22 @@ Item {
             }
           }
         }
+      }
+
+      Text {
+        visible: root.validationError.length > 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: card.contentLeftInset
+        anchors.rightMargin: card.contentRightInset
+        anchors.bottomMargin: card.contentBottomInset
+        text: root.validationError
+        color: Kit.Palette.negative
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
       }
     }
   }

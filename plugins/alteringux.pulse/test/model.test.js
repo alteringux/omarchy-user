@@ -89,6 +89,41 @@ test("summary: unread counts events after lastReadTs; topLevel from attention", 
   assert.equal(s.topLevel, "critical")
 })
 
+test("plugin usage normalises tracked, untracked, most/least-used and stale rows", () => {
+  const usage = M.parseUsage({
+    generatedAt: "2026-09-18T00:00:00Z",
+    thresholdDays: 30,
+    plugins: [
+      { id: "alteringux.hot", label: "Hot", tracked: true, uses: 8, lastAt: T0 + 31 * 86400000 },
+      { id: "alteringux.cold", label: "Cold", tracked: true, uses: 1, lastAt: T0 - 31 * 86400000 },
+      { id: "alteringux.new", label: "New", tracked: false, uses: 0, lastAt: 0 }
+    ]
+  }, T0 + 31 * 86400000)
+  assert.deepEqual(usage.summary, { tracked: 2, untracked: 1, neverUsed: 0, stale: 1 })
+  assert.deepEqual(M.usageMostUsed(usage, 1).map((p) => p.id), ["alteringux.hot"])
+  assert.deepEqual(M.usageLeastUsed(usage, 1).map((p) => p.id), ["alteringux.new"])
+  assert.match(M.makeUsageAttention(usage, { now: T0 }).label, /alteringux.cold.*62d idle/)
+  assert.equal(M.makeUsageAttention(M.parseUsage({
+    thresholdDays: 30,
+    plugins: [{ id: "alteringux.recent", tracked: true, uses: 2, lastAt: T0 }]
+  }, T0), { now: T0 }), null)
+})
+
+test("usage attention acknowledgements suppress only the same snapshot", () => {
+  const usage = M.parseUsage({
+    thresholdDays: 30,
+    plugins: [{ id: "alteringux.cold", tracked: true, uses: 2, lastAt: T0 - 31 * 86400000 }]
+  }, T0)
+  assert.equal(M.makeUsageAttention(usage, {
+    now: T0,
+    acknowledged: { "alteringux.cold": { uses: 2, lastAt: T0 - 31 * 86400000 } }
+  }), null)
+  assert.ok(M.makeUsageAttention(usage, {
+    now: T0,
+    acknowledged: { "alteringux.cold": { uses: 1, lastAt: T0 - 31 * 86400000 } }
+  }))
+})
+
 test("nextAction: attention wins; falls back to newest actionable unread; else null", () => {
   const attention = M.parseAttention({
     items: {

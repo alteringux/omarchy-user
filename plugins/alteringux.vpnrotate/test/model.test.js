@@ -38,6 +38,46 @@ test("parseState coerces connected:'true' string to false (strict bool)", () => 
   assert.strictEqual(Model.parseState(JSON.stringify({ connected: "true" })).connected, false);
 });
 
+// ── parseWifiState / isWifiActive ───────────────────────────────────────
+test("parseWifiState: empty / junk input -> unknown", () => {
+  assert.strictEqual(Model.parseWifiState(""), "unknown");
+  assert.strictEqual(Model.parseWifiState(null), "unknown");
+});
+
+test("parseWifiState: lone wifi:connected -> connected", () => {
+  assert.strictEqual(Model.parseWifiState("wifi:connected"), "connected");
+});
+
+test("parseWifiState: lone wifi:disconnected -> disconnected", () => {
+  assert.strictEqual(Model.parseWifiState("wifi:disconnected\nwifi-p2p:disconnected"), "disconnected");
+});
+
+test("parseWifiState: connected wins over a weaker wifi row", () => {
+  assert.strictEqual(Model.parseWifiState("wifi:connected\nwifi:unavailable"), "connected");
+});
+
+test("parseWifiState: wifi-p2p rows are ignored (different TYPE)", () => {
+  assert.strictEqual(Model.parseWifiState("wifi-p2p:disconnected"), "unknown");
+  assert.strictEqual(Model.parseWifiState("wifi:connected\nwifi-p2p:disconnected"), "connected");
+});
+
+test("parseWifiState: an unrecognised state string -> unavailable", () => {
+  assert.strictEqual(Model.parseWifiState("wifi:somethingweird"), "unavailable");
+});
+
+test("parseWifiState: no wifi row among other device types -> unknown", () => {
+  assert.strictEqual(Model.parseWifiState("ethernet:connected\nloopback:connected"), "unknown");
+});
+
+test("isWifiActive: true only for connected, in string or object form", () => {
+  assert.strictEqual(Model.isWifiActive("connected"), true);
+  assert.strictEqual(Model.isWifiActive("disconnected"), false);
+  assert.strictEqual(Model.isWifiActive("unknown"), false);
+  assert.strictEqual(Model.isWifiActive({ wifiState: "connected" }), true);
+  assert.strictEqual(Model.isWifiActive({ wifiState: "unavailable" }), false);
+  assert.strictEqual(Model.isWifiActive(null), false);
+});
+
 // ── parseConfig / clampInterval ──────────────────────────────────────────
 test("parseConfig defaults when empty", () => {
   assert.deepStrictEqual(Model.parseConfig(""), { autoRotate: false, intervalSec: 600, killSwitch: false });

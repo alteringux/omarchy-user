@@ -38,7 +38,7 @@ BarWidget {
     id: stateStore
     fileName: "reposwatch-state.json"
     watch: true
-    pollMs: 5000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 

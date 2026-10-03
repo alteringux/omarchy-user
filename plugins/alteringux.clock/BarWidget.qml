@@ -98,6 +98,7 @@ BarWidget {
     var target = panelLoader.item
     if (!target) return
     if ("bar" in target) target.bar = root.bar
+    if ("moduleName" in target) target.moduleName = root.moduleName
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
@@ -108,10 +109,11 @@ BarWidget {
 
   onBarChanged: injectPanel()
   onSettingsChanged: injectPanel()
+  onModuleNameChanged: injectPanel()
 
   SystemClock {
     id: clock
-    precision: SystemClock.Seconds
+    precision: Model.formatUsesSeconds(root.activeFormat) ? SystemClock.Seconds : SystemClock.Minutes
     onDateChanged: root.displayDate = date
   }
 

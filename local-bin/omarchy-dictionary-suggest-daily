@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Self-improving layer: learns from starred/frequently-looked-up words and
-# asks llm-blurb (Featherless) for a related word to explore next. Cheap to
+# asks llm-blurb (NanoGPT) for a related word to explore next. Cheap to
 # call often -- refresh mode only hits the model once the cache is >12h
 # stale and there's actually signal to learn from.
 # Usage: omarchy-dictionary-suggest-daily [read|refresh]

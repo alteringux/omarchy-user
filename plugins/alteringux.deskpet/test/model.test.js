@@ -44,18 +44,18 @@ test("nextPetId / prevPetId wrap around the catalogue", () => {
 
 // ── parsing ──────────────────────────────────────────────────────────────
 
-test("parseState: empty / garbage / non-object -> defaults", () => {
-  // defaultState() stamps Date.now() into a few fields, so compare structure
-  // (keys + non-timestamp values) rather than a wall-clock-sensitive deepEqual.
+test("parseState: missing state -> healthy defaults, malformed state -> disabled", () => {
   const d = Model.defaultState()
-  const timestampKeys = new Set(["lastTickMs", "lastInteractionMs", "bornMs"])
-  for (const raw of ["", "not json", "[1,2,3]", "null"]) {
-    const s = Model.parseState(raw)
-    assert.deepEqual(Object.keys(s).sort(), Object.keys(d).sort(), raw)
-    for (const key of Object.keys(d)) {
-      if (timestampKeys.has(key)) { assert.equal(typeof s[key], "number", key); continue }
-      assert.deepEqual(s[key], d[key], key)
+  const empty = Model.parseState("")
+  for (const key of Object.keys(d)) {
+    if (["lastTickMs", "lastInteractionMs", "bornMs"].includes(key)) {
+      assert.equal(typeof empty[key], "number", key)
+    } else {
+      assert.deepEqual(empty[key], d[key], key)
     }
+  }
+  for (const raw of ["not json", "[1,2,3]", "null", "{}", JSON.stringify({ energy: "oops" }), JSON.stringify({ energy: null })]) {
+    assert.equal(Model.parseState(raw).enabled, false, raw)
   }
 })
 
@@ -207,6 +207,16 @@ test("setSleep: manual toggle overrides energy-based asleep state", () => {
   assert.equal(asleep.asleep, true)
   const awake = Model.setSleep(asleep, false)
   assert.equal(awake.asleep, false) // energy is high, so waking sticks
+})
+
+test("setSleep: an explicit wake rouses an energy-exhausted pet", () => {
+  // Regression: energy <= 15 used to pin asleep=true through a manual wake,
+  // and nothing the user could do restored energy fast enough.
+  const drained = state({ energy: 3, manualSleep: false, asleep: true })
+  const awake = Model.setSleep(drained, false)
+  assert.equal(awake.asleep, false)
+  assert.ok(awake.energy > 15, "wake lifts energy clear of the sleep threshold")
+  assert.equal(awake.manualSleep, false)
 })
 
 test("selectPet: rejects an unknown id, keeps the current pet", () => {

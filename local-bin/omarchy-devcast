@@ -114,6 +114,27 @@ built_map() {
   done < <(cast_dirs_newest_first)
 }
 
+# Replays whose source transcript has grown are kept on disk for a later
+# rebuild, but must not be advertised as the current/recent replay.
+replay_is_stale() {
+  local d="$1" source sourceMt replayMt
+  [ -f "$d/build.json" ] || return 1
+  source="$(jq -r '.sourceTranscript // empty' "$d/build.json" 2>/dev/null || true)"
+  [ -n "$source" ] && [ -f "$source" ] || return 1
+  sourceMt="$(stat -c %Y "$source" 2>/dev/null || echo 0)"
+  replayMt="$(stat -c %Y "$d/cast.json" 2>/dev/null || echo 0)"
+  [ "$sourceMt" -gt "$replayMt" ]
+}
+
+current_cast_dirs_newest_first() {
+  local d
+  while IFS= read -r d; do
+    [ -n "$d" ] || continue
+    replay_is_stale "$d" && continue
+    printf '%s\n' "$d"
+  done < <(cast_dirs_newest_first)
+}
+
 # Rebuild devcast-index.json — the single file the bar widget watches
 # (docs/adr/0006-cli-first-plugins.md). Cheap; called after build / prune /
 # catalog. Also folds in a capped view of the session catalogue.
@@ -132,7 +153,7 @@ write_index() {
         video:(if $mp4 != "" then $mp4 elif $gif != "" then $gif else "" end),
         stats:($m.stats // {})
       }]' <<<"$rows")"
-  done < <(cast_dirs_newest_first)
+  done < <(current_cast_dirs_newest_first)
 
   local cat='null'
   if [ -f "$CATALOG_FILE" ]; then
@@ -247,7 +268,7 @@ cmd_import() {
 
 resolve_cast_dir() {  # <id-or-empty> -> dir
   local want="${1:-}"
-  if [ -z "$want" ]; then cast_dirs_newest_first | head -1; return 0; fi
+  if [ -z "$want" ]; then current_cast_dirs_newest_first | head -1; return 0; fi
   if [ -d "$CASTS_DIR/$want" ]; then printf '%s' "$CASTS_DIR/$want"; return 0; fi
   cast_dirs_newest_first | grep -m1 -F "$want" || true
 }
@@ -275,28 +296,34 @@ cmd_build() {
   transcript="$(resolve_transcript "$selector" "$project")"
   [ -n "$transcript" ] && [ -f "$transcript" ] || die "no transcript for '$selector' under $PROJECTS_DIR"
 
-  # One replay per session: if this transcript's session already has a built
-  # dir, drop it so a re-import after the session grew updates in place.
-  local sid
+  # Keep the previous replay until the replacement has been fully built and
+  # validated. A failed parse must never erase the last good replay.
+  local sid prevdir=""
   sid="$(grep -m1 -o '"sessionId":"[^"]*"' "$transcript" 2>/dev/null | head -1 | cut -d'"' -f4)"
   if [ -n "$sid" ]; then
-    local prevdir
     prevdir="$(built_map 2>/dev/null | awk -F'\t' -v s="$sid" '$1==s{print $2; exit}')"
-    [ -n "$prevdir" ] && [ -d "$CASTS_DIR/$prevdir" ] && rm -rf "$CASTS_DIR/$prevdir"
   fi
 
-  # Build into a stamp-only dir first, then rename it to include the slug of the
-  # title the parser actually settled on (ai-title, else first real prompt).
+  # Build into a stamp-only dir first, then rename it to include the slug of
+  # the title the parser actually settled on (ai-title, else first real prompt).
   local stamp outDir
   stamp="$(date +%Y%m%d-%H%M%S)"
   outDir="$CASTS_DIR/${stamp}-building.$$"
 
   mkdir -p "$CASTS_DIR"
   local result
-  result="$(node "$CLI" build "$transcript" "$outDir" "${passthru[@]}")" || { rm -rf "$outDir"; die "build failed: $result"; }
+  result="$(node "$CLI" build "$transcript" "$outDir" "${passthru[@]}")" || {
+    rm -rf "$outDir"
+    [ "${DEVCAST_BATCH:-0}" = 1 ] || write_index || true
+    die "build failed: $result"
+  }
 
   local err; err="$(printf '%s' "$result" | jq -r '.error // empty')"
-  [ -z "$err" ] || { rm -rf "$outDir" 2>/dev/null || true; die "$err"; }
+  [ -z "$err" ] || {
+    rm -rf "$outDir" 2>/dev/null || true
+    [ "${DEVCAST_BATCH:-0}" = 1 ] || write_index || true
+    die "$err"
+  }
 
   local summary title slug finalDir
   summary="$(printf '%s' "$result" | jq -r '.summary')"
@@ -305,16 +332,38 @@ cmd_build() {
   [ -n "$slug" ] || slug="session"
   finalDir="$CASTS_DIR/${stamp}-${slug}"
   [ -e "$finalDir" ] && finalDir="$CASTS_DIR/${stamp}-${slug}.$$"
-  mv "$outDir" "$finalDir"
-  outDir="$finalDir"
 
+  # Write metadata while the new replay is still isolated. This keeps every
+  # failure before the swap, so the previous directory remains untouched.
+  if ! printf '%s' "$result" | jq --arg src "$transcript" --arg dir "$finalDir" \
+    '. + {sourceTranscript:$src, outDir:$dir, htmlPath:($dir + "/replay.html"), castPath:($dir + "/cast.json")}' \
+    > "$outDir/build.json"; then
+    rm -rf "$outDir"
+    die "could not record build metadata"
+  fi
+
+  # Swap directories only after the complete replacement exists. Keep a
+  # rollback name until the new directory has been installed successfully.
+  local oldPath="" backupPath=""
+  if [ -n "$prevdir" ] && [ -d "$CASTS_DIR/$prevdir" ]; then
+    oldPath="$CASTS_DIR/$prevdir"
+    backupPath="$CASTS_DIR/.${prevdir}.backup.$$"
+    if ! mv "$oldPath" "$backupPath"; then
+      rm -rf "$outDir"
+      die "could not stage previous replay for replacement"
+    fi
+  fi
+  if ! mv "$outDir" "$finalDir"; then
+    if [ -n "$backupPath" ]; then
+      mv "$backupPath" "$oldPath" 2>/dev/null || true
+    fi
+    rm -rf "$outDir" 2>/dev/null || true
+    die "could not install replacement replay"
+  fi
+  [ -z "$backupPath" ] || rm -rf "$backupPath" 2>/dev/null || true
+  outDir="$finalDir"
   local html
   html="$outDir/replay.html"
-
-  # record the source + a friendly id
-  printf '%s' "$result" | jq --arg src "$transcript" --arg dir "$outDir" \
-    '. + {sourceTranscript:$src, outDir:$dir, htmlPath:($dir + "/replay.html"), castPath:($dir + "/cast.json")}' \
-    > "$outDir/build.json"
 
   [ "${DEVCAST_BATCH:-0}" = 1 ] || write_index
 
@@ -364,7 +413,7 @@ cmd_list() {
     row="$(printf '%s' "$row" | jq --arg id "$(basename "$d")" --arg html "$d/replay.html" \
       '{id:$id, html:$html, title:(.meta.title // "session"), summary:.summary, duration:.duration, stats:.stats}')"
     rows="$(jq -c --argjson r "$row" '. + [$r]' <<<"$rows")"
-  done < <(cast_dirs_newest_first)
+  done < <(current_cast_dirs_newest_first)
 
   if [ "$json" = 1 ]; then
     printf '%s\n' "$rows" | jq .

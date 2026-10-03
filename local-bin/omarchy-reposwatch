@@ -88,30 +88,39 @@ write_config() { # stdin: full config object
 }
 
 # ── one repo's status as a JSON object ────────────────────────────────────
+repo_error_json() { # repo_error_json <path> <name> <error>
+  local path="$1" name="$2" error="$3"
+  jq -n --arg path "$path" --arg name "$name" --arg error "$error" \
+    '{path: $path, name: $name, ok: false, error: $error}'
+}
+
 repo_status_json() { # repo_status_json <path>
   local path="$1" name
-  name="$(basename -- "$path")"
+  name="$(basename -- "$path" 2>/dev/null || printf '%s' "$path")"
 
   if [ ! -d "$path" ]; then
-    jq -n --arg path "$path" --arg name "$name" \
-      '{path: $path, name: $name, ok: false, error: "path does not exist"}'
+    repo_error_json "$path" "$name" "path does not exist"
     return 0
   fi
   if ! git -C "$path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    jq -n --arg path "$path" --arg name "$name" \
-      '{path: $path, name: $name, ok: false, error: "not a git repository"}'
+    repo_error_json "$path" "$name" "not a git repository"
     return 0
   fi
 
-  local branch detached=false
-  branch="$(git -C "$path" symbolic-ref --short -q HEAD || true)"
-  if [ -z "$branch" ]; then
+  local branch detached=false head_ref
+  head_ref="$(git -C "$path" symbolic-ref --short -q HEAD 2>/dev/null || true)"
+  if [ -n "$head_ref" ]; then
+    branch="$head_ref"
+  else
     detached=true
     branch="$(git -C "$path" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
   fi
 
   local porcelain staged=0 unstaged=0 untracked=0
-  porcelain="$(git -C "$path" status --porcelain=v1 --untracked-files=all 2>/dev/null || true)"
+  if ! porcelain="$(git -C "$path" status --porcelain=v1 --untracked-files=all 2>/dev/null)"; then
+    repo_error_json "$path" "$name" "git status failed"
+    return 0
+  fi
   if [ -n "$porcelain" ]; then
     staged="$(printf '%s\n' "$porcelain" | awk 'substr($0,1,1) !~ /[ ?]/' | wc -l | tr -d ' ')"
     unstaged="$(printf '%s\n' "$porcelain" | awk 'substr($0,2,1) !~ /[ ?]/' | wc -l | tr -d ' ')"
@@ -123,13 +132,19 @@ repo_status_json() { # repo_status_json <path>
   if git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' >/dev/null 2>&1; then
     has_upstream=true
     local counts
-    counts="$(git -C "$path" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null || echo "0 0")"
+    if ! counts="$(git -C "$path" rev-list --left-right --count '@{u}...HEAD' 2>/dev/null)"; then
+      repo_error_json "$path" "$name" "git upstream check failed"
+      return 0
+    fi
     behind="$(printf '%s' "$counts" | awk '{print $1+0}')"
     ahead="$(printf '%s' "$counts" | awk '{print $2+0}')"
   fi
 
   local last_commit_ts
-  last_commit_ts="$(git -C "$path" log -1 --format=%ct 2>/dev/null || echo 0)"
+  if ! last_commit_ts="$(git -C "$path" log -1 --format=%ct 2>/dev/null)"; then
+    repo_error_json "$path" "$name" "git log failed"
+    return 0
+  fi
   [ -z "$last_commit_ts" ] && last_commit_ts=0
 
   jq -n \
@@ -146,22 +161,59 @@ repo_status_json() { # repo_status_json <path>
     }'
 }
 
+previous_repo_paths_json() {
+  [ -f "$STATE_FILE" ] || { echo '[]'; return 0; }
+  jq -c '[.repos[]? | select(type == "object" and (.path | type) == "string" and .path != "") | .path] | unique' \
+    "$STATE_FILE" 2>/dev/null || echo '[]'
+}
+
+config_entries_json() {
+  local fallback="$1"
+  jq -c --argjson fallback "$fallback" '
+    if type != "object" then
+      (($fallback | map({kind: "repo", path: .})) + [{kind: "error", error: "invalid configuration: expected an object"}])
+    elif has("_scanError") then
+      (($fallback | map({kind: "repo", path: .})) + [{kind: "error", error: ._scanError}])
+    elif (.repos | type) != "array" then
+      (($fallback | map({kind: "repo", path: .})) + [{kind: "error", error: "invalid configuration: repos must be an array"}])
+    else
+      [.repos | to_entries[] |
+        if (.value | type) == "string" and .value != ""
+        then {kind: "repo", path: .value}
+        else {kind: "error", error: ("invalid repository entry at index " + (.key | tostring))}
+        end]
+    end'
+}
+
 cmd_scan() {
   ensure_dir
-  local cfg repo_paths results updated
-  cfg="$(read_config)"
-  repo_paths="$(printf '%s' "$cfg" | jq -r '.repos[]?')"
+  seed_config
+  local cfg fallback repo_entries results updated
+  fallback="$(previous_repo_paths_json)"
+  if ! cfg="$(jq -e . "$CONFIG_FILE" 2>/dev/null)"; then
+    cfg="$(jq -n --argjson repos "$fallback" '{repos: $repos, _scanError: "invalid configuration JSON"}')"
+  fi
+
+  # Keep valid paths from the previous state when hand-edited config is
+  # malformed, and turn every malformed entry into a visible error row.
+  repo_entries="$(printf '%s' "$cfg" | config_entries_json "$fallback")"
 
   results="[]"
-  if [ -n "$repo_paths" ]; then
-    local entries=()
-    while IFS= read -r p; do
-      [ -z "$p" ] && continue
-      entries+=("$(repo_status_json "$p")")
-    done <<< "$repo_paths"
-    if [ "${#entries[@]}" -gt 0 ]; then
-      results="$(printf '%s\n' "${entries[@]}" | jq -s '.')"
+  local entries=() entry kind p error row
+  while IFS= read -r entry; do
+    kind="$(printf '%s' "$entry" | jq -r '.kind')"
+    if [ "$kind" = "repo" ]; then
+      p="$(printf '%s' "$entry" | jq -r '.path')"
+      row="$(repo_status_json "$p")"
+      entries+=("$row")
+    else
+      error="$(printf '%s' "$entry" | jq -r '.error')"
+      row="$(repo_error_json "" "reposwatch config" "$error")"
+      entries+=("$row")
     fi
+  done < <(printf '%s' "$repo_entries" | jq -c '.[]')
+  if [ "${#entries[@]}" -gt 0 ]; then
+    results="$(printf '%s\n' "${entries[@]}" | jq -s '.')"
   fi
 
   updated="$(now_ms)"
@@ -180,6 +232,7 @@ cmd_scan() {
       }
     }' | put_file "$STATE_FILE"
 }
+
 
 cmd_get() {
   [ -f "$STATE_FILE" ] || cmd_scan

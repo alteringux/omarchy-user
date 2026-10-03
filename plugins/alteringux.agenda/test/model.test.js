@@ -70,6 +70,11 @@ test("parseIcsDate: UTC, date-only, and floating", () => {
   assert.equal(valueDate.allDay, true)
   assert.equal(Model.parseIcsDate("nope", {}), null)
 })
+test("parseIcsDate resolves TZID wall clocks deterministically", () => {
+  const parsed = Model.parseIcsDate("20260830T140000", { TZID: "Europe/Berlin" })
+  assert.equal(parsed.epoch, utc(2026, 8, 30, 12, 0))
+  assert.equal(parsed.allDay, false)
+})
 
 test("parseIcsDuration parses RFC 5545 dur-values", () => {
   assert.equal(Model.parseIcsDuration("PT90M"), 90 * 60)
@@ -149,6 +154,16 @@ test("computeAgenda picks the soonest not-yet-ended timed event as next", () => 
   // "Ongoing" started before now but hasn't ended -> still the next thing.
   assert.equal(agenda.next.summary, "Ongoing")
   assert.equal(agenda.upcoming.map((e) => e.summary).join(","), "Ongoing,Soon,Later")
+})
+test("computeAgenda expands a weekly recurrence to its next occurrence", () => {
+  const now = utc(2026, 8, 30, 12, 0)
+  const cal = ics([
+    { uid: "weekly", summary: "Weekly", start: "20260824T140000Z", end: "20260824T150000Z", rrule: true },
+  ])
+  const agenda = Model.computeAgenda([cal], now, {})
+  assert.equal(agenda.next.summary, "Weekly")
+  assert.equal(agenda.next.start, utc(2026, 8, 31, 14, 0))
+  assert.equal(agenda.next.recurring, true)
 })
 
 test("computeAgenda skips CANCELLED and de-dupes by uid+start", () => {

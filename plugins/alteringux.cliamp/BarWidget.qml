@@ -148,8 +148,10 @@ BarWidget {
 
   // ── actions ─────────────────────────────────────────────────────────
   function runVerb(args) {
-    guard.run("verb:" + args.join(" "), function () {
-      Quickshell.execDetached([root.cliampBin].concat(args))
+    var safeArgs = Model.safeVerbArgs(args)
+    if (!safeArgs) return
+    guard.run("verb:" + safeArgs.join(" "), function () {
+      Quickshell.execDetached([root.cliampBin].concat(safeArgs))
     })
   }
 
@@ -175,13 +177,15 @@ BarWidget {
   // paused, so without this the next poll's parseStatus carries the *old*
   // mode forward and the dropdown snaps back. Mirrors visProc's frame handler.
   function setVis(name) {
-    if (!root.running || !name) return
+    if (!root.running) return
+    var args = Model.safeVerbArgs(["vis", name])
+    if (!args) return
     if (root.status && root.status.visualizer !== name) {
       var s = Object.assign({}, root.status)
       s.visualizer = name
       root.status = s
     }
-    root.runVerb(["vis", name])
+    root.runVerb(args)
     root.pollSoon()
   }
 

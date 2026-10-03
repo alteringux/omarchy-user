@@ -72,7 +72,7 @@ BarWidget {
     id: stateStore
     fileName: "timers.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
     onLoadedChanged: if (loaded) root.nowMs = Date.now()
     onExternallyChanged: root.nowMs = Date.now()
@@ -84,7 +84,7 @@ BarWidget {
     id: historyStore
     fileName: "timers-history.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 

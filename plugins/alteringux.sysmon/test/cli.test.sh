@@ -97,6 +97,20 @@ rm -f "$WORK/sysmon-state.json"
 [ -f "$WORK/sysmon-state.json" ] && ok "get samples on first run when no state file exists" \
   || bad "get seeds state" "missing"
 
+# A malformed history container must be ignored rather than aborting sample.
+rm -f "$WORK/sysmon-sample.json"
+printf '{"history":{"not":"an array"}}\n' > "$WORK/sysmon-state.json"
+write_stat "200 0 200 900 0 0 0 0 0 0"
+"$CLI" sample
+[ "$(state '.history | length')" = "1" ] && ok "malformed history container is reset safely" \
+  || bad "malformed history container" "$(state '.history')"
+
+# A malformed cpu baseline must also fall back to the first-sample aggregate.
+printf 'not json\n' > "$WORK/sysmon-sample.json"
+"$CLI" sample
+[ "$(state '.cpu.pct')" = "0" ] && ok "malformed cpu baseline is reset safely" \
+  || bad "malformed cpu baseline" "$(state '.cpu.pct')"
+
 # ── history ring: sample appends {ts,cpu,mem,temp}, capped ────────────────
 rm -f "$WORK/sysmon-state.json" "$WORK/sysmon-sample.json"
 write_stat "200 0 200 900 0 0 0 0 0 0"

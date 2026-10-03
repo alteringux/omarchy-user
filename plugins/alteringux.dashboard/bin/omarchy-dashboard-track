@@ -16,16 +16,21 @@ SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 # shellcheck source=dashboard-common.sh
 source "$SCRIPT_DIR/dashboard-common.sh"
 
-ensure_state_file
+ensure_state_file || { echo "dashboard: failed to initialize state file" >&2; exit 1; }
 
 title="${1:-}"
 [[ -n "$title" ]] || exit 0
 
-(
-  flock 9
-  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+if ! (
+  flock 9 || exit 1
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT
   jq -c --arg title "$title" --arg now "$(now_iso)" \
     '.engagement //= {} | .engagement.news //= {} |
      .engagement.news[$title] = { clicks: ((.engagement.news[$title].clicks // 0) + 1), lastAt: $now }' \
-    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
-) 9>"$LOCK_FILE"
+    "$STATE_FILE" >"$tmp" || exit 1
+  mv "$tmp" "$STATE_FILE"
+) 9>"$LOCK_FILE"; then
+  echo "dashboard: failed to track news click" >&2
+  exit 1
+fi

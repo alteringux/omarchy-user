@@ -33,6 +33,7 @@ yesterday="$(date -d yesterday +%F)"
 "$CLI" get >/dev/null
 [ -f "$CFG" ] && ok "any verb seeds pomodoro-config.json" || bad "config seed" "missing"
 [ "$(jq -r '.workMinutes' "$CFG")" = "25" ] && ok "seeded config defaults workMinutes to 25" || bad "config default" "$(cat "$CFG" 2>&1)"
+[ "$(jq -r '.dailyGoalMinutes' "$CFG")" = "480" ] && ok "seeded config defaults daily goal to 8 hours" || bad "daily goal default" "$(cat "$CFG" 2>&1)"
 
 # ── toggle from IDLE starts WORK ─────────────────────────────────────────
 "$CLI" toggle
@@ -73,7 +74,7 @@ echo '{"version":1,"sessions":[]}' > "$HIST"
 # ── complete: transition + credit ─────────────────────────────────────
 echo '{"version":1,"streak":2,"lastActiveDate":"'"$yesterday"'","daily":{}}' > "$STATS"
 echo '{"version":1,"sessions":[]}' > "$HIST"
-jq '.phase="WORK" | .running=true | .ready=false | .completedPomodorosThisSession=3 | .savedAtMs=(now*1000|floor)' "$SESS" > "$WORK/x" && mv "$WORK/x" "$SESS"
+jq '.phase="WORK" | .running=false | .ready=false | .completedPomodorosThisSession=3 | .focusedMs=1500000 | .savedAtMs=(now*1000|floor)' "$SESS" > "$WORK/x" && mv "$WORK/x" "$SESS"
 "$CLI" complete
 [ "$(sj .phase)" = "LONG_BREAK" ] && ok "complete of the 4th WORK -> LONG_BREAK" || bad "complete phase" "$(sj .phase)"
 [ "$(sj .completedPomodorosThisSession)" = "4" ] && ok "complete counts the pomodoro" || bad "complete count" "$(sj .completedPomodorosThisSession)"
@@ -144,6 +145,8 @@ echo 'not json' > "$SESS"
 st="$("$CLI" status)"
 [ "$(jq -r '.phase' <<<"$st")" = "WORK" ] && ok "status reports the phase" || bad "status phase" "$st"
 [ "$(jq -r '.remainingMs' <<<"$st")" != "null" ] && ok "status reports a live remainingMs" || bad "status remaining" "$st"
+[ "$(jq -r '.dailyGoalMs' <<<"$st")" = "28800000" ] && ok "status reports the configured daily goal" || bad "status daily goal" "$st"
+[ "$(jq -r '.goalRemainingMs' <<<"$st")" != "null" ] && ok "status reports remaining daily focus" || bad "status goal remaining" "$st"
 
 echo
 echo "$pass passed, $fail failed"

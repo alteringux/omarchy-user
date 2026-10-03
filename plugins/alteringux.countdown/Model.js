@@ -152,6 +152,27 @@ function formatRemaining(days) {
   if (n > 1) return n + " days"
   return Math.abs(n) + " days ago"
 }
+// Minutes until the target instant. Positive values round up so a countdown
+// never shows zero while any fraction of a minute remains; past targets round
+// down to report fully elapsed minutes.
+function minutesRemaining(targetEpoch, nowMs) {
+  var target = Number(targetEpoch)
+  var now = Number(nowMs)
+  if (!isFinite(target) || !isFinite(now)) return NaN
+  var delta = (target - now) / 60000
+  return delta >= 0 ? Math.ceil(delta) : Math.floor(delta)
+}
+
+// Exact-time alternative for the card's day countdown.
+function formatMinutesRemaining(minutes) {
+  var n = Math.round(Number(minutes))
+  if (!isFinite(n)) return ""
+  if (n === 0) return "Less than a minute left"
+  if (n === 1) return "1 minute left"
+  if (n > 1) return n + " minutes left"
+  if (n === -1) return "1 minute ago"
+  return Math.abs(n) + " minutes ago"
+}
 
 // Compact form for the bar marquee: "21d", "0d", "-3d".
 function formatShort(days) {
@@ -406,6 +427,7 @@ if (typeof module !== "undefined") {
     startOfLocalDay: startOfLocalDay,
     targetEpochFor: targetEpochFor,
     daysRemaining: daysRemaining,
+    minutesRemaining: minutesRemaining,
     newId: newId,
     sanitizeEntry: sanitizeEntry,
     parseState: parseState,
@@ -425,6 +447,7 @@ if (typeof module !== "undefined") {
     isFutureKey: isFutureKey,
     isCurrentOrPastMonth: isCurrentOrPastMonth,
     formatRemaining: formatRemaining,
+    formatMinutesRemaining: formatMinutesRemaining,
     formatShort: formatShort,
     formatTarget: formatTarget,
     marqueeText: marqueeText,

@@ -39,6 +39,43 @@ function parseState(raw) {
 function str(v) { return typeof v === "string" ? v : ""; }
 function num(v) { return typeof v === "number" && isFinite(v) ? v : 0; }
 
+// ── wifi link state ─────────────────────────────────────────────────────
+// Parses `nmcli -t -f TYPE,STATE dev` (colon-separated rows: "wifi:connected",
+// "ethernet:connected", "wifi:disconnected", …). Returns one of:
+//   "connected"     at least one wifi device is joined to an AP
+//   "disconnected"  a wifi device exists but is on no AP (or the radio is off)
+//   "unavailable"   a wifi device exists but is unmanaged / rfkill-blocked, or
+//                   reports a state string we don't recognise
+//   "unknown"       no wifi device at all, or empty / unreadable input
+// "wifi-p2p" is a distinct TYPE and is ignored here. Multiple "wifi" rows
+// collapse to the strongest: connected > disconnected > unavailable. Junk in →
+// "unknown" out, so callers never need a try/catch — same safe-empty contract
+// as parseState. The widget gates its connect calls on this; the bash script
+// keeps its own independent gate so IPC / bare-CLI callers behave the same.
+function parseWifiState(raw) {
+  if (!raw || raw.length === 0) return "unknown";
+  var rank = { connected: 4, disconnected: 3, unavailable: 2 };
+  var best = "unknown";
+  var bestRank = 0;
+  var lines = raw.split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/^wifi:(\S+)/);
+    if (!m) continue;
+    var s = m[1];
+    if (!rank[s]) s = "unavailable";
+    if (rank[s] > bestRank) { bestRank = rank[s]; best = s; }
+  }
+  return best;
+}
+
+// True iff a wifi link is up right now. Accepts the string parseWifiState
+// returns, or a parsed object carrying a `wifiState` field, so either caller
+// shape works.
+function isWifiActive(x) {
+  if (x && typeof x === "object") x = x.wifiState;
+  return x === "connected";
+}
+
 // ── metrics sidecar (written by `protonvpn-rotate metrics` + connect/rotate) ─
 // {
 //   load: <int %>, protocol: "wireguard", latencyMs: <int>, latencyAt: <epoch>,
@@ -252,6 +289,8 @@ function summaryLine(state) {
 if (typeof module !== "undefined") {
   module.exports = {
     parseState: parseState,
+    parseWifiState: parseWifiState,
+    isWifiActive: isWifiActive,
     parseConfig: parseConfig,
     parseMetrics: parseMetrics,
     defaultConfig: defaultConfig,

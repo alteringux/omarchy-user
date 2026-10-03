@@ -107,6 +107,7 @@ mkdir -p "$WORK/notarepo"
 [ "$(repo_of notarepo .error)" = "not a git repository" ] && ok "non-repo carries a clear error" \
   || bad "notarepo error" "$(repo_of notarepo .error)"
 
+
 # ── totals aggregate across the whole watch list ──────────────────────────
 scanned="$(state '.totals.reposScanned')"
 [ "$scanned" = "4" ] && ok "totals.reposScanned counts every watched path" || bad "reposScanned" "$scanned"
@@ -133,6 +134,32 @@ rm -f "$OMARCHY_STATE_DIR/reposwatch-state.json"
 # ── reset wipes state but keeps config ─────────────────────────────────────
 "$CLI" reset >/dev/null
 [ -f "$OMARCHY_STATE_DIR/reposwatch-config.json" ] && ok "reset keeps config" || bad "reset kept config" "config missing"
+# ── a polling failure is an error, not a false clean result ────────────────
+git_init "$WORK/broken"
+commit "$WORK/broken" "init"
+printf 'not a git index\n' > "$WORK/broken/.git/index"
+"$CLI" add "$WORK/broken" >/dev/null
+[ "$(repo_of broken .ok)" = "false" ] && ok "git status failure reports ok:false" \
+  || bad "git status failure ok" "$(repo_of broken .)"
+[ "$(repo_of broken .error)" = "git status failed" ] && ok "polling failure carries a visible error" \
+  || bad "git status failure error" "$(repo_of broken .error)"
+[ "$(repo_of clean .ok)" = "true" ] && ok "a failed repo does not discard valid repo entries" \
+  || bad "valid repo after failure" "$(repo_of clean .)"
+
+# ── malformed config entries stay visible without dropping valid paths ─────
+jq -n --arg p "$WORK/clean" '{repos: [$p, 42]}' > "$OMARCHY_STATE_DIR/reposwatch-config.json"
+"$CLI" scan >/dev/null
+[ "$(repo_of clean .ok)" = "true" ] && ok "valid config entry survives malformed sibling" \
+  || bad "valid entry after malformed config" "$(repo_of clean .)"
+[ "$(state '.totals.errorRepos')" = "1" ] && ok "malformed config entry is a visible error" \
+  || bad "malformed config error count" "$(state '.totals.errorRepos')"
+
+printf '{broken\n' > "$OMARCHY_STATE_DIR/reposwatch-config.json"
+"$CLI" scan >/dev/null
+[ "$(repo_of clean .ok)" = "true" ] && ok "valid state entry survives invalid config" \
+  || bad "valid entry after invalid config" "$(repo_of clean .)"
+[ "$(state '.totals.errorRepos')" = "1" ] && ok "invalid config is a visible error" \
+  || bad "invalid config error count" "$(state '.totals.errorRepos')"
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

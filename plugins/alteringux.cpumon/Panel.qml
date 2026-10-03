@@ -23,9 +23,34 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property var stat: (hostWidget && hostWidget.stat) ? hostWidget.stat : Model.defaultState()
-  readonly property var history: stat.history || []
-  readonly property var spark: Model.sparkline(root.history, "cpu", 120, 100)
-  readonly property var stats: Model.historyStats(root.history, "cpu")
+  readonly property var history: stat && Array.isArray(stat.history) ? stat.history : []
+  readonly property int trendWindowMs: 10 * 60 * 1000
+  // Keep the chart and summary statistics on the same timestamp-bounded
+  // samples. A count-based slice (120 points) stops meaning "10 MIN" when
+  // the sampler cadence changes, and malformed entries must not become zeros.
+  readonly property var trendHistory: {
+    var input = root.history
+    var latest = 0
+    for (var i = 0; i < input.length; i++) {
+      var candidate = input[i]
+      var ts = candidate && typeof candidate === "object" ? Number(candidate.ts) : NaN
+      if (isFinite(ts) && ts > latest) latest = ts
+    }
+    if (latest <= 0) return []
+    var cutoff = latest - root.trendWindowMs
+    var out = []
+    for (var j = 0; j < input.length; j++) {
+      var entry = input[j]
+      if (!entry || typeof entry !== "object") continue
+      var entryTs = Number(entry.ts)
+      var cpu = Number(entry.cpu)
+      if (!isFinite(entryTs) || entryTs < cutoff || !isFinite(cpu)) continue
+      out.push(entry)
+    }
+    return out
+  }
+  readonly property var spark: Model.sparkline(root.trendHistory, "cpu", 0, 100)
+  readonly property var stats: Model.historyStats(root.trendHistory, "cpu")
 
   property var topRows: []
 
@@ -262,7 +287,7 @@ Panel {
                 Item { width: parent.width - x - cpuv.width; height: 1 }
                 Text {
                   id: cpuv
-                  text: (modelData.cpu !== undefined ? modelData.cpu.toFixed(1) : "0.0") + "%"
+                  text: (modelData.cpu != null ? modelData.cpu.toFixed(1) : "0.0") + "%"
                   color: Qt.darker(root.barForeground, 1.3)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall

@@ -44,7 +44,6 @@ function parseMonthJson(raw) {
   return { month: String(obj.month || ""), days: obj.days }
 }
 
-// `omarchy-calendar day <d> --json` -> { date, events, birthdays, holidays }
 function parseDayJson(raw) {
   var obj = null
   try { obj = raw ? JSON.parse(raw) : null } catch (e) { obj = null }
@@ -55,6 +54,12 @@ function parseDayJson(raw) {
     birthdays: Array.isArray(obj.birthdays) ? obj.birthdays : [],
     holidays: Array.isArray(obj.holidays) ? obj.holidays : []
   }
+}
+
+// Only the latest matching day request may replace the detail currently shown.
+function shouldApplyDayResult(requestId, latestRequestId, resultDate, requestedDate) {
+  return requestId === latestRequestId
+    && String(resultDate || "") === String(requestedDate || "")
 }
 
 // Build a fixed 6x7 (42-cell) grid for a month, Sunday-first, with leading/
@@ -104,6 +109,36 @@ function monthTitle(ym) {
   return names[+m[2] - 1] + " " + m[1]
 }
 
+function formatDateTitle(ymd) {
+  var m = String(ymd || "").match(/^(\d{4})-(\d{2})-(\d{2})$/)
+  if (!m) return ""
+  var d = new Date(+m[1], +m[2] - 1, +m[3])
+  var weekdays = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+  var months = ["January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"]
+  return weekdays[d.getDay()] + ", " + months[d.getMonth()] + " " + d.getDate() + ", " + d.getFullYear()
+}
+
+// Accepts 24-hour input plus common 12-hour forms such as "9 AM", "9:30 PM",
+// and "09:00PM", returning the canonical HH:MM form used by the CLI.
+function normalizeTime(value) {
+  var raw = String(value || "").trim().toUpperCase().replace(/\s+/g, " ")
+  var m = raw.match(/^(\d{1,2})(?::([0-5]\d))?\s*(AM|PM)?$/)
+  if (!m) return ""
+  var hour = +m[1]
+  var minute = m[2] === undefined ? 0 : +m[2]
+  var meridiem = m[3] || ""
+  if (meridiem) {
+    if (hour < 1 || hour > 12) return ""
+    if (meridiem === "AM" && hour === 12) hour = 0
+    if (meridiem === "PM" && hour !== 12) hour += 12
+  } else if (hour > 23) {
+    return ""
+  }
+  return pad2(hour) + ":" + pad2(minute)
+}
+
+
 function shiftMonth(ym, delta) {
   var m = String(ym || "").match(/^(\d{4})-(\d{2})$/)
   if (!m) return ym
@@ -148,9 +183,12 @@ if (typeof module !== "undefined" && module.exports) {
     parseMonthJson: parseMonthJson,
     parseDayJson: parseDayJson,
     monthGridCells: monthGridCells,
+    shouldApplyDayResult: shouldApplyDayResult,
     blankCell: blankCell,
     dayOfWeek: dayOfWeek,
     monthTitle: monthTitle,
+    formatDateTitle: formatDateTitle,
+    normalizeTime: normalizeTime,
     shiftMonth: shiftMonth,
     widgetLabel: widgetLabel,
     todayBadgeCount: todayBadgeCount,

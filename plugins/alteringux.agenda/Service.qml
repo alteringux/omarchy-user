@@ -149,7 +149,7 @@ Item {
   }
 
   Timer {
-    interval: Math.max(15, root.pollSeconds) * 1000
+    interval: Math.max(60, root.pollSeconds) * 1000
     running: true
     repeat: true
     triggeredOnStart: true

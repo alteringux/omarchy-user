@@ -111,6 +111,23 @@ test("parseState falls back to an empty gainers list when that field is malforme
   assert.deepStrictEqual(s.gainers, [])
 })
 
+test("parseState preserves cached quotes while exposing provider failure metadata", () => {
+  const s = Model.parseState(JSON.stringify({
+    updatedAt: "2026-01-01T00:00:00Z",
+    gainers: [RAW_SCREENER_ROW],
+    losers: [],
+    stale: true,
+    providerStatus: "error",
+    providerError: "Yahoo Finance movers unavailable",
+    checkedAt: "2026-01-01T00:05:00Z"
+  }))
+  assert.deepStrictEqual(s.gainers, [RAW_SCREENER_ROW])
+  assert.strictEqual(s.updatedAt, "2026-01-01T00:00:00Z")
+  assert.strictEqual(s.stale, true)
+  assert.strictEqual(s.providerStatus, "error")
+  assert.strictEqual(s.providerError, "Yahoo Finance movers unavailable")
+})
+
 // ------------------------------------------------------------- formatting
 test("formatChangePct signs positive values and keeps two decimals", () => {
   assert.strictEqual(Model.formatChangePct(1.8), "+1.80%")

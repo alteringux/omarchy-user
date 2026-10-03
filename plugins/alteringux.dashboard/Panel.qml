@@ -93,7 +93,7 @@ Panel {
         }
 
         // ---- Digest: a periodic one-line AI summary of the dashboard,
-        // generated locally via the `claude` CLI (see bin/omarchy-dashboard-refresh).
+        // generated via llm-blurb (hermes -> NanoGPT, see bin/omarchy-dashboard-refresh).
         Text {
           visible: !!root.state.digest.text
           width: parent.width

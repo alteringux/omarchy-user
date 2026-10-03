@@ -4,7 +4,7 @@
   "name": "Pomodoro",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "Pomodoro focus timer with phase tracking, stats, and configurable sounds",
+  "description": "Pomodoro focus timer with a configurable daily focus goal, phase tracking, stats, and configurable sounds",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Pomodoro",
-    "description": "Work/break timer with a stats + settings popup",
+    "description": "Work/break timer with daily focus progress, stats, and settings",
     "category": "Productivity",
     "allowMultiple": false
   }

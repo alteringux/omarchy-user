@@ -29,12 +29,11 @@ BarWidget {
   readonly property string level: Model.tempLevel(stat.temp)
   readonly property bool warn: level === "warning"
   readonly property bool crit: level === "critical"
-
-  // Model.isStale is tested (test/model.test.js) but was never wired into any
-  // of the three sysmon-family widgets. A hung sampler left the bar showing a
-  // confident, silently ageing number. 3 missed ticks is the same "gone
-  // quiet" threshold netwatch already uses for its own staleness label.
-  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+  // Keep age-dependent bindings live even when the sampler has stopped
+  // producing state-file updates. Without this clock, a value could remain
+  // visually fresh forever until another write happened to re-evaluate it.
+  property double nowMs: Date.now()
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, root.nowMs, root.sampleIntervalMs * 3)
 
   readonly property string tooltipText: stateLoaded
     ? (root.hasTemp ? "TEMP " + Model.formatTemp(root.stat.temp) : "No sensor detected")
@@ -44,20 +43,31 @@ BarWidget {
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon"
   readonly property int sampleIntervalMs: 4000
 
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.nowMs = Date.now()
+  }
+
   Kit.Store {
     id: stateStore
     fileName: "sysmon-state.json"
     watch: true
     pollMs: 4000
     parse: function (raw) { return Model.parseState(raw) }
+    onLoadedChanged: if (loaded) root.nowMs = Date.now()
+    onExternallyChanged: root.nowMs = Date.now()
   }
+
 
   Process { id: sampleProc; running: false; onExited: stateStore.reload() }
 
   function sampleNow() {
     guard.run("sampleNow", function () {
       // A busy sampleProc used to make this a silent no-op. If the CLI ever
-      // hung, or just overran one 2s tick, every future tick and every
+      // hung, or just overran one sampling tick, every future tick and every
       // middle-click sample request dropped forever, with the bar frozen on
       // whatever it last read. netwatch already fires a detached one-off in
       // that case, since the write to sysmon-state.json is the point, not

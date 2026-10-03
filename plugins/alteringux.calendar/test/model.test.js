@@ -91,9 +91,29 @@ test("monthGridCells returns [] for an empty month", () => {
   assert.deepEqual(Model.monthGridCells({ month: "2026-09", days: [] }, "2026-09-10"), [])
 })
 
+test("day results only apply for the latest matching selection", () => {
+  assert.equal(Model.shouldApplyDayResult(1, 2, "2026-09-10", "2026-09-10"), false)
+  assert.equal(Model.shouldApplyDayResult(2, 2, "2026-09-10", "2026-09-10"), true)
+  assert.equal(Model.shouldApplyDayResult(2, 2, "2026-09-09", "2026-09-10"), false)
+})
+
 test("monthTitle formats YYYY-MM", () => {
   assert.equal(Model.monthTitle("2026-09"), "September 2026")
   assert.equal(Model.monthTitle("bogus"), "")
+})
+
+test("formatDateTitle renders a readable weekday date", () => {
+  assert.equal(Model.formatDateTitle("2026-09-13"), "Sunday, September 13, 2026")
+  assert.equal(Model.formatDateTitle("bogus"), "")
+})
+
+test("normalizeTime accepts AM/PM and canonicalizes to 24-hour time", () => {
+  assert.equal(Model.normalizeTime("9 AM"), "09:00")
+  assert.equal(Model.normalizeTime("9:30 PM"), "21:30")
+  assert.equal(Model.normalizeTime("12:05 AM"), "00:05")
+  assert.equal(Model.normalizeTime("12 PM"), "12:00")
+  assert.equal(Model.normalizeTime("23:15"), "23:15")
+  assert.equal(Model.normalizeTime("13 PM"), "")
 })
 
 test("shiftMonth moves forward and backward across year boundaries", () => {

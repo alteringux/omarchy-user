@@ -27,6 +27,7 @@ export XDG_STATE_HOME="$WORK/state"
 
 # shellcheck disable=SC1090
 source "$SCRIPT"   # dispatch is guarded — this only pulls in the functions
+cli_signed_in() { return 0; }  # auth gate is covered in auth.test.sh
 mkdir -p "$STATE_DIR"
 
 CALLS_F="$WORK/calls"; KS_F="$WORK/ks"; CONN_F="$WORK/conn"; FAILS_F="$WORK/fails"
@@ -54,6 +55,7 @@ cli_connect_random() {
 current_server() { echo "JP-FREE#1"; }
 probe_ip()       { printf '203.0.113.7\tJP\tTokyo\tProbe Org\n'; }
 sleep()          { :; }
+wifi_state_str() { echo connected; }   # these tests exercise the kill-switch path, not the wifi gate
 
 scenario() {  # ks_state connected fails killSwitchCfg
   : >"$CALLS_F"; echo "$1" >"$KS_F"; echo "$2" >"$CONN_F"; echo "$3" >"$FAILS_F"

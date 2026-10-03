@@ -219,6 +219,35 @@ EOF
   check "a slow prior cue is cut off, not stacked"   "$([ "${ends:-0}" -lt "${blips:-0}" ] && echo yes)" yes
 }
 
+t_duplicate_daemons_share_one_voice_owner() {
+  fresh
+  local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/plays.log" fh="$OMARCHY_STATE_DIR/home"
+  mkdir -p "$shim"
+  printf '#!/usr/bin/env bash\necho "$1" >> "%s"\nsleep 0.2\n' "$log" > "$shim/pw-play"
+  chmod +x "$shim/pw-play"
+  : > "$log"
+  _voice_home "$fh" with-piper
+  b get >/dev/null
+  jq '.customTechniques=[{id:"cue-dupe",name:"CueDupe",family:"custom",tone:"info",defaultCycles:1,
+      phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}] | .cueVoice=true' \
+    "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+    && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
+  b start cue-dupe --cycles 1 >/dev/null
+
+  PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
+    timeout 4 "$CLI" __run >/dev/null 2>&1 &
+  local first=$!
+  PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
+    timeout 4 "$CLI" __run >/dev/null 2>&1 &
+  local second=$!
+  wait "$first" || true
+  wait "$second" || true
+
+  local opening
+  opening=$(grep -c '/breathe-voice/In.wav' "$log" 2>/dev/null || true)
+  check "parallel daemons emit one opening cue" "$([ "${opening:-0}" = 1 ] && echo yes)" yes
+}
+
 # A fake HOME carrying a stub piper + voice model, so the voice path is exercised
 # without the real Piper install. VOICE_MODEL / PIPER_BIN are $HOME-relative.
 _voice_home() {   # $1 = dir, $2 = "with-piper" | "no-piper"
@@ -252,9 +281,12 @@ t_spoken_cues_play_words_not_the_chime() {
   PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
     timeout 12 "$CLI" __run >/dev/null 2>&1
 
-  local voiced chimed
+  local first voiced chimed
+  first=$(sed -n '1p' "$log" 2>/dev/null || true)
   voiced=$(grep -c 'breathe-voice' "$log" 2>/dev/null || true)
   chimed=$(grep -c '\.oga' "$log" 2>/dev/null || true)
+  check "the first spoken cue is the opening phase" \
+    "$([[ "$first" == */breathe-voice/In.wav ]] && echo yes)" yes
   check "spoken cues play the rendered words" "$([ "${voiced:-0}" -ge 2 ] && echo yes)" yes
   check "and never the chime"                 "${chimed:-0}" 0
   check "the words were rendered to the cache" \
@@ -534,6 +566,20 @@ t_loop_verb_is_a_noop_when_idle() {
   check "and sets no stray flag"                     "$(sfield '.loop')" false
 }
 
+t_concurrent_state_writes_keep_fields() {
+  fresh
+  b start box --cycles 2 >/dev/null
+  (b pause >/dev/null; : > "$OMARCHY_STATE_DIR/.pause-done") &
+  (b loop >/dev/null; : > "$OMARCHY_STATE_DIR/.loop-done") &
+  for _ in $(seq 1 100); do
+    [ -f "$OMARCHY_STATE_DIR/.pause-done" ] && [ -f "$OMARCHY_STATE_DIR/.loop-done" ] && break
+    sleep 0.01
+  done
+  check "concurrent state writes preserve the pause transition" "$(sfield '.state')" PAUSED
+  check "concurrent state writes preserve the loop flag" "$(sfield '.loop')" true
+  check "concurrent state writes preserve session identity" "$(sfield '.techniqueId')" box
+}
+
 # The daemon's own roll path: a loop session that reaches its planned length
 # while the daemon is live is credited and kept RUNNING, not parked in DONE.
 # Start the clock just short of one pass with a fresh heartbeat (so `restore`
@@ -600,7 +646,7 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_pause_freezes t_toggle_cycles_states t_pause_resume_are_idempotent \
          t_stop_before_a_cycle_credits_nothing t_stop_after_a_cycle_credits \
          t_full_run_completes t_overrun_is_clamped t_daemon_completes_and_clamps \
-         t_phase_cues_fire_once_and_do_not_stack \
+         t_phase_cues_fire_once_and_do_not_stack t_duplicate_daemons_share_one_voice_owner \
          t_spoken_cues_play_words_not_the_chime t_spoken_cues_fall_back_to_chime_without_tts \
          t_never_credits_more_than_planned t_reset_credits_nothing \
          t_streak_starts_at_one t_streak_same_day_idempotent t_streak_consecutive_day \
@@ -611,7 +657,8 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_garbage_state_files t_garbage_config t_status_shape t_silent_flag \
          t_loop_flag t_loop_defaults_from_config t_stop_ends_a_looping_session \
          t_loop_verb_toggles_the_running_session t_loop_verb_is_a_noop_when_idle \
-         t_daemon_rolls_a_loop t_skip_advances_a_hold t_skip_is_a_noop_outside_a_hold \
+         t_concurrent_state_writes_keep_fields t_daemon_rolls_a_loop \
+         t_skip_advances_a_hold t_skip_is_a_noop_outside_a_hold \
          t_skip_refused_when_idle t_skipped_hold_time_is_not_credited_as_seconds; do
   printf '\n\033[1m%s\033[0m\n' "${t#t_}"
   "$t"

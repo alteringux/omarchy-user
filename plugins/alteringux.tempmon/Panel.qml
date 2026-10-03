@@ -25,9 +25,29 @@ Panel {
 
   readonly property var stat: (hostWidget && hostWidget.stat) ? hostWidget.stat : Model.defaultState()
   readonly property bool hasTemp: root.stat.temp !== null && root.stat.temp !== undefined
-  readonly property var history: stat.history || []
-  readonly property var spark: Model.sparkline(root.history, "temp", 120, 100)
-  readonly property var stats: Model.historyStats(root.history, "temp")
+  // Treat the history as untrusted input at the panel boundary. A malformed
+  // state file must not make a trend delegate throw or hide the current readout.
+  readonly property var history: root.stat && Array.isArray(root.stat.history) ? root.stat.history : []
+  readonly property int trendWindowMs: 10 * 60 * 1000
+  readonly property var spark: Model.sparkline(
+    root.history, "temp", 120, 100, root.nowMs, root.trendWindowMs
+  )
+  readonly property var stats: Model.historyStats(
+    root.history, "temp", root.nowMs, root.trendWindowMs
+  )
+  readonly property double nowMs: hostWidget && hostWidget.nowMs !== undefined
+    ? hostWidget.nowMs
+    : root.panelNowMs
+
+  property double panelNowMs: Date.now()
+  Timer {
+    interval: 1000
+    running: root.hostWidget === null
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.panelNowMs = Date.now()
+  }
+
 
   property var sensorRows: []
 
@@ -105,7 +125,7 @@ Panel {
             glyph: "󰔏"
             title: "Temperature"
             meta: root.stat.updatedAt > 0
-              ? "UPDATED " + Math.max(0, Math.round((Date.now() - root.stat.updatedAt) / 1000)) + "S AGO"
+              ? "UPDATED " + Math.max(0, Math.round((root.nowMs - root.stat.updatedAt) / 1000)) + "S AGO"
               : "NO DATA YET"
             foreground: root.barForeground
           }

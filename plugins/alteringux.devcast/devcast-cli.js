@@ -348,8 +348,11 @@ if (op === "catalog") {
       for (const s of batch) {
         if (!s) continue
         const b = s.sessionId && builtBySession[s.sessionId]
-        s.built = b ? b.dir : null
-        s.stale = b ? s.sourceMtimeMs > b.mt : false
+        const stale = !!(b && s.sourceMtimeMs > b.mt)
+        // `built` is the path the UI may open. A stale path is still kept on
+        // disk for replacement, but must not be presented as current.
+        s.built = b && !stale ? b.dir : null
+        s.stale = stale
         sessions.push(s)
       }
     }

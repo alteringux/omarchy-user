@@ -110,7 +110,35 @@ now_epoch() { date +%s; }
 # ---------------------------------------------------------------------------
 
 valid_date() { date -d "$1" +%F >/dev/null 2>&1; }
-valid_time() { [[ $1 =~ ^([01][0-9]|2[0-3]):[0-5][0-9]$ ]]; }
+valid_time() { normalize_time "$1" >/dev/null; }
+
+normalize_time() {
+  local raw="${1^^}" hour minute meridiem
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [[ "$raw" =~ ^([0-9]{1,2})(:([0-9]{2}))?[[:space:]]*(AM|PM)?$ ]]; then
+    hour="${BASH_REMATCH[1]}"
+    hour=$((10#$hour))
+    minute="${BASH_REMATCH[3]:-00}"
+    meridiem="${BASH_REMATCH[4]:-}"
+  else
+    return 1
+  fi
+  if [[ -n "$meridiem" ]]; then
+    ((hour >= 1 && hour <= 12)) || return 1
+    if [[ "$meridiem" == AM && "$hour" -eq 12 ]]; then hour=0
+    elif [[ "$meridiem" == PM && "$hour" -ne 12 ]]; then ((hour += 12)); fi
+  else
+    ((hour <= 23)) || return 1
+  fi
+  printf '%02d:%02d\n' "$hour" "$minute"
+}
+
+time_minutes() {
+  local value
+  value="$(normalize_time "$1")" || return 1
+  printf '%d\n' "$((10#${value:0:2} * 60 + 10#${value:3:2}))"
+}
 
 norm_date() { date -d "$1" +%F 2>/dev/null; }
 
@@ -125,11 +153,10 @@ require_date() {   # $1 = value, $2 = label -> prints normalized date or exits 1
 require_time_opt() {   # $1 = value (may be empty) -> prints it, or exits 1 if malformed
   local v="$1"
   [ -z "$v" ] && return 0
-  if ! valid_time "$v"; then
-    echo "omarchy-calendar: invalid time: $v (want HH:MM, 24h)" >&2
+  normalize_time "$v" || {
+    echo "omarchy-calendar: invalid time: $v (want HH:MM or h:MM AM/PM)" >&2
     exit 1
-  fi
-  printf '%s' "$v"
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -272,8 +299,15 @@ cmd_block() {
       local date="${1:-}" start="${2:-}" end="${3:-}" title="${4:-}"
       [ -z "$title" ] && { echo "usage: omarchy-calendar block add <YYYY-MM-DD> <HH:MM> <HH:MM> \"<activity>\"" >&2; exit 1; }
       date="$(require_date "$date" block)" || exit 1
-      valid_time "$start" || { echo "omarchy-calendar: invalid start time: $start" >&2; exit 1; }
-      valid_time "$end" || { echo "omarchy-calendar: invalid end time: $end" >&2; exit 1; }
+      start="$(normalize_time "$start")" || { echo "omarchy-calendar: invalid start time: $start (want HH:MM or h:MM AM/PM)" >&2; exit 1; }
+      end="$(normalize_time "$end")" || { echo "omarchy-calendar: invalid end time: $end (want HH:MM or h:MM AM/PM)" >&2; exit 1; }
+      local start_minutes end_minutes
+      start_minutes="$(time_minutes "$start")"
+      end_minutes="$(time_minutes "$end")"
+      if (( end_minutes <= start_minutes )); then
+        echo "omarchy-calendar: block end must be after start: $start–$end" >&2
+        exit 1
+      fi
       local id; id="$(add_entry block "$title" "$date" "$start" "$end" "")"
       rebuild_all
       echo "Blocked #$id: $title on $date $start–$end"

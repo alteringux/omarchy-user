@@ -85,22 +85,24 @@ Panel {
           wrapMode: Text.WordWrap
         }
 
-        // Voice on/off for the running stopwatch. Flips the CLI's marker file
+        // Sound on/off for the running stopwatch. Flips the CLI's marker file
         // via hostWidget.toggleVoice(); speak() re-reads it each interval, so
         // the change applies on the next announcement with no unit restart.
-        // Hidden while the bell is on — the bell rings regardless of this, so
-        // showing a "Muted" switch there would just be a contradiction.
+        // Shown in bell mode too now — the mute marker silences the bell as
+        // well, for "show me the interval in the bar, don't ring it".
         // Mouse-only (activeFocusOnTab off) to stay out of the panel's
         // Enter=start / X=cancel / Esc=close keyboard model.
         Toggle {
           id: voiceToggle
-          visible: hostWidget && hostWidget.active && !hostWidget.chimeMode
+          visible: hostWidget && hostWidget.active
           width: content.width
           activeFocusOnTab: false
-          label: "Voice announcements"
+          label: (hostWidget && hostWidget.chimeMode) ? "Interval bell" : "Voice announcements"
           description: (hostWidget && hostWidget.voiceMuted)
-            ? "Muted — silent until you switch this back on"
-            : "Speaking the elapsed time every interval"
+            ? "Muted — the interval still ticks over in the bar, silently"
+            : ((hostWidget && hostWidget.chimeMode)
+               ? "Ringing a bell every interval"
+               : "Speaking the elapsed time every interval")
           checked: !(hostWidget && hostWidget.voiceMuted)
           foreground: root.barForeground
           onClicked: if (hostWidget) hostWidget.toggleVoice()
@@ -210,11 +212,15 @@ Panel {
             text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
             foreground: root.barForeground
             bordered: true
-            enabled: hostWidget && hostWidget.active
             onClicked: {
               if (!hostWidget) return
-              if (hostWidget.paused) hostWidget.resumeStopwatch()
-              else hostWidget.pauseStopwatch()
+              if (hostWidget.paused) {
+                hostWidget.resumeStopwatch()
+                hostWidget.pausedEpoch = 0
+              } else {
+                hostWidget.pauseStopwatch()
+                hostWidget.pausedEpoch = Math.floor(Date.now() / 1000)
+              }
             }
           }
           Button {

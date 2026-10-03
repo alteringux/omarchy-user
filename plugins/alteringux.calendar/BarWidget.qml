@@ -30,25 +30,48 @@ BarWidget {
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-calendar"
 
+  property string lastError: ""
+  property int dayRequestSerial: 0
+  property int dayProcessSerial: 0
+  property string dayProcessDate: ""
+  property string pendingDay: ""
+
+  function tail(text, fallback) {
+    var lines = String(text || "").split("\n").map(function (line) { return line.trim() }).filter(Boolean)
+    return lines.length > 0 ? lines[lines.length - 1] : fallback
+  }
+  property var pendingVerb: []
+
   Kit.Store {
     id: stateStore
     fileName: "calendar-state.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
-  // ---- verb runner: one serialising Process, execDetached fallback -------
+  // ---- verb runner: one serialising Process, with visible failures -------
   Process {
     id: actionProc
     running: false
-    onExited: stateStore.reload()
+    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    onExited: function (exitCode) {
+      root.lastError = exitCode === 0 ? "" : ("Calendar command failed: " + root.tail(actionErr.text, "exit " + exitCode))
+      stateStore.reload()
+      if (root.pendingVerb.length > 0) {
+        var queued = root.pendingVerb
+        actionProc.command = queued[0]
+        root.pendingVerb = queued.slice(1)
+        actionProc.running = true
+      }
+    }
   }
 
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
       var cmd = [root.scriptPath].concat(args)
-      if (actionProc.running) { Quickshell.execDetached(cmd); return }
+      if (actionProc.running) { root.pendingVerb = root.pendingVerb.concat([cmd]); return }
+      root.lastError = ""
       actionProc.command = cmd
       actionProc.running = true
     })
@@ -67,31 +90,47 @@ BarWidget {
   // ---- month + day data for the panel (pull, not watched) ---------------
   property string currentMonth: ""
   property var monthCells: []
+
+  property string pendingMonth: ""
+  property string monthProcessMonth: ""
   property var dayDetail: ({ date: "", events: [], birthdays: [], holidays: [] })
 
   Process {
     id: monthProc
     running: false
+    stderr: StdioCollector { id: monthErr; waitForEnd: true }
     stdout: StdioCollector {
       id: monthOut
       waitForEnd: true
       onStreamFinished: guard.run("monthProc.onStreamFinished", function () {
         var mj = Model.parseMonthJson(monthOut.text)
-        root.monthCells = Model.monthGridCells(mj, root.state.date || "")
-        // A nav click can land while this fetch is still in flight: loadMonth()
-        // below drops that click's fetch (monthProc.running was already true) but
-        // still moves currentMonth to it, so the title shows the new month while
-        // the grid we just applied is for the old one. Chase it now instead of
-        // leaving that mismatch on screen until another click happens to retry it.
-        if (root.currentMonth && root.currentMonth !== mj.month) root.loadMonth(root.currentMonth)
+        if (mj.month === root.monthProcessMonth && root.currentMonth === mj.month) {
+          root.monthCells = Model.monthGridCells(mj, root.state.date || "")
+        }
+        // Keep the title and grid paired after rapid navigation. Do not retry
+        // an empty response forever when the helper failed.
+        if (root.currentMonth && mj.month && root.currentMonth !== mj.month) root.loadMonth(root.currentMonth)
       })
+    }
+    onExited: function (exitCode) {
+      root.lastError = exitCode === 0 ? "" : ("Calendar month failed: " + root.tail(monthErr.text, "exit " + exitCode))
+      if (root.pendingMonth) {
+        var nextMonth = root.pendingMonth
+        root.pendingMonth = ""
+        root.loadMonth(nextMonth)
+      }
     }
   }
 
   function loadMonth(ym) {
     guard.run("loadMonth", function () {
       root.currentMonth = ym
-      if (monthProc.running) return
+      if (monthProc.running) {
+        root.pendingMonth = ym
+        return
+      }
+      root.lastError = ""
+      root.monthProcessMonth = ym
       monthProc.command = [root.scriptPath, "month", ym, "--json"]
       monthProc.running = true
     })
@@ -100,26 +139,46 @@ BarWidget {
   Process {
     id: dayProc
     running: false
+    stderr: StdioCollector { id: dayErr; waitForEnd: true }
     stdout: StdioCollector {
       id: dayOut
       waitForEnd: true
       onStreamFinished: guard.run("dayProc.onStreamFinished", function () {
-        root.dayDetail = Model.parseDayJson(dayOut.text)
+        var detail = Model.parseDayJson(dayOut.text)
+        if (Model.shouldApplyDayResult(root.dayProcessSerial, root.dayRequestSerial, detail.date, root.dayProcessDate)) {
+          root.dayDetail = detail
+        }
       })
     }
+    onExited: function (exitCode) {
+      if (exitCode !== 0) root.lastError = "Calendar day failed: " + root.tail(dayErr.text, "exit " + exitCode)
+      if (root.pendingDay) root.startDayRequest()
+    }
+  }
+
+  function startDayRequest() {
+    if (!root.pendingDay || dayProc.running) return
+    var ymd = root.pendingDay
+    root.pendingDay = ""
+    root.dayProcessDate = ymd
+    root.dayProcessSerial = root.dayRequestSerial
+    root.lastError = ""
+    dayProc.command = [root.scriptPath, "day", ymd, "--json"]
+    dayProc.running = true
   }
 
   function loadDay(ymd) {
     guard.run("loadDay", function () {
-      if (dayProc.running) { Quickshell.execDetached([root.scriptPath, "day", ymd, "--json"]); return }
-      dayProc.command = [root.scriptPath, "day", ymd, "--json"]
-      dayProc.running = true
+      if (!ymd) return
+      root.dayRequestSerial += 1
+      root.pendingDay = ymd
+      root.startDayRequest()
     })
   }
 
   function addBlock(ymd, start, end, activity) {
     guard.run("addBlock", function () {
-      Quickshell.execDetached([root.scriptPath, "block", "add", ymd, start, end, activity])
+      root.runVerb(["block", "add", ymd, start, end, activity])
       usage.record("block.add")
       refreshTimer.restart()
     })
@@ -127,7 +186,7 @@ BarWidget {
 
   function removeEntry(id) {
     guard.run("removeEntry", function () {
-      Quickshell.execDetached([root.scriptPath, "event", "rm", String(id)])
+      root.runVerb(["event", "rm", String(id)])
       usage.record("event.rm")
       refreshTimer.restart()
     })
@@ -153,6 +212,7 @@ BarWidget {
   Process {
     id: aiProc
     running: false
+    stderr: StdioCollector { id: aiErr; waitForEnd: true }
     stdout: StdioCollector {
       id: aiOut
       waitForEnd: true
@@ -162,11 +222,18 @@ BarWidget {
         refreshTimer.restart()
       })
     }
+    onExited: function (exitCode) {
+      if (exitCode === 0) return
+      root.aiBusy = false
+      root.aiAnswer = "Ask AI failed: " + root.tail(aiErr.text, "exit " + exitCode)
+      root.lastError = root.aiAnswer
+    }
   }
 
   function askAi(prompt) {
     guard.run("askAi", function () {
       if (!prompt || prompt.trim().length === 0 || aiProc.running) return
+      root.lastError = ""
       root.aiBusy = true
       root.aiAnswer = ""
       aiProc.command = [root.aiScriptPath, prompt]

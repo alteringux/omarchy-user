@@ -1,137 +1,50 @@
-#!/usr/bin/env python3
-"""omarchy-calendar-ai -- a scheduling assistant over omarchy-calendar via `claude -p`.
+#!/usr/bin/env bash
+# omarchy-calendar-ai — one-shot scheduling assistant.
+#
+# Hermes is the supported headless agent on this workstation. It can inspect
+# calendar state and use ~/.local/bin/omarchy-calendar for requested changes;
+# the final response is printed for the panel. Failures stay on stderr and use
+# a non-zero status so the QML caller can show them instead of "no answer".
+set -uo pipefail
 
-This used to run a client-side tool-calling loop against a hosted model. It now
-hands the request to `claude -p` with the `omarchy-calendar` CLI whitelisted as
-its only shell tool, so the CLI
-stays the single writer of calendar state (docs/adr/0006-cli-first-plugins.md)
-and "help me reschedule my week" and hand-typed `omarchy-calendar event move ...`
-stay interchangeable.
+prompt="${*:-}"
+if [[ -z "${prompt// }" ]]; then
+  echo "omarchy-calendar-ai: prompt is required" >&2
+  exit 2
+fi
 
-Usage:
-    omarchy-calendar-ai "PROMPT"
-    echo "PROMPT" | omarchy-calendar-ai
+command -v hermes >/dev/null 2>&1 || {
+  echo "omarchy-calendar-ai: hermes not on PATH" >&2
+  exit 3
+}
 
-Options:
-    --json-full     print {text, steps[], iters, model} instead of prose
-    --model NAME    sonnet | haiku | opus, or a legacy id (mapped by family)
-    --max-iters N   max model<->tool round trips (default 8)
-    --max-tokens N  accepted and ignored
-    --verbose       log to stderr
+system='You are the Omarchy calendar assistant. Use the calendar CLI at ~/.local/bin/omarchy-calendar for calendar reads and mutations; never edit calendar JSON or ICS files directly. When the user asks to add, move, or remove something, perform the requested operation with the CLI, validate the result, and then give a concise plain-text summary. For planning questions, inspect the relevant day or free slots first. Do not claim an operation succeeded unless the CLI succeeded.'
+timeout_s="${OMARCHY_CALENDAR_AI_TIMEOUT:-120}"
 
-Exit codes: 0 ok | 2 bad args | 3 claude not found | 4 claude failed | 5 empty answer
-"""
-from __future__ import annotations
+if ! [[ "$timeout_s" =~ ^[0-9]+$ ]] || (( timeout_s < 1 )); then
+  echo "omarchy-calendar-ai: invalid timeout: $timeout_s" >&2
+  exit 2
+fi
 
-import argparse
-import json
-import os
-import re
-import shutil
-import subprocess
-import sys
-import time
+err_file="$(mktemp "${TMPDIR:-/tmp}/omarchy-calendar-ai.XXXXXX")"
+trap 'rm -f "$err_file"' EXIT
+out="$(timeout -k 5 "$timeout_s" hermes -z "$system
 
-CALENDAR_CLI = os.environ.get("OMARCHY_CALENDAR_CLI", os.path.expanduser("~/.local/bin/omarchy-calendar"))
+$prompt" --in "$HOME/.config/omarchy" --ignore-rules 2>"$err_file")"
+rc=$?
+if (( rc == 124 )); then
+  echo "omarchy-calendar-ai: timed out after ${timeout_s}s" >&2
+  exit 4
+fi
+if (( rc != 0 )); then
+  detail="$(sed -n '1p' "$err_file" 2>/dev/null || true)"
+  echo "omarchy-calendar-ai: hermes exited $rc${detail:+: $detail}" >&2
+  exit 4
+fi
 
-
-def eprint(*a):
-    print(*a, file=sys.stderr, flush=True)
-
-
-def map_model(name: str):
-    n = (name or "").lower()
-    for fam in ("haiku", "opus", "sonnet"):
-        if fam in n:
-            return ["--model", fam]
-    return []
-
-
-def system_prompt() -> str:
-    now = time.localtime()
-    today = time.strftime("%Y-%m-%d", now)
-    weekday = time.strftime("%A", now)
-    return (
-        f"You are a terse, practical scheduling assistant for the user's personal calendar. "
-        f"Today is {weekday}, {today}. Resolve relative dates against that. "
-        f"Your only tool is the `omarchy-calendar` CLI, run via Bash. Useful verbs: "
-        f"`omarchy-calendar event list --json [--upcoming] [--month YYYY-MM]`, "
-        f"`omarchy-calendar day YYYY-MM-DD --json`, `omarchy-calendar free YYYY-MM-DD --json [--duration MIN]`, "
-        f"`omarchy-calendar holiday list --json`, `omarchy-calendar birthday list --json`, "
-        f"`omarchy-calendar event add \"TITLE\" YYYY-MM-DD [HH:MM HH:MM] [--location X]`, "
-        f"`omarchy-calendar event move ID YYYY-MM-DD [HH:MM HH:MM]`, `omarchy-calendar event rm ID`, "
-        f"`omarchy-calendar block add YYYY-MM-DD HH:MM HH:MM \"ACTIVITY\"`. "
-        f"Always inspect the day with list/day/free before adding or moving something; if the slot "
-        f"overlaps, say so and propose the nearest free alternative instead of double-booking. "
-        f"When done, state plainly what you changed (what/when), not which command you ran. "
-        f"Keep the final answer to a few sentences. No markdown, no follow-up suggestions."
-    )
-
-
-def main():
-    ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("prompt", nargs="*")
-    ap.add_argument("--json-full", action="store_true")
-    ap.add_argument("--model", default="")
-    ap.add_argument("--max-iters", type=int, default=8)
-    ap.add_argument("--max-tokens", type=int, default=None)
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
-
-    prompt = " ".join(args.prompt).strip()
-    if not prompt and not sys.stdin.isatty():
-        prompt = sys.stdin.read().strip()
-    if not prompt:
-        eprint('usage: omarchy-calendar-ai "PROMPT"')
-        sys.exit(2)
-
-    if not shutil.which("claude"):
-        eprint("omarchy-calendar-ai: claude CLI not on PATH")
-        sys.exit(3)
-
-    argv = [
-        "claude", "-p", prompt,
-        "--system-prompt", system_prompt(),
-        "--allowedTools", "Bash(omarchy-calendar:*)",
-        "--output-format", "json",
-        "--max-turns", str(max(1, args.max_iters)),
-    ] + map_model(args.model)
-
-    if args.verbose:
-        eprint(f"omarchy-calendar-ai: claude -p (max_turns={args.max_iters})")
-
-    try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=180,
-                              stdin=subprocess.DEVNULL)
-    except subprocess.TimeoutExpired:
-        eprint("omarchy-calendar-ai: claude timed out")
-        sys.exit(4)
-    if proc.returncode != 0:
-        eprint(f"omarchy-calendar-ai: claude exited {proc.returncode}: {proc.stderr.strip()[:300]}")
-        sys.exit(4)
-
-    try:
-        env = json.loads(proc.stdout.strip())
-    except ValueError:
-        eprint(f"omarchy-calendar-ai: claude did not return JSON: {proc.stdout[:200]}")
-        sys.exit(5)
-
-    text = re.sub(
-        r"\n+[*_#>\s]*(?:Next steps?|Follow-?ups?|Related|Sources?|Notes?)\b[^\n]*:?\s*\n.*\Z",
-        "", (env.get("result") or "").strip(), flags=re.S | re.I,
-    ).strip()
-    if not text:
-        eprint("omarchy-calendar-ai: empty answer from model")
-        sys.exit(5)
-
-    if args.json_full:
-        print(json.dumps({
-            "text": text, "steps": [], "iters": int(env.get("num_turns") or 1),
-            "model": env.get("model") or args.model or "claude",
-        }))
-    else:
-        print(text)
-
-
-if __name__ == "__main__":
-    main()
+out="$(printf '%s' "$out" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [[ -z "${out// }" ]]; then
+  echo "omarchy-calendar-ai: hermes returned an empty answer" >&2
+  exit 5
+fi
+printf '%s\n' "$out"

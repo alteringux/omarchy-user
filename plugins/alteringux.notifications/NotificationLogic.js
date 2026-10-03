@@ -5,13 +5,60 @@ function isChromiumDerived(app, appIcon) {
          source.indexOf("opera") >= 0
 }
 
+// StyledText understands a small HTML subset, including <img>. Notification
+// bodies are untrusted, so remove complete image elements and neutralize a
+// malformed opener instead of handing it to Qt's forgiving rich-text parser.
+// The latter may repair an unterminated tag and still fetch its src.
 function sanitizeBody(body, app, appIcon) {
-  var text = String(body || "").replace(/<img[^>]*>/gi, "")
+  var source = String(body || "")
+  var text = ""
+  var cursor = 0
+  var imageStart
+  var imagePattern = /<\s*img\b/gi
+
+  while ((imageStart = imagePattern.exec(source)) !== null) {
+    text += source.slice(cursor, imageStart.index)
+    var end = source.indexOf(">", imagePattern.lastIndex)
+    if (end < 0) {
+      // Keep the sender's malformed text visible, but make the tag opener
+      // plain text so StyledText cannot manufacture an image element.
+      text += "&lt;img"
+      cursor = imagePattern.lastIndex
+      break
+    }
+    cursor = end + 1
+    imagePattern.lastIndex = cursor
+  }
+  text += source.slice(cursor)
+
   if (!isChromiumDerived(app, appIcon)) return text
 
   return text
     .replace(/^\s*<a\b[^>]*>\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/[^<\s]*)?\s*<\/a>\s*/i, "")
     .replace(/^\s*(?:https?:\/\/|www\.)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?::\d+)?(?:\/\S*)?\s+/i, "")
+}
+
+function isHistoryPlaceholder(row) {
+  return !!row && Number(row.originalId) === -1 &&
+    String(row.app || "") === "omarchy-action" &&
+    String(row.summary || "") === "No recent notifications"
+}
+
+// A replay can be requested repeatedly while history is empty. Keep at most
+// one placeholder so each request remains idempotent.
+function dedupeHistoryPlaceholders(rows) {
+  var source = Array.isArray(rows) ? rows : []
+  var out = []
+  var seen = false
+  for (var i = 0; i < source.length; i++) {
+    var row = source[i]
+    if (isHistoryPlaceholder(row)) {
+      if (seen) continue
+      seen = true
+    }
+    out.push(row)
+  }
+  return out
 }
 
 function summaryStartsWithGlyph(summary) {
@@ -368,6 +415,8 @@ if (typeof module !== "undefined") {
     sanitizeBody: sanitizeBody,
     summaryStartsWithGlyph: summaryStartsWithGlyph,
     shouldBypassDnd: shouldBypassDnd,
+    isHistoryPlaceholder: isHistoryPlaceholder,
+    dedupeHistoryPlaceholders: dedupeHistoryPlaceholders,
     isEphemeralApp: isEphemeralApp,
     stringHint: stringHint,
     glyphFromHints: glyphFromHints,

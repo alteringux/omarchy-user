@@ -26,8 +26,13 @@ BarWidget {
   // widget on every write) and is rewritten by bin/omarchy-stocks-refresh.
   property alias state: stateStore.value
   property bool refreshing: false
+  // The refresh script keeps the last valid quotes on provider failure. Do
+  // not let that cache look like a current market snapshot.
+  readonly property bool providerStale: state && state.stale === true
+  readonly property string providerError: state && state.providerError ? String(state.providerError) : ""
 
   // ---- derived, read by Panel.qml -----------------------------------
+
   readonly property var gainers: (state.gainers || []).map(Model.parseScreenerQuote)
   readonly property var losers: (state.losers || []).map(Model.parseScreenerQuote)
   readonly property var trendingSymbols: Model.parseTrendingSymbols(state.trending, 12)
@@ -76,12 +81,19 @@ BarWidget {
     ? ("  " + currentQuote.symbol + " " + Model.formatChangePct(currentQuote.changePct))
     : "  Stocks"
 
-  readonly property string tickerTooltip: currentQuote && currentQuote.symbol
-    ? (currentQuote.symbol
-       + (currentQuote.price !== null && currentQuote.price !== undefined ? "  " + Model.formatPrice(currentQuote.price, currentQuote.currency) : "")
-       + "  " + Model.formatChangePct(currentQuote.changePct)
-       + (currentQuote.name ? "\n" + currentQuote.name : ""))
-    : "Stocks — no mover data yet"
+  readonly property string tickerTooltip: {
+    var text = currentQuote && currentQuote.symbol
+      ? (currentQuote.symbol
+         + (currentQuote.price !== null && currentQuote.price !== undefined ? "  " + Model.formatPrice(currentQuote.price, currentQuote.currency) : "")
+         + "  " + Model.formatChangePct(currentQuote.changePct)
+         + (currentQuote.name ? "\n" + currentQuote.name : ""))
+      : "Stocks — no mover data yet"
+    if (root.providerStale)
+      text += "\nProvider unavailable — showing stale data"
+    else if (root.providerError)
+      text += "\n" + root.providerError
+    return text
+  }
 
   Timer {
     id: cycleTimer
@@ -118,11 +130,21 @@ BarWidget {
     }
   }
 
+  // Wall-clock of the last fetch this instance started. Instance-local, so it
+  // breaks a single-widget refresh loop even when the shared file timestamp
+  // is unreadable.
+  property real lastRefreshAt: 0
   function runRefresh() {
-    if (refreshProc.running) {
-      root.refreshPending = true
-      return
-    }
+    if (refreshProc.running) { root.refreshPending = true; return }
+    // Circuit breakers for the multi-screen refresh storm (one bottom bar PER
+    // screen) and for any caller that over-triggers this:
+    //  1. this instance fetched very recently
+    //  2. another instance already refreshed the shared stocks.json
+    var since = Date.now() - root.lastRefreshAt
+    if (root.lastRefreshAt > 0 && since >= 0 && since < root.refreshIntervalMs * 0.75) { root.refreshPending = false; return }
+    var age = Date.now() - (Date.parse(String((root.state && root.state.updatedAt) || "")) || 0)
+    if (age >= 0 && age < root.refreshIntervalMs * 0.75) { root.refreshPending = false; return }
+    root.lastRefreshAt = Date.now()
     refreshProc.command = ["bash", root.refreshScript]
     refreshProc.running = true
   }
@@ -135,7 +157,7 @@ BarWidget {
   // 120s default; override per-widget with "refreshSeconds" in this widget's
   // shell.json layout entry (e.g. 60 for a lighter poll) if Yahoo's screener
   // starts rate-limiting at this cadence.
-  readonly property int refreshIntervalMs: Math.max(30, setting("refreshSeconds", 30)) * 1000
+  readonly property int refreshIntervalMs: Math.max(120, setting("refreshSeconds", 300)) * 1000
 
   Timer {
     id: refreshTimer
@@ -208,6 +230,8 @@ BarWidget {
         return JSON.stringify({
           updatedAt: root.state.updatedAt,
           refreshing: root.refreshing,
+          stale: root.providerStale,
+          providerError: root.providerError || null,
           gainers: root.gainers.length,
           losers: root.losers.length,
           showing: root.currentQuote && root.currentQuote.symbol ? root.currentQuote.symbol : null
@@ -228,6 +252,7 @@ BarWidget {
     horizontalMargin: 8.75
     verticalPadding: 8.75
     tooltipText: root.tickerTooltip
+    dimmed: root.providerStale
 
     onPressed: function(b) {
       root.togglePanel()

@@ -51,7 +51,7 @@ BarWidget {
     id: configStore
     fileName: "netwatch-config.json"
     watch: true
-    pollMs: 5000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
@@ -59,13 +59,13 @@ BarWidget {
     id: stateStore
     fileName: "netwatch-state.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
   // ---- the sampler. The shipped systemd timer keeps buckets accruing when the
   //      shell isn't running; this keeps the live rate fresh while it is.
-  readonly property int sampleIntervalMs: Math.max(5, (root.config && root.config.sampleIntervalSec) || 20) * 1000
+  readonly property int sampleIntervalMs: Model.sampleIntervalMs(root.config || {})
 
   Process { id: sampleProc; running: false; onExited: stateStore.reload() }
 

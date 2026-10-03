@@ -158,7 +158,7 @@ Panel {
               onClicked: if (hostWidget) hostWidget.pokePet()
             }
             Button {
-              text: root.st.manualSleep ? "Wake" : "Sleep"
+              text: root.st.asleep ? "Wake" : "Sleep"
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.toggleSleep()
@@ -314,7 +314,7 @@ Panel {
             activeFocusOnTab: false
             label: "Let it look at your screen"
             description: (hostWidget && hostWidget.state.screenWatchEnabled)
-              ? "Sends a screenshot to Featherless (external AI) every so often for a comment"
+              ? "Sends a screenshot to NanoGPT (external AI) every so often for a comment"
               : "Off — comments are canned lines only, nothing leaves this machine"
             checked: hostWidget && hostWidget.state.screenWatchEnabled
             foreground: root.barForeground

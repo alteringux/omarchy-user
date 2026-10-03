@@ -74,10 +74,66 @@ test("barLabel omits the temp segment when temp is null", () => {
   assert.deepEqual(Model.barLabel(withTemp), ["10%", "20%", "55°C"])
 })
 
-test("isStale compares against a threshold, defaulting no-data to stale", () => {
+test("isStale compares the real sample age and honors explicit thresholds", () => {
   assert.equal(Model.isStale(Model.defaultState(), 10000), true)
   assert.equal(Model.isStale({ updatedAt: 1000 }, 20000, 15000), true)
-  assert.equal(Model.isStale({ updatedAt: 1000 }, 5000, 15000), false)
+  assert.equal(Model.isStale({ updatedAt: 5000 }, 5000, 15000), false)
+  assert.equal(Model.isStale({ updatedAt: 20000 }, 5000, 0), false)
+  assert.equal(Model.isStale({ updatedAt: "bad" }, 5000), true)
+})
+
+test("parseState drops malformed history rows and preserves missing metric samples", () => {
+  const s = Model.parseState(JSON.stringify({
+    history: [
+      null,
+      "bad",
+      { ts: 3, cpu: "bad", mem: 40, temp: "bad" },
+      { ts: 4, cpu: 50, mem: 60, temp: null }
+    ]
+  }))
+  assert.deepEqual(s.history, [
+    { ts: 3, cpu: null, mem: 40, temp: null },
+    { ts: 4, cpu: 50, mem: 60, temp: null }
+  ])
+})
+
+test("history projections can select a real timestamp window", () => {
+  const now = 1_000_000
+  const h = [
+    { ts: now - 700_000, cpu: 10, mem: 0, temp: null },
+    { ts: now - 300_000, cpu: 30, mem: 0, temp: null },
+    { ts: now - 1_000, cpu: 50, mem: 0, temp: null },
+    { ts: now + 1_000, cpu: 90, mem: 0, temp: null }
+  ]
+  assert.deepEqual(Model.historySeries(h, "cpu", now, 600_000), [30, 50])
+  assert.deepEqual(Model.historyStats(h, "cpu", now, 600_000), {
+    min: 30, max: 50, avg: 40, cur: 50, n: 2
+  })
+  assert.deepEqual(Model.sparkline(h, "cpu", 10, 100, now, 600_000).values, [30, 50])
+})
+
+test("epoch histories default to the ten-minute trend window", () => {
+  const now = 2_000_000_000_000
+  const originalNow = Date.now
+  Date.now = () => now
+  try {
+    const h = [
+      { ts: now - Model.TREND_WINDOW_MS - 1, cpu: 10, mem: 0, temp: null },
+      { ts: now - Model.TREND_WINDOW_MS + 1, cpu: 30, mem: 0, temp: null }
+    ]
+    assert.deepEqual(Model.historySeries(h, "cpu"), [30])
+  } finally {
+    Date.now = originalNow
+  }
+})
+
+test("parseState caps hostile history length", () => {
+  const history = Array.from({ length: Model.HISTORY_CAP + 5 }, (_, i) => ({
+    ts: i + 1, cpu: i % 100, mem: 0, temp: null
+  }))
+  const s = Model.parseState(JSON.stringify({ history }))
+  assert.equal(s.history.length, Model.HISTORY_CAP)
+  assert.equal(s.history[0].ts, 6)
 })
 
 test("parseState carries a clamped history ring, empty when absent or malformed", () => {
@@ -91,8 +147,7 @@ test("parseState carries a clamped history ring, empty when absent or malformed"
   }))
   assert.deepEqual(s.history, [
     { ts: 1, cpu: 100, mem: 40, temp: 55 },
-    { ts: 2, cpu: 10, mem: 0, temp: null },
-    { ts: 0, cpu: 0, mem: 0, temp: null }
+    { ts: 2, cpu: 10, mem: 0, temp: null }
   ])
 })
 

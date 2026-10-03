@@ -204,7 +204,7 @@ Panel {
                 Item { width: parent.width - x - mountPct.width; height: 1 }
                 Text {
                   id: mountPct
-                  text: modelData.pct + "%"
+                  text: Model.formatPct(modelData.pct)
                   color: Qt.darker(root.barForeground, 1.3)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall

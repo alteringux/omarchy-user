@@ -90,6 +90,19 @@ do_refresh >/dev/null
   && ok "do_refresh: skips while a fresh 'connecting' is in flight" \
   || bad "do_refresh mid-transition" "action=$(field action)"
 
+# ── do_refresh: clears a STALE transient action once past the 45s guard ─
+cli_status_raw() { printf 'Status: Disconnected\n'; }
+probe_ip() { printf '\t\t\t\n'; return 1; }
+cat >"$STATE_FILE" <<EOF
+{ "connected": false, "action": "connecting", "server": "", "exitIp": "",
+  "country": "", "city": "", "org": "", "since": 0, "lastRotate": 1234,
+  "error": "", "updated": $(( $(date +%s) - 600 )) }
+EOF
+do_refresh >/dev/null
+[ "$(field action)" = "idle" ] && [ "$(field connected)" = "false" ] && [ "$(field lastRotate)" = "1234" ] \
+  && ok "do_refresh: stale 'connecting' (CLI disconnected, >45s old) -> reset to idle, lastRotate kept" \
+  || bad "do_refresh stale-transient" "action=$(field action) connected=$(field connected) lr=$(field lastRotate)"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]

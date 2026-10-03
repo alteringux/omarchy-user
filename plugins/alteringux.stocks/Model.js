@@ -31,6 +31,10 @@ function parseState(raw) {
     if (Array.isArray(parsed.gainers)) state.gainers = parsed.gainers
     if (Array.isArray(parsed.losers)) state.losers = parsed.losers
     if (parsed.trending !== undefined) state.trending = parsed.trending
+    if (typeof parsed.stale === "boolean") state.stale = parsed.stale
+    if (typeof parsed.providerStatus === "string") state.providerStatus = parsed.providerStatus
+    if (parsed.providerError === null || typeof parsed.providerError === "string") state.providerError = parsed.providerError
+    if (typeof parsed.checkedAt === "string") state.checkedAt = parsed.checkedAt
   } catch (e) {
     console.warn("stocks: state parse failed:", e)
   }

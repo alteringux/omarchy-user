@@ -44,8 +44,9 @@ Item {
   readonly property bool lastSlide: root.slideIndex >= root.slideCount - 1
 
   function finishLesson() {
-    if (!root.hostWidget || !root.lessonCard) return
-    root.hostWidget.lessonSeen(root.lessonCard.id)
+    if (!root.hostWidget) return
+    if (root.lessonCard) root.hostWidget.lessonSeen(root.lessonCard.id)
+    // A stale or malformed lesson prompt must still be dismissible.
     root.hostWidget.ackLesson()
   }
   function nextSlide() {
@@ -71,7 +72,7 @@ Item {
   })
   readonly property var reviewCard: (!root.isLesson && root.remainingIds.length) ? root.findCard(root.remainingIds[0]) : null
   readonly property int gradedCount: root.promptCardIds.length - root.remainingIds.length
-  readonly property bool reviewDone: !root.isLesson && root.promptCardIds.length > 0 && root.remainingIds.length === 0
+  readonly property bool reviewDone: !root.isLesson && root.remainingIds.length === 0
 
   // ---- multiple-choice clue, for when you need a nudge before Reveal ----
   property bool clueLoading: false
@@ -185,7 +186,7 @@ Item {
 
             Text {
               width: parent.width
-              text: root.lessonCard ? root.lessonCard.title : ""
+              text: root.lessonCard ? root.lessonCard.title : "Lesson unavailable"
               wrapMode: Text.WordWrap
               color: Color.bar.text
               font.family: Style.font.family
@@ -203,7 +204,7 @@ Item {
             Text {
               width: parent.width
               text: (root.lessonCard && root.lessonCard.slides && root.lessonCard.slides.length > root.slideIndex)
-                ? root.lessonCard.slides[root.slideIndex] : ""
+                ? root.lessonCard.slides[root.slideIndex] : "This lesson is no longer available."
               wrapMode: Text.WordWrap
               color: Color.bar.text
               font.family: Style.font.family

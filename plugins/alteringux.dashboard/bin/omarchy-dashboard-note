@@ -20,7 +20,7 @@ SCRIPT_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
 # shellcheck source=dashboard-common.sh
 source "$SCRIPT_DIR/dashboard-common.sh"
 
-ensure_state_file
+ensure_state_file || { echo "dashboard: failed to initialize state file" >&2; exit 1; }
 
 usage() {
   echo "Usage: omarchy-dashboard-note \"text to add\"" >&2
@@ -31,21 +31,31 @@ usage() {
 [[ $# -ge 1 ]] || usage
 
 if [[ "$1" == "--clear" ]]; then
-  (
-    flock 9
-    tmp=$(mktemp "${STATE_FILE}.XXXXXX")
-    jq -c '.notes.items = []' "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
-  ) 9>"$LOCK_FILE"
+  if ! (
+    flock 9 || exit 1
+    tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' EXIT
+    jq -c '.notes.items = []' "$STATE_FILE" >"$tmp" || exit 1
+    mv "$tmp" "$STATE_FILE"
+  ) 9>"$LOCK_FILE"; then
+    echo "dashboard: failed to clear notes" >&2
+    exit 1
+  fi
   echo "Dashboard notes cleared."
   exit 0
 fi
 
 text="$*"
 (
-  flock 9
-  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+  flock 9 || exit 1
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT
   jq -c --arg text "$text" --arg now "$(now_iso)" \
-    '.notes.items = ([{text: $text, at: $now}] + .notes.items) | .notes.items |= .[0:20]' \
-    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
-) 9>"$LOCK_FILE"
+    '.notes.items = ([{text: $text, at: $now}] + (.notes.items // [])) | .notes.items |= .[0:20]' \
+    "$STATE_FILE" >"$tmp" || exit 1
+  mv "$tmp" "$STATE_FILE"
+) 9>"$LOCK_FILE" || {
+  echo "dashboard: failed to add note" >&2
+  exit 1
+}
 echo "Added to dashboard: $text"

@@ -73,6 +73,23 @@ function isoWeekLiteral(year, month, day) {
   return pad2(isoWeek(year, month, day))
 }
 
+// Whether a Qt date-time format contains an unquoted seconds token. Keeping
+// this in the model makes the clock's update cadence follow the displayed
+// value rather than ticking every second for minute-only labels.
+function formatUsesSeconds(format) {
+  var text = String(format === undefined || format === null ? "" : format)
+  var quoted = false
+  for (var i = 0; i < text.length; i++) {
+    var ch = text.charAt(i)
+    if (ch === "'") {
+      quoted = !quoted
+    } else if (!quoted && ch === "s") {
+      return true
+    }
+  }
+  return false
+}
+
 function pad2(value) {
   var n = Number(value)
   return (n < 10 ? "0" : "") + n
@@ -291,6 +308,7 @@ if (typeof module !== "undefined") {
     clockFormats: clockFormats,
     clockFormatRing: clockFormatRing,
     nextClockFormat: nextClockFormat,
+    formatUsesSeconds: formatUsesSeconds,
     isoWeekLiteral: isoWeekLiteral
   }
 }

@@ -22,6 +22,8 @@ Panel {
   readonly property bool connected: st && st.connected
   readonly property bool busy: hostWidget ? hostWidget.busy : false
   readonly property int secsToRotate: hostWidget ? hostWidget.secsToRotate : -1
+  readonly property string wifiState: hostWidget ? hostWidget.wifiState : "unknown"
+  readonly property bool wifiBlocksConnect: hostWidget ? hostWidget.wifiBlocksConnect : false
 
   readonly property var guard: Kit.BugGuard.create("alteringux.vpnrotate", function (argv) { Quickshell.execDetached(argv) })
 
@@ -48,7 +50,7 @@ Panel {
       onActivateRequested: {
         if (!root.hostWidget || root.busy) return
         if (root.connected) root.hostWidget.runDisconnect()
-        else root.hostWidget.runConnect()
+        else if (!root.wifiBlocksConnect) root.hostWidget.runConnect()
       }
       onDeleteRequested: if (root.hostWidget && root.connected && !root.busy) root.hostWidget.runDisconnect()
 
@@ -186,7 +188,7 @@ Panel {
             text: root.connected ? "Disconnect" : "Connect"
             foreground: root.barForeground
             bordered: true
-            enabled: root.hostWidget && !root.busy
+            enabled: root.hostWidget && !root.busy && (root.connected || !root.wifiBlocksConnect)
             onClicked: {
               if (!root.hostWidget) return
               if (root.connected) root.hostWidget.runDisconnect()
@@ -200,6 +202,20 @@ Panel {
             enabled: root.hostWidget && root.connected && !root.busy
             onClicked: if (root.hostWidget) root.hostWidget.runRotate()
           }
+        }
+
+        // WiFi-only gate: explain why Connect is greyed out when off WiFi.
+        Text {
+          width: content.width
+          visible: !root.connected && root.wifiBlocksConnect
+          text: (root.wifiState === "unavailable"
+                 ? "Connect is disabled — WiFi is off or blocked. "
+                 : "Connect is disabled — you're not on WiFi. ")
+                + "The VPN only comes up over WiFi so your wired IP is never left exposed."
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
         }
 
         Text {

@@ -53,8 +53,14 @@ put_file() { # put_file <path> ; content on stdin, atomic
   ensure_dir
   tmp="$(mktemp "${f}.XXXXXX")"
   cat >"$tmp"
+  # Never replace a good state file with an empty/partial pipeline result.
+  if ! jq -e . "$tmp" >/dev/null 2>&1; then
+    rm -f "$tmp"
+    return 1
+  fi
   mv -f "$tmp" "$f"
 }
+
 
 seed_config() {
   [ -f "$CONFIG_FILE" ] && return 0
@@ -67,8 +73,27 @@ seed_config() {
 
 read_config() {
   seed_config
-  jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"
+  # A syntactically valid but wrong-shaped hand edit must be harmless. Keep
+  # unknown keys, but coerce every field consumed by the sampler to a safe
+  # value before any jq --argjson call can fail.
+  jq -e --argjson defaults "$DEFAULT_CONFIG" '
+    if type != "object" then $defaults
+    else
+      .watchMount = (if (.watchMount | type) == "string" and .watchMount != ""
+        then .watchMount else $defaults.watchMount end)
+      | .warnPct = (if (.warnPct | type) == "number"
+        then .warnPct else $defaults.warnPct end)
+      | .critPct = (if (.critPct | type) == "number"
+        then .critPct else $defaults.critPct end)
+      | .largestPath = (if (.largestPath | type) == "string" and .largestPath != ""
+        then .largestPath else $defaults.largestPath end)
+      | .excludeFstypes = (if (.excludeFstypes | type) == "array"
+        then [.excludeFstypes[] | select(type == "string")]
+        else $defaults.excludeFstypes end)
+    end
+  ' "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"
 }
+
 
 # ── df -> one JSON object per real mount ─────────────────────────────────
 # `df -Pk -T` columns: Filesystem Type 1024-blocks Used Available Capacity Mounted-on
@@ -176,6 +201,15 @@ cmd_watch() {
 }
 
 # ── largest: top-10 immediate subdirs of PATH by size ────────────────────
+# Expand only the forms users expect from a shell: "~" and "~/...".
+expand_tilde() {
+  case "$1" in
+    "~") printf '%s' "${HOME:-}" ;;
+    "~/"*) printf '%s/%s' "${HOME:-}" "${1#~/}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 du_raw() { # du_raw <path>
   if [ -n "${OMARCHY_DISKMON_DU_OUTPUT:-}" ]; then
     printf '%s\n' "$OMARCHY_DISKMON_DU_OUTPUT"
@@ -194,6 +228,7 @@ cmd_largest() {
   done
   [ -z "$path" ] && path="$(read_config | jq -r '.largestPath // env.HOME')"
 
+  path="$(expand_tilde "$path")"
   local parsed
   parsed="$(du_raw "$path" | awk -v self="$path" '
     { kb = $1; $1=""; p=$0; sub(/^[ \t]+/, "", p)
@@ -209,13 +244,11 @@ cmd_largest() {
     printf '%s\n' "$parsed" | jq -r '.[] | "\(.kb / 1048576 * 100 | round / 100) GB\t\(.path)"' | column -t -s $'\t'
   fi
 }
-
 cmd_config() { read_config | jq . ; }
 
 cmd_reset() {
   ensure_dir
   rm -f "$STATE_FILE"
-  cmd_sample
 }
 
 main() {

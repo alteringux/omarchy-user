@@ -20,6 +20,28 @@ test("parseDoc: tolerant of garbage", () => {
   assert.deepEqual(Model.parseDoc("[]").nodes, []);
 });
 
+test("parseRunState: malformed nested state becomes safe empty entries", () => {
+  const rs = Model.parseRunState(JSON.stringify({
+    nodes: { good: { status: "ok" }, bad: null, list: [] },
+    envelopes: [null, "old", { shape: "table", data: { columns: ["a"], rows: [null, "bad", [1]] } }],
+    order: ["good", 4, null]
+  }));
+  assert.deepEqual(Object.keys(rs.nodes), ["good"]);
+  assert.equal(rs.envelopes.length, 1);
+  assert.deepEqual(rs.envelopes[0].data.rows, [[1]]);
+  assert.deepEqual(rs.order, ["good"]);
+  assert.deepEqual(Model.parseRunState("[]").nodes, {});
+});
+
+
+test("parseDoc: hostile own-property names do not break recovery or save", () => {
+  const d = Model.parseDoc(JSON.stringify({
+    id: "f",
+    nodes: [{ id: "a", type: "tool", hasOwnProperty: "not a function" }]
+  }));
+  assert.equal(d.nodes.length, 1);
+  assert.doesNotThrow(() => JSON.parse(Model.serializeDoc(d)));
+});
 test("parseDoc: fills ui, label, in from a real-ish doc", () => {
   const d = Model.parseDoc(
     JSON.stringify({

@@ -46,6 +46,7 @@ Panel {
         ? (root.tests.passed + "/" + root.tests.total + " TESTS PASS")
         : (root.tests.failed + " TEST(S) FAILING")
     }
+    if (root.tests && root.tests.at) return root.tests.ok ? "TESTS PASS" : "TESTS FAILING"
     return "NO TESTS RUN YET"
   }
 

@@ -93,6 +93,16 @@ Panel {
             foreground: root.barForeground
           }
 
+          Text {
+            width: content.width
+            visible: hostWidget && hostWidget.lastError.length > 0
+            text: hostWidget ? hostWidget.lastError : ""
+            color: Kit.Palette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           // ---- month navigation + grid --------------------------------
           Row {
             width: content.width
@@ -237,7 +247,7 @@ Panel {
           // ---- selected day detail -------------------------------------
           Kit.SectionHeading {
             width: content.width
-            text: root.selectedDate || "Pick a date"
+            text: root.selectedDate ? Model.formatDateTitle(root.selectedDate) : "Pick a date"
             uppercase: false
             rule: true
             foreground: root.barForeground
@@ -326,14 +336,14 @@ Panel {
             TextField {
               id: startField
               width: (content.width - Style.space(140)) / 2
-              placeholderText: "09:00"
+              placeholderText: "9:00 AM"
               foreground: root.barForeground
               onActiveFocusChanged: root.inputFocused = activeFocus || endField.activeFocus || activityField.activeFocus
             }
             TextField {
               id: endField
               width: (content.width - Style.space(140)) / 2
-              placeholderText: "10:00"
+              placeholderText: "10:00 AM"
               foreground: root.barForeground
               onActiveFocusChanged: root.inputFocused = activeFocus || startField.activeFocus || activityField.activeFocus
             }
@@ -348,12 +358,14 @@ Panel {
                 anchors.margins: -6
                 cursorShape: Qt.PointingHandCursor
                 onClicked: {
-                  if (!hostWidget || activityField.text.trim().length === 0) return
-                  hostWidget.addBlock(root.selectedDate, startField.text.trim(), endField.text.trim(), activityField.text.trim())
+                  var start = Model.normalizeTime(startField.text.trim() || "9:00 AM")
+                  var end = Model.normalizeTime(endField.text.trim() || "10:00 AM")
+                  if (!start || !end) return
+                  hostWidget.addBlock(root.selectedDate, start, end, activityField.text.trim())
                   activityField.text = ""
                 }
               }
-            }
+          }
           }
           TextField {
             id: activityField
@@ -364,7 +376,10 @@ Panel {
             onActiveFocusChanged: root.inputFocused = activeFocus || startField.activeFocus || endField.activeFocus
             onAccepted: {
               if (!hostWidget || text.trim().length === 0) return
-              hostWidget.addBlock(root.selectedDate, startField.text.trim() || "09:00", endField.text.trim() || "10:00", text.trim())
+              var start = Model.normalizeTime(startField.text.trim() || "9:00 AM")
+              var end = Model.normalizeTime(endField.text.trim() || "10:00 AM")
+              if (!start || !end) return
+              hostWidget.addBlock(root.selectedDate, start, end, text.trim())
               text = ""
             }
           }

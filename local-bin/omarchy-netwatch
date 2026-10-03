@@ -76,6 +76,13 @@ have jq || die "needs jq on PATH"
 
 bridge() { node "$CLI" "$1"; }
 
+normalized_sample_interval() {
+  local raw="${1:-}"
+  jq -n --arg interval "$raw" \
+    '{config:{sampleIntervalSec:$interval}}' |
+    bridge config | jq -r '.sampleIntervalSec'
+}
+
 put_file() { # put_file <path> ; content on stdin, atomic
   local f="$1" tmp
   ensure_dir
@@ -378,10 +385,10 @@ cmd_top() {
 
 cmd_watch() {
   local interval
-  interval="$(read_config | jq -r '.sampleIntervalSec // 20')"
+  interval="$(normalized_sample_interval "$(read_config | jq -r 'if type == "object" then (.sampleIntervalSec // empty) else empty end')")"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --interval) interval="${2:-20}"; shift 2 ;;
+      --interval) interval="$(normalized_sample_interval "${2:-}")"; shift 2 ;;
       *) die "watch: unexpected arg '$1'" ;;
     esac
   done

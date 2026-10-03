@@ -24,11 +24,24 @@ BarWidget {
 
   readonly property string flowsDir: Quickshell.env("HOME") + "/.config/omarchy/flows/"
   readonly property string flowBin: Quickshell.env("HOME") + "/Work/bin/flow"
+  readonly property string docSaveBin: Quickshell.env("HOME") + "/.config/omarchy/local-bin/omarchy-flow-doc-save"
   readonly property string speakBin: Quickshell.env("HOME") + "/Work/bin/flow-speak"
   readonly property string piperBin: Quickshell.env("HOME") + "/.local/bin/piper-tts"
   readonly property string briefFeedsBin: Quickshell.env("HOME") + "/Work/bin/brief-feeds"
   readonly property string ttsTag: "flow-" + root.flowId
 
+
+  // Canvas writes use a compare-and-swap helper rather than Kit.Store.save().
+  // The document is also edited by `flow watch` / a text editor; a debounced
+  // blind write could otherwise overwrite a refresh that landed meanwhile.
+  property var pendingDoc: null
+  property string pendingDocRaw: ""
+  property string pendingExpectedRaw: ""
+  property string inFlightDocRaw: ""
+  property string inFlightFlowId: ""
+  property string inFlightExpectedRaw: ""
+  property bool docWriteConflict: false
+  property string ignoreDocRaw: ""
   readonly property var guard: Kit.BugGuard.create("alteringux.flow", function (argv) { Quickshell.execDetached(argv) })
 
   // ---- watched files (someone else writes them) -----------------------------
@@ -37,7 +50,7 @@ BarWidget {
     dir: root.flowsDir
     fileName: root.flowId + ".json"
     watch: true
-    pollMs: 2500
+    pollMs: 60000
     parse: function (raw) { return Model.parseDoc(raw) }
     // value is the parsed canvas shape (flat x/y); write it back as the on-disk
     // flow-document shape (ui:{x,y}, sparse fields).
@@ -47,7 +60,7 @@ BarWidget {
     id: runStore
     fileName: "flows/" + root.flowId + ".json"
     watch: true
-    pollMs: 2500
+    pollMs: 60000
     parse: function (raw) { return Model.parseRunState(raw) }
   }
   // The sector `brief-feeds` is currently focused on (empty = every sector).
@@ -56,8 +69,26 @@ BarWidget {
     id: focusStore
     fileName: "flows/brief-focus"
     watch: true
-    pollMs: 3000
+
+    pollMs: 60000
     parse: function (raw) { return (raw || "").trim() }
+  }
+  Connections {
+    target: docStore
+    function onExternallyChanged(value) { root._onDocRefresh(value) }
+  }
+
+  Timer {
+    id: docWriteTimer
+    interval: 200
+    repeat: false
+    onTriggered: root._startDocWrite()
+  }
+
+  Process {
+    id: docWriteProc
+    running: false
+    onExited: function (code) { root._finishDocWrite(code) }
   }
 
   property alias doc: docStore.value
@@ -65,8 +96,15 @@ BarWidget {
   readonly property string focusSector: focusStore.value || ""
   readonly property bool ready: docStore.loaded && runStore.loaded
 
-  // Re-point both stores when the flow selection changes.
+  // Re-point both stores when the flow selection changes. Never carry a
+  // debounced write across flows; an in-flight helper is already bound to the
+  // old path and is allowed to finish there.
   onFlowIdChanged: {
+    docWriteTimer.stop()
+    pendingDoc = null
+    pendingDocRaw = ""
+    pendingExpectedRaw = ""
+    docWriteConflict = false
     docStore.reload()
     runStore.reload()
   }
@@ -124,25 +162,80 @@ BarWidget {
     })
   }
 
-  // ---- canvas edits: mutate the parsed doc, let Kit.Store write it back -----
-  // save() works in watch mode too; the reload of our own write re-reads
-  // identical text, so it does not re-loop.
+  // ---- canvas edits: compare-and-swap persistence --------------------------
+  // The flow document is shared with the CLI and text editors. Kit.Store's
+  // debounced save has no read-before-write check, so a refresh could be
+  // silently overwritten by a pending canvas edit. Queue edits locally, then
+  // atomically write only when the file still contains our expected revision.
   function persistDoc(newDoc) {
     guard.run("persistDoc", function () {
-      if (!newDoc) return
+      if (!newDoc || !docStore.loaded) return
+      var hasPending = root.pendingDoc !== null
+      root.pendingExpectedRaw = hasPending
+        ? root.pendingExpectedRaw
+        : (docWriteProc.running ? root.inFlightDocRaw : docStore._lastRaw)
+      root.pendingDoc = newDoc
+      root.pendingDocRaw = Model.serializeDoc(newDoc)
       docStore.value = newDoc
-      docStore.save()
+      docWriteTimer.restart()
     })
   }
-  function moveNode(id, x, y) { root.persistDoc(Model.moveNode(root.doc, id, x, y)) }
-  function setNodeField(id, key, val) { root.persistDoc(Model.setField(root.doc, id, key, val)) }
-  function toggleEdge(fromId, toId) { root.persistDoc(Model.toggleEdge(root.doc, fromId, toId)) }
-  function removeNode(id) { root.persistDoc(Model.removeNode(root.doc, id)) }
-  function addNode(type) {
-    root.guard.run("addNode", function () {
-      var r = Model.addNode(root.doc, type)
-      root.persistDoc(r.doc)
-    })
+
+  function _startDocWrite() {
+    if (docWriteProc.running || root.pendingDoc === null) return
+    root.inFlightExpectedRaw = root.pendingExpectedRaw
+    root.inFlightDocRaw = root.pendingDocRaw
+    root.inFlightFlowId = root.flowId
+    root.pendingDoc = null
+    root.pendingDocRaw = ""
+    root.pendingExpectedRaw = ""
+    docWriteProc.command = [
+      root.docSaveBin, docStore.path, root.inFlightExpectedRaw, root.inFlightDocRaw
+    ]
+    docWriteProc.running = true
+  }
+  function _onDocRefresh(value) {
+    // A successful CAS is followed by reload() so Store's own cache catches
+    // up. Recognise that exact text and do not mistake it for an outside edit.
+    var adopted = ""
+    try { adopted = Model.serializeDoc(value) } catch (_) {}
+    if (root.inFlightDocRaw && adopted === root.inFlightDocRaw) return
+    if (root.ignoreDocRaw) {
+      var selfRefresh = adopted === root.ignoreDocRaw
+      root.ignoreDocRaw = ""
+      if (selfRefresh) return
+    }
+    // External state wins over a not-yet-written local edit. This makes a
+    // refresh/write collision deterministic instead of last-timer-wins.
+    if (docWriteTimer.running) docWriteTimer.stop()
+    root.pendingDoc = null
+    root.pendingDocRaw = ""
+    root.pendingExpectedRaw = ""
+    if (docWriteProc.running) root.docWriteConflict = true
+  }
+
+  function _finishDocWrite(code) {
+    var sameFlow = root.inFlightFlowId === root.flowId
+    var committed = code === 0 && !root.docWriteConflict
+    root.docWriteConflict = false
+    root.inFlightExpectedRaw = ""
+    root.inFlightFlowId = ""
+    if (committed && sameFlow) {
+      // Store will adopt the exact text and emit externallyChanged; remember
+      // it so that self-refresh does not cancel the next queued edit.
+      root.ignoreDocRaw = root.inFlightDocRaw
+      docStore.reload()
+    } else {
+      root.ignoreDocRaw = ""
+      docStore.reload()
+    }
+    root.inFlightDocRaw = ""
+    if (sameFlow && committed && root.pendingDoc !== null) docWriteTimer.restart()
+    else {
+      root.pendingDoc = null
+      root.pendingDocRaw = ""
+      root.pendingExpectedRaw = ""
+    }
   }
 
   // ---- IPC -----------------------------------------------------------------

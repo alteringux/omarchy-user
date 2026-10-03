@@ -96,7 +96,7 @@ Item {
 
   // Watch mode: keep re-reading a file written by someone else. See the header.
   property bool watch: false
-  property int pollMs: 0
+  property int pollMs: 60000
   property bool polling: true
 
   // ── observable state ─────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ var DAY = 24 * HOUR
 
 var CATEGORIES = ["technique", "trivia", "vocabulary", "custom"]
 var KINDS = ["lesson", "quiz"]
+var PROMPT_KINDS = ["lesson", "checkin", "takeover"]
 var GRADES = ["again", "hard", "good", "easy"]
 
 // ── defaults ─────────────────────────────────────────────────────────────
@@ -148,7 +149,7 @@ function seedCards() {
   return lessons.concat(triviaSeedCards())
 }
 
-// The curated, offline trivia starter set — no Featherless/network needed.
+// The curated, offline trivia starter set — no NanoGPT/network needed.
 // Kept separate from seedCards() so it can also be re-applied on its own
 // (see mergeCards / the CLI's `seed-trivia` verb) to top up an existing
 // deck that predates this list or is missing some of it, without touching
@@ -231,7 +232,11 @@ function parseCards(json) {
     var out = []
     for (var i = 0; i < o.cards.length; i++) {
       var c = parseCard(o.cards[i])
-      if (!c.id || seen[c.id]) continue
+      var contentOk = c.kind === "quiz"
+        ? c.front.trim().length > 0 && c.back.trim().length > 0
+        : c.title.trim().length > 0 && Array.isArray(c.slides) && c.slides.length > 0 &&
+          c.slides.every(function (s) { return s.trim().length > 0 })
+      if (!c.id || seen[c.id] || !contentOk) continue
       seen[c.id] = true
       out.push(c)
     }
@@ -245,18 +250,35 @@ function parseConfig(json) {
   var d = defaultConfig()
   try {
     var o = typeof json === "string" ? JSON.parse(json) : (json || {})
+    if (!o || typeof o !== "object" || Array.isArray(o)) return d
+
+    function positiveInt(v, fallback, min) {
+      var n = clampNum(v, fallback)
+      return Math.max(min, Math.floor(n))
+    }
+    var minIntervalMin = positiveInt(o.minIntervalMin, d.minIntervalMin, 1)
+    var baseIntervalMin = Math.max(minIntervalMin, positiveInt(o.baseIntervalMin, d.baseIntervalMin, 1))
+    var maxIntervalMin = Math.max(baseIntervalMin, positiveInt(o.maxIntervalMin, d.maxIntervalMin, 1))
+    var snoozeMinutes = Array.isArray(o.snoozeMinutes)
+      ? o.snoozeMinutes
+        .filter(function (v) { return typeof v === "number" && isFinite(v) && v > 0 })
+        .map(function (v) { return Math.floor(v) })
+        .filter(function (v, i, a) { return v > 0 && a.indexOf(v) === i })
+      : []
+    if (snoozeMinutes.length === 0) snoozeMinutes = d.snoozeMinutes.slice()
+
     return {
       version: 1,
-      enabled: !!o.enabled,
-      baseIntervalMin: clampNum(o.baseIntervalMin, d.baseIntervalMin),
-      minIntervalMin: clampNum(o.minIntervalMin, d.minIntervalMin),
-      maxIntervalMin: clampNum(o.maxIntervalMin, d.maxIntervalMin),
-      quizBatchSize: Math.max(1, clampNum(o.quizBatchSize, d.quizBatchSize)),
-      overdueTakeoverHours: clampNum(o.overdueTakeoverHours, d.overdueTakeoverHours),
-      dismissTakeoverStreak: clampNum(o.dismissTakeoverStreak, d.dismissTakeoverStreak),
-      dailyNewLessonCap: Math.max(0, clampNum(o.dailyNewLessonCap, d.dailyNewLessonCap)),
-      lessonGapHours: clampNum(o.lessonGapHours, d.lessonGapHours),
-      snoozeMinutes: Array.isArray(o.snoozeMinutes) ? o.snoozeMinutes : d.snoozeMinutes
+      enabled: typeof o.enabled === "boolean" ? o.enabled : d.enabled,
+      baseIntervalMin: baseIntervalMin,
+      minIntervalMin: minIntervalMin,
+      maxIntervalMin: maxIntervalMin,
+      quizBatchSize: positiveInt(o.quizBatchSize, d.quizBatchSize, 1),
+      overdueTakeoverHours: Math.max(0, clampNum(o.overdueTakeoverHours, d.overdueTakeoverHours)),
+      dismissTakeoverStreak: positiveInt(o.dismissTakeoverStreak, d.dismissTakeoverStreak, 0),
+      dailyNewLessonCap: positiveInt(o.dailyNewLessonCap, d.dailyNewLessonCap, 0),
+      lessonGapHours: Math.max(0, clampNum(o.lessonGapHours, d.lessonGapHours)),
+      snoozeMinutes: snoozeMinutes
     }
   } catch (e) {
     return d
@@ -269,13 +291,17 @@ function parseState(json) {
     var o = typeof json === "string" ? JSON.parse(json) : (json || {})
     var prompt = null
     if (o.prompt && typeof o.prompt === "object" && Array.isArray(o.prompt.cardIds)) {
-      prompt = { kind: clampStr(o.prompt.kind, ""), cardIds: o.prompt.cardIds.filter(function (s) { return typeof s === "string" }), reason: clampStr(o.prompt.reason, "") }
-      // Current slide of an in-progress lesson, persisted so a shell
-      // restart resumes the lesson instead of restarting it at slide 1.
-      // Optional: absent for non-lesson prompts and for state written
-      // before this field existed.
-      if (typeof o.prompt.slideIndex === "number" && isFinite(o.prompt.slideIndex) && o.prompt.slideIndex >= 0) {
-        prompt.slideIndex = Math.floor(o.prompt.slideIndex)
+      var kind = clampStr(o.prompt.kind, "")
+      var cardIds = o.prompt.cardIds.filter(function (s) { return typeof s === "string" && s.trim().length > 0 })
+      if (PROMPT_KINDS.indexOf(kind) >= 0 && cardIds.length > 0) {
+        prompt = { kind: kind, cardIds: cardIds, reason: clampStr(o.prompt.reason, "") }
+        // Current slide of an in-progress lesson, persisted so a shell
+        // restart resumes the lesson instead of restarting it at slide 1.
+        // Optional: absent for non-lesson prompts and for state written
+        // before this field existed.
+        if (typeof o.prompt.slideIndex === "number" && isFinite(o.prompt.slideIndex) && o.prompt.slideIndex >= 0) {
+          prompt.slideIndex = Math.floor(o.prompt.slideIndex)
+        }
       }
     }
     return {
@@ -593,7 +619,7 @@ function formatDue(deltaMs, now) {
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     MINUTE: MINUTE, HOUR: HOUR, DAY: DAY,
-    CATEGORIES: CATEGORIES, KINDS: KINDS, GRADES: GRADES,
+    CATEGORIES: CATEGORIES, KINDS: KINDS, PROMPT_KINDS: PROMPT_KINDS, GRADES: GRADES,
     defaultConfig: defaultConfig, defaultCards: defaultCards, defaultState: defaultState,
     parseCards: parseCards, parseConfig: parseConfig, parseState: parseState,
     findCard: findCard, dueQuizzes: dueQuizzes, unseenLessons: unseenLessons, topDue: topDue,
@@ -603,6 +629,6 @@ if (typeof module !== "undefined" && module.exports) {
     nextIntervalMs: nextIntervalMs, decide: decide,
     addQuizCard: addQuizCard, addLessonCard: addLessonCard, dropCard: dropCard, markLessonSeen: markLessonSeen,
     triviaSeedCards: triviaSeedCards, mergeCards: mergeCards,
-    stats: stats, formatDue: formatDue
+    stats: stats, formatDue: formatDue,
   }
 }

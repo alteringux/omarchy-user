@@ -150,14 +150,20 @@ Panel {
   // entry when the label format is cycled, so it has to be kept in step or
   // it would write this key straight back out from a stale copy.
   function persistSettings(values) {
-    var entry = { id: root.moduleName }
+    // A cloned bar widget injects the clone id into hostWidget. Keep the
+    // panel's own default for standalone use, but always persist against the
+    // mounted widget when one exists.
+    var targetId = root.hostWidget && root.hostWidget.moduleName
+      ? root.hostWidget.moduleName
+      : root.moduleName
+    var entry = { id: targetId }
     for (var existing in root.settings) if (existing !== "id") entry[existing] = root.settings[existing]
     for (var key in values) entry[key] = values[key]
 
     root.settings = entry
     if (root.hostWidget && "settings" in root.hostWidget) root.hostWidget.settings = entry
     if (root.bar && root.bar.shell && typeof root.bar.shell.updateEntryInline === "function")
-      root.bar.shell.updateEntryInline(root.moduleName, entry)
+      root.bar.shell.updateEntryInline(targetId, entry)
   }
 
   function setWeekStart(day) {

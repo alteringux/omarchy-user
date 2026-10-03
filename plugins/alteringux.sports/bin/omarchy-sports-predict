@@ -1,0 +1,14 @@
+#!/bin/bash
+# Predicts a match winner by comparing the two teams' cached form, head-to-head
+# record, home advantage, and league standing. Pure stdlib Python; reads only
+# the plugin's own state file (no network).
+#
+# Usage: omarchy-sports-predict --sport Soccer --home Arsenal --away Chelsea
+
+set -uo pipefail
+
+OMARCHY_PLUGIN_ID="alteringux.sports"
+[[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
+
+python3 "$(dirname "$(readlink -f "$0")")/sports_predict.py" "$@"
+exit $?

@@ -168,3 +168,30 @@ crediting and streak maths run without spawning a unit or firing notifications.
 - **Restarting the shell** races itself: `omarchy restart shell` can report
   "did not become ready" when the old instance has not released. `omarchy-shell`
   is the IPC *client*; `omarchy-launch-shell` is what starts one.
+
+## Browser website
+
+The static browser version lives in `web/`. It reuses the pure `Model.js` resolver
+and catalogue, but has independent browser-local state; it never shares live
+state with the desktop plugin.
+
+Build and preview locally:
+
+```bash
+node plugins/alteringux.breathe/web/build.mjs
+python3 -m http.server 4173 --directory plugins/alteringux.breathe/web/dist
+```
+
+Sessions, custom techniques, settings, metrics, and history are stored only in
+the visitor's `localStorage` under `breathe-web-*` keys. There are no accounts,
+analytics, database calls, or server APIs. Browser cues use Web Audio and
+SpeechSynthesis. Reminders run only while the page is open; notification
+permission is optional, and closing the page cannot run an operating-system
+timer.
+
+Netlify can deploy this repository directly through Git-connected deployment:
+the root `netlify.toml` runs the dependency-free build and publishes
+`plugins/alteringux.breathe/web/dist`. Connect the repository to a Netlify site
+in the Netlify dashboard, or run `netlify login` followed by
+`netlify deploy --prod --dir=plugins/alteringux.breathe/web/dist` after a
+successful local build. No credentials belong in this repository.

@@ -312,7 +312,7 @@ Item {
           visible: !root.isSwitch
           text: {
             if (!root.live) return ""
-            return Model.formatClock(root.isHold ? root.live.phaseElapsedMs : root.live.phaseRemainingMs)
+            return Model.formatClock(root.isHold ? root.live.phaseElapsedMs : Model.breathRemainingMs(root.technique, root.live))
           }
           color: root.tone
           font.family: Style.font.family

@@ -130,6 +130,13 @@ test("nextClockFormat: wraps around, and an unknown current format restarts the 
   assert.equal(Model.nextClockFormat([], "a"), "")
 })
 
+test("formatUsesSeconds: follows unquoted Qt seconds tokens", () => {
+  assert.equal(Model.formatUsesSeconds("dddd HH:mm"), false)
+  assert.equal(Model.formatUsesSeconds("dddd h:mm:ss AP"), true)
+  assert.equal(Model.formatUsesSeconds("'seconds' HH:mm"), false)
+  assert.equal(Model.formatUsesSeconds(null), false)
+})
+
 test("isoWeekLiteral: two-digit, zero-padded", () => {
   assert.equal(Model.isoWeekLiteral(2026, 0, 1), "01")
 })

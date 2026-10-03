@@ -62,6 +62,11 @@ Panel {
     }
     return null
   }
+  // A refresh can remove a previously selected model. Clear that stale
+  // selection or the main dashboard remains hidden with no detail to show.
+  onModelsChanged: {
+    if (root.selectedModelId && !root.selectedModel) root.clearSelection()
+  }
 
   function selectModel(id) { root.selectedModelId = id }
   function clearSelection() { root.selectedModelId = "" }

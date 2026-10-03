@@ -72,7 +72,7 @@ BarWidget {
     dir: root.runtimeDir + "/piper-tts/"
     fileName: "current.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     polling: !root.active
     parse: function (raw) { return Model.parseState(raw) }
     onExternallyChanged: function (value) { root.applyState(value) }

@@ -41,7 +41,7 @@ BarWidget {
     id: configStore
     fileName: "score-config.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
@@ -49,7 +49,7 @@ BarWidget {
     id: stateStore
     fileName: "score-state.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 

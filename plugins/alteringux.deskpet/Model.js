@@ -471,13 +471,43 @@ function defaultState() {
   }
 }
 
+function disabledDefault() {
+  var d = defaultState()
+  d.enabled = false
+  return d
+}
+
+function hasWrongType(obj, keys, type, nullable) {
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i]
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) continue
+    if (nullable && obj[key] === null) continue
+    if (typeof obj[key] !== type) return true
+  }
+  return false
+}
+
+// A missing file is a first-run default; a present but malformed file fails
+// closed so the bar cannot imply a healthy pet backed by bad state.
 function parseState(raw) {
   var d = defaultState()
   if (!raw || !raw.length) return d
   var obj
-  try { obj = JSON.parse(raw) } catch (e) { return d }
-  if (!obj || typeof obj !== "object") return d
-
+  try { obj = JSON.parse(raw) } catch (e) {
+    return disabledDefault()
+  }
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) {
+    return disabledDefault()
+  }
+  if (Object.keys(obj).length === 0) return disabledDefault()
+  if (hasWrongType(obj, ["enabled", "muted", "manualSleep", "screenWatchEnabled", "shiny", "agedUp", "agedUp2", "nightOwlEver"], "boolean")
+      || hasWrongType(obj, ["petId", "roamMode"], "string")
+      || hasWrongType(obj, ["posFracX", "posFracY"], "number", true)
+      || hasWrongType(obj, ["happiness", "fullness", "energy", "lastTickMs", "lastFedMs", "lastPlayedMs", "lastInteractionMs", "pokeStreakAt", "feedStreakAt", "bornMs", "pokeStreak", "feedStreak", "totalPokes", "totalFeeds", "totalPlays", "speechFreqMin", "screenLookFreqMin"], "number")
+      || (Object.prototype.hasOwnProperty.call(obj, "accessoryId")
+        && obj.accessoryId !== null && typeof obj.accessoryId !== "string")) {
+    return disabledDefault()
+  }
   var out = Object.assign({}, d)
   if (typeof obj.petId === "string" && petIndex(obj.petId) >= 0) out.petId = obj.petId
   if (typeof obj.enabled === "boolean") out.enabled = obj.enabled
@@ -609,7 +639,18 @@ function ageUp(state) {
 function setSleep(state, manual) {
   var next = Object.assign({}, state)
   next.manualSleep = !!manual
-  next.asleep = !!manual || next.energy <= 15
+  if (manual) {
+    next.asleep = true
+  } else {
+    // An explicit wake must actually wake, even when the pet dozed off from
+    // low energy. Previously `asleep` stayed pinned true whenever
+    // energy <= 15, and no user action restored energy fast enough, so the
+    // Wake button did nothing for ~an hour. Nudge energy clear of the sleep
+    // threshold so applyDecay / withInteraction don't drop it straight back
+    // to sleep on the next tick.
+    next.energy = clamp(Math.max(next.energy, 25), 0, 100)
+    next.asleep = false
+  }
   return next
 }
 

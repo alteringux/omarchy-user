@@ -41,6 +41,31 @@ test("parseConfig: adopts known keys, ignores unknown", () => {
   assert.equal(c.bogus, undefined)
   assert.equal(c.minIntervalMin, Model.defaultConfig().minIntervalMin)
 })
+test("parseConfig: normalizes invalid ranges, counts, and snoozes", () => {
+  const c = Model.parseConfig(JSON.stringify({
+    enabled: "false",
+    baseIntervalMin: -4,
+    minIntervalMin: 0,
+    maxIntervalMin: 0,
+    quizBatchSize: 0.5,
+    overdueTakeoverHours: -1,
+    dismissTakeoverStreak: 2.9,
+    dailyNewLessonCap: -3,
+    lessonGapHours: -8,
+    snoozeMinutes: [0, -5, "30", 15.8, 15.8]
+  }))
+  assert.equal(c.enabled, false)
+  assert.equal(c.minIntervalMin, 1)
+  assert.equal(c.baseIntervalMin, 1)
+  assert.equal(c.maxIntervalMin, 1)
+  assert.equal(c.quizBatchSize, 1)
+  assert.equal(c.overdueTakeoverHours, 0)
+  assert.equal(c.dismissTakeoverStreak, 2)
+  assert.equal(c.dailyNewLessonCap, 0)
+  assert.equal(c.lessonGapHours, 0)
+  assert.deepEqual(c.snoozeMinutes, [15])
+})
+
 
 test("parseCards: empty / garbage -> seeded defaults", () => {
   assert.deepEqual(Model.parseCards(""), Model.defaultCards())
@@ -52,6 +77,23 @@ test("parseCards: drops malformed entries and de-dupes ids, keeps the rest", () 
   const parsed = Model.parseCards(raw)
   const ids = parsed.cards.map((c) => c.id).sort()
   assert.deepEqual(ids, ["a", "b"])
+})
+
+test("parseCards: drops cards with empty quiz or lesson content", () => {
+  const parsed = Model.parseCards(JSON.stringify({ cards: [
+    quiz({ id: "good" }),
+    quiz({ id: "empty-front", front: "   " }),
+    quiz({ id: "empty-back", back: "" }),
+    lesson({ id: "empty-title", title: " " }),
+    lesson({ id: "empty-slides", slides: [] })
+  ] }))
+  assert.deepEqual(parsed.cards.map((c) => c.id), ["good"])
+})
+
+test("parseState: malformed prompt kinds and empty card ids are dropped", () => {
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "bogus", cardIds: ["x"] } })).prompt, null)
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "checkin", cardIds: [] } })).prompt, null)
+  assert.equal(Model.parseState(JSON.stringify({ prompt: { kind: "lesson", cardIds: [null, ""] } })).prompt, null)
 })
 
 test("parseCards: unknown kind coerces to quiz, unknown category to custom", () => {

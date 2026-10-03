@@ -19,6 +19,7 @@ function defaultConfig() {
   return {
     version: 1,
     workMinutes: 25,
+    dailyGoalMinutes: 480,
     shortBreakMinutes: 5,
     longBreakMinutes: 15,
     longBreakCycle: 4,
@@ -87,10 +88,12 @@ function reminderIntervalMs(config) {
 // Notification shown each time the reminder fires. `phase` is the phase
 // that is ready and waiting to be started (i.e. the phase completePhase
 // just transitioned into).
-function reminderNotification(phase) {
+function reminderNotification(phase, remainingMs) {
+  var body = "Press Super+Alt+P (or click the bar timer) to start it."
+  if (remainingMs !== undefined) body += " Focus remaining today: " + formatDuration(Math.max(0, _num(remainingMs))) + "."
   return {
     summary: phaseIcon(phase) + " " + phaseLabel(phase) + " ready",
-    body: "Press Super+Alt+P (or click the bar timer) to start it."
+    body: body
   }
 }
 
@@ -143,6 +146,7 @@ function defaultSession() {
     remainingMs: 0,
     elapsedReadyMs: 0,
     completedPomodorosThisSession: 0,
+    focusedMs: 0,
     savedAtMs: 0
   }
 }
@@ -167,6 +171,7 @@ function parseSession(raw) {
       parsed.remainingMs = Math.max(0, _num(s.remainingMs))
       parsed.elapsedReadyMs = Math.max(0, _num(s.elapsedReadyMs))
       parsed.completedPomodorosThisSession = Math.max(0, Math.floor(_num(s.completedPomodorosThisSession)))
+      parsed.focusedMs = Math.max(0, _num(s.focusedMs))
       parsed.savedAtMs = Math.max(0, _num(s.savedAtMs))
     }
   } catch (e) {
@@ -203,6 +208,7 @@ function restoreSession(session, nowMs, config) {
     remainingMs: s.remainingMs,
     elapsedReadyMs: s.elapsedReadyMs,
     completedPomodorosThisSession: s.completedPomodorosThisSession,
+    focusedMs: s.focusedMs,
     savedAtMs: nowMs,
     workCompletedOffline: false
   }
@@ -227,6 +233,7 @@ function restoreSession(session, nowMs, config) {
     out.remainingMs = phaseDurationMs(upcoming, config)
     out.running = false
     out.ready = true
+    out.focusedMs = 0
     // Cap the carried-over "ready" counter to one phase length so a
     // days-long downtime doesn't surface an absurd number in the bar.
     var upcomingMs = phaseDurationMs(upcoming, config)
@@ -255,9 +262,19 @@ function phaseProgress(phase, remainingMs, config) {
 
 function formatRemaining(ms) {
   var totalSeconds = Math.max(0, Math.ceil(ms / 1000))
-  var minutes = Math.floor(totalSeconds / 60)
+  var hours = Math.floor(totalSeconds / 3600)
+  var minutes = Math.floor((totalSeconds % 3600) / 60)
   var seconds = totalSeconds % 60
-  return (minutes < 10 ? "0" : "") + minutes + ":" + (seconds < 10 ? "0" : "") + seconds
+
+  if (hours > 0) {
+    if (minutes > 0) return hours + "h " + minutes + "m"
+    return hours + "h"
+  }
+  if (minutes > 0) {
+    if (seconds > 0 && minutes < 5) return minutes + "m " + seconds + "s"
+    return minutes + "m"
+  }
+  return seconds + "s"
 }
 
 function phaseLabel(phase) {
@@ -360,6 +377,24 @@ function allTimeFocusedMs(stats) {
   for (var i = 0; i < keys.length; i++) total += stats.daily[keys[i]].focusedMs || 0
   return total
 }
+// Returns the remaining focus time for today's configurable goal. The current
+// live WORK segment is supplied separately by the bar widget or CLI.
+function goalRemainingMs(focusedMs, config, currentWorkMs) {
+  var goalMs = Math.max(0, _num(config && config.dailyGoalMinutes)) * 60000
+  var total = Math.max(0, _num(focusedMs)) + Math.max(0, _num(currentWorkMs))
+  return Math.max(0, goalMs - total)
+}
+
+function goalProgress(focusedMs, config, currentWorkMs) {
+  var goalMs = Math.max(0, _num(config && config.dailyGoalMinutes)) * 60000
+  if (!(goalMs > 0)) return 0
+  var total = Math.max(0, _num(focusedMs)) + Math.max(0, _num(currentWorkMs))
+  return Math.max(0, Math.min(1, total / goalMs))
+}
+
+function formatGoalRemaining(ms) {
+  return formatDuration(ms) + " remaining today"
+}
 
 function defaultHistory() {
   return { version: 1, sessions: [] }
@@ -414,6 +449,8 @@ if (typeof module !== "undefined") {
     defaultConfig: defaultConfig,
     defaultStats: defaultStats,
     defaultHistory: defaultHistory,
+    reminderIntervalMs: reminderIntervalMs,
+    reminderNotification: reminderNotification,
     parseConfig: parseConfig,
     parseStats: parseStats,
     parseHistory: parseHistory,
@@ -438,8 +475,9 @@ if (typeof module !== "undefined") {
     rollDailyStats: rollDailyStats,
     weeklyTotals: weeklyTotals,
     allTimeFocusedMs: allTimeFocusedMs,
+    goalRemainingMs: goalRemainingMs,
+    goalProgress: goalProgress,
+    formatGoalRemaining: formatGoalRemaining,
     formatDuration: formatDuration,
-    reminderIntervalMs: reminderIntervalMs,
-    reminderNotification: reminderNotification
   }
 }

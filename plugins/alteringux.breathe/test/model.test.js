@@ -102,6 +102,10 @@ test("Vortex is the descending Fibonacci run and its cycle sums to 32s", () => {
     { state: "RUNNING", techniqueId: "vortex", cycles: 4, savedAtMs: 0, elapsedMs: 31200 }, vortex, 0)
   assert.strictEqual(r.phaseIndex, 10, "31.2s in is inside the last half-second inhale")
   assert.strictEqual(r.phaseKind, Model.PHASE.INHALE)
+  const start = Model.resolve(
+    { state: "RUNNING", techniqueId: "vortex", cycles: 4, savedAtMs: 0, elapsedMs: 0 }, vortex, 0)
+  assert.strictEqual(Model.breathRemainingMs(vortex, start), 13000,
+    "Vortex begins each full-breath countdown at 13 seconds")
 })
 
 // ── the orb-scale envelope ─────────────────────────────────────────────────

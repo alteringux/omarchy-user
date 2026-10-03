@@ -3,13 +3,63 @@
 // owns all the I/O (reading .ics files, writing the state file, firing
 // notify-send).
 //
-// v1 limitations, deliberately:
-//   - RRULE is NOT expanded. Recurring events are flagged (`recurring: true`)
-//     off their master VEVENT but only that first instance is considered.
-//   - TZID / floating times are treated as local wall-clock. Only trailing-Z
-//     (UTC) and VALUE=DATE are handled precisely.
-//   - DURATION is honored for the end time, but year/month components are
-//     rejected (they have no fixed length in seconds).
+// RRULE recurrence is expanded for the supported RFC 5545 frequencies when
+// computing an agenda. TZID values are resolved with the platform IANA data;
+// floating times retain the host's local-wall-clock semantics.
+// DURATION is honored for the end time, but year/month components are rejected
+// (they have no fixed length in seconds).
+
+// Resolve a wall-clock date in an explicit IANA timezone without depending on
+// the process timezone. The short fixed-point iteration handles DST offsets.
+function epochForWall(y, mo, d, hh, mi, ss, tzid) {
+  if (!tzid) return Math.floor(new Date(y, mo - 1, d, hh, mi, ss).getTime() / 1000)
+  if (/^(UTC|GMT)$/i.test(String(tzid))) return Math.floor(Date.UTC(y, mo - 1, d, hh, mi, ss) / 1000)
+  var target = Date.UTC(y, mo - 1, d, hh, mi, ss)
+  var guess = target
+  try {
+    var fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: String(tzid),
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23"
+    })
+    for (var i = 0; i < 3; i++) {
+      var parts = {}
+      fmt.formatToParts(new Date(guess)).forEach(function (p) { parts[p.type] = +p.value })
+      var wall = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second)
+      guess += target - wall
+    }
+    return Math.floor(guess / 1000)
+  } catch (e) {
+    // A missing/invalid TZID must not change with the machine's local TZ.
+    return Math.floor(target / 1000)
+  }
+}
+
+function parseWallDate(rawValue) {
+  var m = String(rawValue || "").trim().match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/)
+  if (!m) return null
+  return {
+    y: +m[1], mo: +m[2], d: +m[3],
+    hh: +(m[4] || 0), mi: +(m[5] || 0), ss: +(m[6] || 0),
+    utc: m[7] === "Z", dateOnly: !m[4]
+  }
+}
+
+// Returns { epoch, allDay } in whole seconds, or null if unparseable.
+function parseIcsDate(rawValue, params) {
+  var wall = parseWallDate(rawValue)
+  if (!wall) return null
+  var p = params || {}
+  var dateOnly = String(p.VALUE || "").toUpperCase() === "DATE" || wall.dateOnly
+  var hour = dateOnly ? 0 : wall.hh
+  var minute = dateOnly ? 0 : wall.mi
+  var second = dateOnly ? 0 : wall.ss
+  var epoch = wall.utc
+    ? Math.floor(Date.UTC(wall.y, wall.mo - 1, wall.d, hour, minute, second) / 1000)
+    : epochForWall(wall.y, wall.mo, wall.d, hour, minute, second, p.TZID)
+  return { epoch: epoch, allDay: dateOnly }
+}
 
 function defaultConfig() {
   return {
@@ -81,28 +131,6 @@ function unescapeText(value) {
   })
 }
 
-// Returns { epoch, allDay } in whole seconds, or null if unparseable.
-function parseIcsDate(rawValue, params) {
-  var v = String(rawValue || "").trim()
-  var m = v.match(/^(\d{4})(\d{2})(\d{2})(?:T(\d{2})(\d{2})(\d{2})(Z)?)?$/)
-  if (!m) return null
-
-  var y = +m[1], mo = +m[2], d = +m[3]
-  var hh = +(m[4] || 0), mi = +(m[5] || 0), ss = +(m[6] || 0)
-  var isUtc = m[7] === "Z"
-  var dateOnly = (params && String(params.VALUE).toUpperCase() === "DATE") || !m[4]
-
-  var epoch
-  if (dateOnly) {
-    epoch = Math.floor(new Date(y, mo - 1, d, 0, 0, 0).getTime() / 1000)
-  } else if (isUtc) {
-    epoch = Math.floor(Date.UTC(y, mo - 1, d, hh, mi, ss) / 1000)
-  } else {
-    // Floating time or TZID we don't resolve: treat as local wall-clock.
-    epoch = Math.floor(new Date(y, mo - 1, d, hh, mi, ss).getTime() / 1000)
-  }
-  return { epoch: epoch, allDay: dateOnly }
-}
 
 // RFC 5545 dur-value, e.g. "PT90M", "P1DT12H", "P2W". Returns whole seconds
 // (signed), or null if unparseable. Year/month components have no fixed
@@ -126,9 +154,131 @@ function parseIcsDuration(rawValue) {
   return sign * total
 }
 
+function parseRecurrenceRule(rawValue, tzid) {
+  var out = { freq: "", interval: 1, count: 0, until: 0, byday: [], bymonthday: [], bymonth: [] }
+  String(rawValue || "").split(";").forEach(function (part) {
+    var bits = part.split("=")
+    if (bits.length < 2) return
+    var key = bits[0].toUpperCase()
+    var value = bits.slice(1).join("=").toUpperCase()
+    if (key === "FREQ") out.freq = value
+    else if (key === "INTERVAL" && +value > 0) out.interval = Math.floor(+value)
+    else if (key === "COUNT" && +value > 0) out.count = Math.floor(+value)
+    else if (key === "UNTIL") {
+      var untilWall = parseWallDate(value)
+      var parsed = parseIcsDate(value, { TZID: tzid })
+      if (parsed) {
+        if (untilWall && untilWall.dateOnly) {
+          var next = addUtcDays(Date.UTC(untilWall.y, untilWall.mo - 1, untilWall.d), 1)
+          out.until = epochForWall(next.getUTCFullYear(), next.getUTCMonth() + 1, next.getUTCDate(), 0, 0, 0, tzid) - 1
+        } else {
+          out.until = parsed.epoch
+        }
+      }
+    } else if (key === "BYDAY") {
+      out.byday = value.split(",").map(function (d) {
+        var m = d.match(/([+-]?\d+)?(SU|MO|TU|WE|TH|FR|SA)$/)
+        return m ? ["SU", "MO", "TU", "WE", "TH", "FR", "SA"].indexOf(m[2]) : -1
+      }).filter(function (d) { return d >= 0 })
+    } else if (key === "BYMONTHDAY") {
+      out.bymonthday = value.split(",").map(Number).filter(function (d) { return d >= 1 && d <= 31 })
+    } else if (key === "BYMONTH") {
+      out.bymonth = value.split(",").map(Number).filter(function (m) { return m >= 1 && m <= 12 })
+    }
+  })
+  return out.freq ? out : null
+}
+
+function datePartsFromRaw(rawValue) {
+  var p = parseWallDate(rawValue)
+  return p && { y: p.y, mo: p.mo, d: p.d, hh: p.hh, mi: p.mi, ss: p.ss }
+}
+
+function addUtcDays(epochMs, days) {
+  return new Date(epochMs + days * 86400000)
+}
+
+function occurrenceEpoch(date, tzid) {
+  return epochForWall(date.y, date.mo, date.d, date.hh, date.mi, date.ss, tzid)
+}
+
+function makeOccurrence(event, start) {
+  var copy = {}
+  Object.keys(event).forEach(function (key) { copy[key] = event[key] })
+  copy.start = start
+  copy.end = start + (event.end - event.start)
+  return copy
+}
+
+function expandRecurrence(event, rawRule, tzid, rawStart, options) {
+  if (!options || typeof options.nowEpoch !== "number") return [event]
+  var rule = parseRecurrenceRule(rawRule, tzid)
+  var base = datePartsFromRaw(rawStart)
+  if (!rule || !base) return [event]
+  if (!["DAILY", "WEEKLY", "MONTHLY", "YEARLY"].includes(rule.freq)) return [event]
+  var horizon = options.nowEpoch + 366 * 86400
+  var results = []
+  var seen = {}
+  var generated = 0
+  var period = 0
+  var stopped = false
+  var weekday = new Date(Date.UTC(base.y, base.mo - 1, base.d)).getUTCDay()
+  var byday = rule.byday.length ? rule.byday : [weekday]
+
+  while (!stopped && period < 10000) {
+    var candidates = []
+    if (rule.freq === "DAILY") {
+      var daily = addUtcDays(Date.UTC(base.y, base.mo - 1, base.d), period * rule.interval)
+      candidates.push({ y: daily.getUTCFullYear(), mo: daily.getUTCMonth() + 1, d: daily.getUTCDate(), hh: base.hh, mi: base.mi, ss: base.ss })
+    } else if (rule.freq === "WEEKLY") {
+      var week = addUtcDays(Date.UTC(base.y, base.mo - 1, base.d), -weekday + period * rule.interval * 7)
+      byday.forEach(function (day) {
+        var date = addUtcDays(week.getTime(), day)
+        candidates.push({ y: date.getUTCFullYear(), mo: date.getUTCMonth() + 1, d: date.getUTCDate(), hh: base.hh, mi: base.mi, ss: base.ss })
+      })
+    } else if (rule.freq === "MONTHLY") {
+      var month = new Date(Date.UTC(base.y, base.mo - 1 + period * rule.interval, 1))
+      var days = rule.bymonthday.length ? rule.bymonthday : [base.d]
+      days.forEach(function (day) {
+        var date = new Date(Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), day))
+        if (date.getUTCMonth() === month.getUTCMonth() && date.getUTCDate() === day) {
+          candidates.push({ y: date.getUTCFullYear(), mo: date.getUTCMonth() + 1, d: day, hh: base.hh, mi: base.mi, ss: base.ss })
+        }
+      })
+    } else if (rule.freq === "YEARLY") {
+      var year = base.y + period * rule.interval
+      var months = rule.bymonth || [base.mo]
+      var yearDays = rule.bymonthday.length ? rule.bymonthday : [base.d]
+      months.forEach(function (monthNumber) {
+        yearDays.forEach(function (day) {
+          var date = new Date(Date.UTC(year, monthNumber - 1, day))
+          if (date.getUTCMonth() === monthNumber - 1 && date.getUTCDate() === day) {
+            candidates.push({ y: year, mo: monthNumber, d: day, hh: base.hh, mi: base.mi, ss: base.ss })
+          }
+        })
+      })
+    } else {
+      return [event]
+    }
+    candidates.sort(function (a, b) { return occurrenceEpoch(a, tzid) - occurrenceEpoch(b, tzid) })
+    for (var i = 0; i < candidates.length; i++) {
+      var start = occurrenceEpoch(candidates[i], tzid)
+      if (start < event.start || seen[start]) continue
+      seen[start] = true
+      if (rule.until && start > rule.until) { stopped = true; break }
+      generated++
+      if (rule.count && generated > rule.count) { stopped = true; break }
+      if (start > horizon) { stopped = true; break }
+      results.push(makeOccurrence(event, start))
+    }
+    period++
+  }
+  return results.length ? results : [event]
+}
+
 // Parse every VEVENT out of one .ics blob (which may itself be several
 // concatenated calendars). Returns an array of normalized event objects.
-function parseEvents(icsText) {
+function parseEvents(icsText, options) {
   var lines = unfoldLines(icsText)
   var events = []
   var cur = null
@@ -138,14 +288,15 @@ function parseEvents(icsText) {
     var line = lines[i]
     if (line === "BEGIN:VEVENT") { cur = { recurring: false }; inAlarm = false; continue }
     if (line === "END:VEVENT") {
-      if (cur && typeof cur.start === "number") events.push(finalizeEvent(cur))
+      if (cur && typeof cur.start === "number") {
+        var event = finalizeEvent(cur)
+        events = events.concat(cur.rrule ? expandRecurrence(event, cur.rrule, cur.tzid, cur.startRaw, options) : [event])
+      }
       cur = null
       inAlarm = false
       continue
     }
     if (!cur) continue
-    // VALARM is a VEVENT sub-component with its own SUMMARY/DESCRIPTION/
-    // LOCATION-like properties; skip it so it can't clobber the event.
     if (line === "BEGIN:VALARM") { inAlarm = true; continue }
     if (line === "END:VALARM") { inAlarm = false; continue }
     if (inAlarm) continue
@@ -156,10 +307,15 @@ function parseEvents(icsText) {
       case "SUMMARY": cur.summary = unescapeText(p.value); break
       case "LOCATION": cur.location = unescapeText(p.value); break
       case "STATUS": cur.status = p.value.trim().toUpperCase(); break
-      case "RRULE": cur.recurring = true; break
+      case "RRULE": cur.recurring = true; cur.rrule = p.value.trim(); break
       case "DTSTART": {
         var s = parseIcsDate(p.value, p.params)
-        if (s) { cur.start = s.epoch; cur.allDay = s.allDay }
+        if (s) {
+          cur.start = s.epoch
+          cur.allDay = s.allDay
+          cur.startRaw = p.value
+          cur.tzid = p.params.TZID || (/[Z]$/.test(p.value.trim()) ? "UTC" : "")
+        }
         break
       }
       case "DTEND": {
@@ -217,7 +373,7 @@ function computeAgenda(icsTexts, nowEpoch, opts) {
   var all = []
   var texts = Array.isArray(icsTexts) ? icsTexts : [icsTexts]
   for (var i = 0; i < texts.length; i++) {
-    all = all.concat(parseEvents(texts[i]))
+    all = all.concat(parseEvents(texts[i], { nowEpoch: nowEpoch }))
   }
 
   all.sort(function (a, b) { return a.start - b.start })

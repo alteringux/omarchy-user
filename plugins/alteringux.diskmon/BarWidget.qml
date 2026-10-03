@@ -20,6 +20,10 @@ BarWidget {
   readonly property var guard: Kit.BugGuard.create("alteringux.diskmon", function (argv) { Quickshell.execDetached(argv) })
 
   readonly property var stat: stateLoaded ? root.state : Model.defaultState()
+  // Date.now() is not itself reactive. Keep a small wall-clock tick so a
+  // stalled sampler eventually changes the stale indicator without waiting
+  // for another state-file write.
+  property double nowMs: Date.now()
   readonly property string glyph: "" // nf-fa-hdd_o
 
   readonly property string displayText: stateLoaded
@@ -30,7 +34,7 @@ BarWidget {
   readonly property bool warn: level === "warning"
   readonly property bool crit: level === "critical"
 
-  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, root.nowMs, root.sampleIntervalMs * 3)
 
   readonly property string tooltipText: stateLoaded
     ? "DISK " + Model.formatPct(root.stat.primary.pct)
@@ -41,13 +45,13 @@ BarWidget {
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-diskmon"
   // Disk usage moves slowly; sampling every 30s is plenty and keeps df calls
   // (and the resulting flash-storage wear) low compared to cpumon's 2s.
-  readonly property int sampleIntervalMs: 30000
+  readonly property int sampleIntervalMs: 60000
 
   Kit.Store {
     id: stateStore
     fileName: "diskmon-state.json"
     watch: true
-    pollMs: 5000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -59,6 +63,13 @@ BarWidget {
       sampleProc.command = [root.scriptPath, "sample"]
       sampleProc.running = true
     })
+  }
+
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    onTriggered: root.nowMs = Date.now()
   }
 
   Timer {

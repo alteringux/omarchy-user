@@ -37,6 +37,8 @@ CONFIG_FILE="$STATE_DIR/breathe-config.json"
 SESSION_FILE="$STATE_DIR/breathe-session.json"
 STATS_FILE="$STATE_DIR/breathe-stats.json"
 HISTORY_FILE="$STATE_DIR/breathe-history.json"
+LOCK_FILE="$STATE_DIR/breathe.lock"
+DAEMON_LOCK_FILE="$STATE_DIR/breathe-daemon.lock"
 UNIT="omarchy-breathe"
 
 DAILY_HISTORY_DAYS=90
@@ -412,6 +414,27 @@ read -r -d '' BUILTIN_TECHNIQUES <<'CATALOGUE_JSON' || true
 ]
 CATALOGUE_JSON
 
+
+# A command may be launched by both the bar and a keybind at once. Keep the
+# whole read/modify/write transaction under one lock; locking only the final
+# rename still lets a stale reader erase fields written by its sibling.
+run_locked() {
+  (
+    flock 9
+    "$@"
+  ) 9>"$LOCK_FILE"
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1 && return 0
+  local tmp="$CONFIG_FILE.tmp.$$"
+  if printf '%s' "$DEFAULT_CONFIG" | jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$CONFIG_FILE"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
 mkdir -p "$STATE_DIR"
 
 now_ms()       { date +%s%3N; }
@@ -450,11 +473,7 @@ def resolve($elapsed; $cycles):
 '
 
 # ── readers ───────────────────────────────────────────────────────────
-seed_config() {
-  [ -f "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1 && return 0
-  printf '%s' "$DEFAULT_CONFIG" | jq . > "$CONFIG_FILE"
-}
-read_config()  { seed_config; jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"; }
+read_config()  { jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"; }
 read_session() { { [ -f "$SESSION_FILE" ] && jq -e . "$SESSION_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_SESSION"; }
 read_stats()   { { [ -f "$STATS_FILE" ]   && jq -e . "$STATS_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATS"; }
 read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
@@ -965,7 +984,15 @@ cmd_status() {
 # pause or stop is still noticed promptly. Bellows' one-second phases are why
 # the cap is sub-second rather than pomodoro's flat 1s poll.
 run_loop() {
+  # A restore, keybind, or systemd retry can launch more than one daemon.
+  # Keep one owner for the lifetime of the loop; per-tick state locking alone
+  # still lets duplicate owners emit the same cue.
+  exec 8>"$DAEMON_LOCK_FILE"
+  flock -n 8 || return 0
+  exec 9>"$LOCK_FILE"
+  flock 9
   do_restore
+  flock -u 9
 
   local sess technique state cycles
   sess="$(read_session)"
@@ -1007,16 +1034,17 @@ run_loop() {
   local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf cue_pid=""
 
   while :; do
+    flock 9
     # One jq call per tick, reading every field at once.
     IFS=$'\t' read -r state base saved cycles loopf < <(
       jq -r '[(.state // "IDLE"), (.elapsedMs // 0 | floor), (.savedAtMs // 0 | floor), (.cycles // 0 | floor), (if (.loop // false) then "loop" else "once" end)] | @tsv' \
         "$SESSION_FILE" 2>/dev/null
-    ) || break
-    [ -n "$state" ] || break
+    ) || { flock -u 9; break; }
+    [ -n "$state" ] || { flock -u 9; break; }
 
     case "$state" in
-      IDLE|DONE) break ;;
-      PAUSED) sleep 0.4; continue ;;
+      IDLE|DONE) flock -u 9; break ;;
+      PAUSED) flock -u 9; sleep 0.4; continue ;;
     esac
 
     now="$(now_ms)"
@@ -1032,9 +1060,11 @@ run_loop() {
         roll_session
         last_index=-1
         hb=0
+        flock -u 9
         continue
       fi
       finish_session true
+      flock -u 9
       break
     fi
 
@@ -1049,7 +1079,7 @@ run_loop() {
     # A monotonically increasing index, so a boundary is simply a change and
     # each cue fires exactly once even across a cycle wrap.
     index=$(( (elapsed / cycle_ms) * phase_count + idx ))
-    if (( last_index >= 0 && index != last_index )) && [ "$silent" != "true" ] \
+    if (( index != last_index )) && [ "$silent" != "true" ] \
        && [ "${OMARCHY_BREATHE_QUIET:-0}" != 1 ]; then
       # One blip at a time: stop any still-running previous cue before the next
       # so a slow player or a short phase can never stack them into a stutter.
@@ -1068,11 +1098,29 @@ run_loop() {
     wait_ms=$(( acc + phase_ms[idx] - into ))
     (( wait_ms > 500 )) && wait_ms=500
     (( wait_ms < 40 )) && wait_ms=40
+    flock -u 9
     sleep "$(printf '%d.%03d' $(( wait_ms / 1000 )) $(( wait_ms % 1000 )))"
   done
 }
 
-seed_config
+if [ "${OMARCHY_BREATHE_LOCKED:-0}" != 1 ]; then
+  case "${1:-get}" in
+    start|toggle|pause|resume|skip|loop|stop|reset|restore)
+      exec env OMARCHY_BREATHE_LOCKED=1 flock -x "$LOCK_FILE" "$0" "$@"
+      ;;
+  esac
+fi
+
+if [ "${OMARCHY_BREATHE_LOCKED:-0}" = 1 ]; then
+  seed_config
+else
+  run_locked seed_config
+fi
+
+cmd_stop() {
+  finish_session true
+  cmd_status
+}
 
 case "${1:-get}" in
   __run)           run_loop ;;
@@ -1084,7 +1132,7 @@ case "${1:-get}" in
   resume)          cmd_resume ;;
   skip)            cmd_skip ;;
   loop)            cmd_loop ;;
-  stop)            finish_session true; cmd_status ;;
+  stop)            cmd_stop ;;
   reset)           cmd_reset ;;
   restore)         restore_and_ensure ;;
   techniques)      read_techniques ;;

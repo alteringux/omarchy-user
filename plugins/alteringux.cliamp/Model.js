@@ -18,6 +18,40 @@
 // throwing.
 
 var BAND_COUNT = 10
+var SIMPLE_VERBS = ["play", "pause", "toggle", "next", "prev", "stop", "shuffle", "repeat"]
+
+// Normalize the small command surface exposed by the widget into argv. IPC
+// callers can supply the visualizer name, so never pass arbitrary arguments
+// through to cliamp (even though execDetached does not invoke a shell).
+function safeVerbArgs(args) {
+  if (!Array.isArray(args) || args.length === 0 || typeof args[0] !== "string") return null
+
+  var verb = args[0]
+  if (SIMPLE_VERBS.indexOf(verb) !== -1) return args.length === 1 ? [verb] : null
+
+  if (verb === "seek") {
+    if (args.length !== 2 || typeof args[1] !== "string" || !/^(0|[1-9][0-9]*)$/.test(args[1])) return null
+    var seconds = Number(args[1])
+    return isFinite(seconds) && seconds <= 2147483647 ? [verb, args[1]] : null
+  }
+
+  if (verb === "volume") {
+    if (args.length !== 2 || typeof args[1] !== "string" || !/^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/.test(args[1])) return null
+    var db = Number(args[1])
+    return isFinite(db) && Math.abs(db) <= 100 ? [verb, args[1]] : null
+  }
+
+  if (verb === "vis") {
+    var name = args[1]
+    if (args.length !== 2 || typeof name !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name) ||
+        name === "list" || name === "next") return null
+    return [verb, name]
+  }
+
+  return null
+}
+
 
 function emptyStatus() {
   return {
@@ -166,6 +200,7 @@ var api = {
   parseBands: parseBands,
   idleBands: idleBands,
   progressFraction: progressFraction,
+  safeVerbArgs: safeVerbArgs,
   formatTime: formatTime,
   barLabel: barLabel,
   stateMeta: stateMeta

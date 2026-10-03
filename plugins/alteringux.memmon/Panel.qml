@@ -21,11 +21,13 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
   readonly property var barIdentity: hostWidget || root
+  readonly property double nowMs: hostWidget && hostWidget.nowMs !== undefined ? hostWidget.nowMs : Date.now()
 
   readonly property var stat: (hostWidget && hostWidget.stat) ? hostWidget.stat : Model.defaultState()
-  readonly property var history: stat.history || []
-  readonly property var spark: Model.sparkline(root.history, "mem", 120, 100)
-  readonly property var stats: Model.historyStats(root.history, "mem")
+  readonly property var history: stat && Array.isArray(stat.history) ? stat.history : []
+  readonly property int trendWindowMs: 10 * 60 * 1000
+  readonly property var spark: Model.sparkline(root.history, "mem", 0, 100, root.nowMs, root.trendWindowMs)
+  readonly property var stats: Model.historyStats(root.history, "mem", root.nowMs, root.trendWindowMs)
 
   property var topRows: []
 
@@ -103,7 +105,7 @@ Panel {
             glyph: "󰍛"
             title: "Memory"
             meta: root.stat.updatedAt > 0
-              ? "UPDATED " + Math.max(0, Math.round((Date.now() - root.stat.updatedAt) / 1000)) + "S AGO"
+              ? "UPDATED " + Math.max(0, Math.round((root.nowMs - root.stat.updatedAt) / 1000)) + "S AGO"
               : "NO DATA YET"
             foreground: root.barForeground
           }
@@ -247,7 +249,7 @@ Panel {
                 Item { width: parent.width - x - memv.width; height: 1 }
                 Text {
                   id: memv
-                  text: (modelData.mem !== undefined ? modelData.mem.toFixed(1) : "0.0") + "%"
+                  text: (modelData.mem != null ? modelData.mem.toFixed(1) : "0.0") + "%"
                   color: Qt.darker(root.barForeground, 1.3)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall

@@ -209,6 +209,16 @@ test("parseConfig clamps hostile hand-edits", () => {
   assert.equal(c.ratesRingSize, 10)
 })
 
+test("sample cadence honors valid values and falls back for malformed numerics", () => {
+  assert.equal(Model.sampleIntervalMs({ sampleIntervalSec: 7.5 }), 7500)
+  assert.equal(Model.sampleIntervalMs({ sampleIntervalSec: 0 }), 1000)
+  assert.equal(Model.sampleIntervalMs({ sampleIntervalSec: -4 }), 1000)
+  for (const value of [null, true, false, "", "   ", "not-a-number", [], {}, Infinity]) {
+    assert.equal(Model.parseConfig({ sampleIntervalSec: value }).sampleIntervalSec, 20)
+    assert.equal(Model.sampleIntervalMs({ sampleIntervalSec: value }), 20000)
+  }
+})
+
 test("parseState degrades a corrupt file to defaults rather than throwing", () => {
   const s = Model.parseState("{not json")
   assert.deepEqual(s, Model.defaultState())

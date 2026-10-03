@@ -26,6 +26,22 @@ CRUMB_MAX_AGE=21600 # 6h — the crumb rides on the cookie, not the clock, but
                      # refreshing it occasionally is cheap insurance
 mkdir -p "$STATE_DIR"
 
+# Multiple bar instances can refresh at the same time. Serialize the complete
+# fetch/merge/write transaction so a slower request cannot overwrite newer
+# quotes with an older snapshot.
+LOCK_FILE="$STATE_DIR/.stocks-refresh.lock"
+exec 9>"$LOCK_FILE"
+flock -n 9 || exit 0
+
+previous_state='{}'
+if [[ -s "$STATE_FILE" ]]; then
+  previous_state=$(jq -c 'if type == "object" then . else {} end' "$STATE_FILE" 2>/dev/null || echo '{}')
+fi
+
+provider_error=""
+quotes_ok=false
+trending_ok=false
+
 UA="Mozilla/5.0 (X11; Linux x86_64) omarchy-stocks-refresh"
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
@@ -99,35 +115,60 @@ SCREENER_PICK='[.finance.result[0].quotes[]? | {
 fetch_region_side() {
   local direction="$1" region="$2" raw parsed
   raw=$(fetch_movers "$direction" "$region")
-  [[ -z "$raw" ]] && { echo "[]"; return; }
+  [[ -z "$raw" ]] && { echo "[]"; return 1; }
   if [[ "$raw" == *"Invalid Crumb"* ]]; then
     rm -f "$CRUMB_FILE"
-    ensure_crumb || { echo "[]"; return; }
+    ensure_crumb || { echo "[]"; return 1; }
     raw=$(fetch_movers "$direction" "$region")
-    [[ -z "$raw" ]] && { echo "[]"; return; }
+    [[ -z "$raw" ]] && { echo "[]"; return 1; }
   fi
-  parsed=$(echo "$raw" | jq -c "$SCREENER_PICK" 2>/dev/null) || parsed="[]"
-  echo "${parsed:-[]}"
+  if ! jq -e '(.finance.result | type == "array") and (.finance.result[0].quotes | type == "array")' <<<"$raw" >/dev/null 2>&1; then
+    echo "[]"
+    return 1
+  fi
+  parsed=$(echo "$raw" | jq -c "$SCREENER_PICK" 2>/dev/null) || parsed=""
+  [[ -z "$parsed" ]] && { echo "[]"; return 1; }
+  echo "$parsed"
+  return 0
 }
 
 # --------------------------------------------------------------- movers
-ensure_crumb || true # best-effort: fetch_region_side degrades to [] per region on failure
+ensure_crumb || true # best-effort: fetch_region_side reports the failure
 
 gainers_json="[]"
 losers_json="[]"
+gainers_ok_count=0
+losers_ok_count=0
 if [[ -s "$CRUMB_FILE" ]]; then
   gainers_parts=()
   losers_parts=()
   for region in "${REGIONS[@]}"; do
-    gainers_parts+=("$(fetch_region_side gainers "$region")")
-    losers_parts+=("$(fetch_region_side losers "$region")")
+    if part=$(fetch_region_side gainers "$region"); then
+      gainers_parts+=("$part")
+      gainers_ok_count=$((gainers_ok_count + 1))
+    else
+      gainers_parts+=("[]")
+    fi
+    if part=$(fetch_region_side losers "$region"); then
+      losers_parts+=("$part")
+      losers_ok_count=$((losers_ok_count + 1))
+    else
+      losers_parts+=("[]")
+    fi
   done
   # Merge all regions, dedup by symbol (cross-listed instruments), re-sort
   # globally by %change, cap at 10.
   gainers_json=$(printf '%s\n' "${gainers_parts[@]}" | jq -cs '
-    add | unique_by(.symbol) | sort_by(-.regularMarketChangePercent) | .[:10]' 2>/dev/null) || gainers_json="[]"
+    add | unique_by(.symbol) | sort_by(-.regularMarketChangePercent) | .[:10]' 2>/dev/null) || gainers_json=""
   losers_json=$(printf '%s\n' "${losers_parts[@]}" | jq -cs '
-    add | unique_by(.symbol) | sort_by(.regularMarketChangePercent) | .[:10]' 2>/dev/null) || losers_json="[]"
+    add | unique_by(.symbol) | sort_by(.regularMarketChangePercent) | .[:10]' 2>/dev/null) || losers_json=""
+  if [[ "$gainers_ok_count" -eq "${#REGIONS[@]}" && "$losers_ok_count" -eq "${#REGIONS[@]}" && -n "$gainers_json" && -n "$losers_json" ]]; then
+    quotes_ok=true
+  else
+    provider_error="Yahoo Finance movers unavailable"
+  fi
+else
+  provider_error="Yahoo Finance movers unavailable"
 fi
 [[ -z "$gainers_json" ]] && gainers_json="[]"
 [[ -z "$losers_json" ]] && losers_json="[]"
@@ -135,7 +176,22 @@ fi
 # -------------------------------------------------------------- trending
 trending_json="null"
 raw=$(fetch "https://query1.finance.yahoo.com/v1/finance/trending/US")
-[[ -n "$raw" ]] && trending_json=$(echo "$raw" | jq -c '.' 2>/dev/null) || trending_json="null"
+if [[ -n "$raw" ]] && jq -e '(.finance.result | type == "array") and (.finance.result[0].quotes | type == "array")' <<<"$raw" >/dev/null 2>&1; then
+  trending_json=$(echo "$raw" | jq -c '.' 2>/dev/null) || trending_json="null"
+  [[ "$trending_json" != "null" ]] && trending_ok=true
+fi
+if ! "$trending_ok"; then
+  [[ -n "$provider_error" ]] && provider_error+="; "
+  provider_error+="Yahoo Finance trending unavailable"
+fi
+
+provider_status="ok"
+if ! "$quotes_ok"; then
+  provider_status="error"
+elif ! "$trending_ok"; then
+  provider_status="degraded"
+fi
+
 
 # ------------------------------------------------------- write atomically
 tmp=$(mktemp "${STATE_FILE}.XXXXXX")
@@ -147,12 +203,27 @@ trap 'rm -f "$tmp"' EXIT
 OMARCHY_PLUGIN_ID="alteringux.stocks"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
 
+now="$(now_iso)"
 jq -cn \
+  --argjson previous "$previous_state" \
   --argjson gainers "$gainers_json" \
   --argjson losers "$losers_json" \
   --argjson trending "$trending_json" \
-  --arg now "$(now_iso)" \
-  '{version: 1, updatedAt: $now, gainers: $gainers, losers: $losers, trending: $trending}' \
+  --argjson quotesOk "$quotes_ok" \
+  --argjson trendingOk "$trending_ok" \
+  --arg now "$now" \
+  --arg status "$provider_status" \
+  --arg error "$provider_error" \
+  '($previous
+   | .version = 1
+   | .updatedAt = (if $quotesOk then $now else (.updatedAt // null) end)
+   | .gainers = (if $quotesOk then $gainers else (.gainers // []) end)
+   | .losers = (if $quotesOk then $losers else (.losers // []) end)
+   | .trending = (if $trendingOk then $trending else (.trending // []) end)
+   | .stale = (if $quotesOk then false else true end)
+   | .providerStatus = $status
+   | .providerError = (if $error == "" then null else $error end)
+   | .checkedAt = $now)' \
   > "$tmp" && mv "$tmp" "$STATE_FILE"
 
 # ---- alteringux.pulse: flag the single biggest global mover, once per ticker/day ----

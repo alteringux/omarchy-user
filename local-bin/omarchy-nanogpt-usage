@@ -24,6 +24,7 @@ Exit:  0 ok | 3 no API key | 4 fetch/parse failed
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -80,7 +81,8 @@ def get_json(path: str, key: str) -> dict:
 
 def num(v) -> float:
     try:
-        return float(v or 0)
+        value = float(v or 0)
+        return value if math.isfinite(value) else 0.0
     except (TypeError, ValueError):
         return 0.0
 
@@ -236,9 +238,9 @@ def main() -> int:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=STATE_DIR, prefix=".nanogpt-usage.", suffix=".json")
         with os.fdopen(fd, "w") as fh:
-            json.dump(state, fh, separators=(",", ":"))
+            json.dump(state, fh, separators=(",", ":"), allow_nan=False)
         os.replace(tmp, STATE_FILE)
-    except OSError as e:
+    except (OSError, TypeError, ValueError) as e:
         eprint(f"omarchy-nanogpt-usage: write failed: {e}")
         return 4
 

@@ -38,14 +38,14 @@
 #                                                 4 total) distractors from other cards,
 #                                                 shuffled — JSON {options, correctIndex}
 #   omarchy-recall seed-trivia                   add the built-in curated trivia
-#                                                 set (offline, no Featherless) —
+#                                                 set (offline, no NanoGPT) —
 #                                                 safe to re-run, skips duplicates
-#   omarchy-recall generate-trivia <n> [--category X]   Featherless-generated
+#   omarchy-recall generate-trivia <n> [--category X]   NanoGPT-generated
 #                                                 trivia cards via llm-blurb
-#   omarchy-recall generate-vocab <n>            Featherless-generated English
+#   omarchy-recall generate-vocab <n>            NanoGPT-generated English
 #                                                 vocabulary cards (word / definition
 #                                                 + example), skips words already in deck
-#   omarchy-recall generate-technique <n>        Featherless-generated memory/study
+#   omarchy-recall generate-technique <n>        NanoGPT-generated memory/study
 #                                                 technique lessons (title + 4 slides),
 #                                                 skips titles already taught
 #   omarchy-recall refresh-content [v] [t] [k]   run all three generators at once —
@@ -348,15 +348,34 @@ cmd_generate_trivia() {
       *) shift ;;
     esac
   done
-  have llm-blurb || die "llm-blurb not found on PATH (Featherless helper)"
+  have llm-blurb || die "llm-blurb not found on PATH (NanoGPT helper)"
 
-  local prompt raw items
+  local prompt raw items cards_json
   prompt="Generate $n trivia question/answer pairs about $category. Prefer interesting, non-obvious facts over common knowledge. Answers must be concise (under 15 words). Return ONLY a JSON object of the shape {\"items\":[{\"q\":\"...\",\"a\":\"...\"}]} with exactly $n items, nothing else."
   raw="$(llm-blurb --json --max-tokens 1500 "$prompt")" || die "llm-blurb failed"
-  items="$(jq -c '[.items[]? | {front:.q, back:.a, category:"trivia"}]' <<<"$raw" 2>/dev/null)" || die "could not parse trivia JSON from model"
-  [ "$items" != "[]" ] && [ -n "$items" ] || die "model returned no usable trivia items"
+  cards_json="$(read_cards)"
+  items="$(jq -c --argjson cards "$cards_json" '
+    def clean: gsub("^\\s+|\\s+$"; "");
+    def norm: clean | ascii_downcase;
+    [
+      .items[]?
+      | select(type == "object")
+      | select((.q | type) == "string" and (.a | type) == "string")
+      | {front: (.q | clean), back: (.a | clean), category: "trivia"}
+      | select((.front | length) > 0 and (.back | length) > 0)
+      | select(
+          (.front | norm) as $key
+          | ([$cards.cards[]? | select(.kind == "quiz" and .category == "trivia" and (.front | type) == "string") | .front | norm] | index($key)) == null
+        )
+    ]
+    | unique_by(.front | norm)
+  ' <<<"$raw" 2>/dev/null)" || die "could not parse trivia JSON from model"
 
-  jq -n --argjson cards "$(read_cards)" --argjson items "$items" --argjson now "$(now_ms)" --arg prefix "t$(now_ms)-" \
+  if [ "$(jq 'length' <<<"$items")" -eq 0 ]; then
+    echo "generated 0 trivia cards ($category)"
+    return 0
+  fi
+  jq -n --argjson cards "$cards_json" --argjson items "$items" --argjson now "$(now_ms)" --arg prefix "t$(now_ms)-" \
         '{cards:$cards.cards, items:$items, now:$now, idPrefix:$prefix}' \
     | engine add-quiz-batch | jq '{version:1, cards:.cards}' | put_cards
   echo "generated $(jq 'length' <<<"$items") trivia cards ($category)"
@@ -364,19 +383,38 @@ cmd_generate_trivia() {
 
 cmd_generate_vocab() {
   local n="${1:-3}"
-  have llm-blurb || die "llm-blurb not found on PATH (Featherless helper)"
+  have llm-blurb || die "llm-blurb not found on PATH (NanoGPT helper)"
 
-  local existing exclude_clause=""
-  existing="$(jq -r '[.cards[]? | select(.category=="vocabulary") | .front] | join(", ")' <<<"$(read_cards)")"
-  [ -n "$existing" ] && exclude_clause=" Do not repeat any of these words already taught: $existing."
-
-  local prompt raw items
-  prompt="Pick $n English vocabulary words worth teaching an adult who already speaks English fluently but wants a richer, more precise vocabulary. Prefer useful, interesting words of moderate-to-advanced difficulty — not painfully obscure, not trivially common — mixing parts of speech. For each word give a one-sentence plain-English definition and one natural example sentence that uses the word.$exclude_clause Return ONLY a JSON object of the shape {\"items\":[{\"word\":\"...\",\"definition\":\"...\",\"example\":\"...\"}]} with exactly $n items, nothing else."
+  local prompt raw items cards_json
+  prompt="Pick $n English vocabulary words worth teaching an adult who already speaks English fluently but wants a richer, more precise vocabulary. Prefer useful, interesting words of moderate-to-advanced difficulty — not painfully obscure, not trivially common — mixing parts of speech. For each word give a one-sentence plain-English definition and one natural example sentence that uses the word. Return ONLY a JSON object of the shape {\"items\":[{\"word\":\"...\",\"definition\":\"...\",\"example\":\"...\"}]} with exactly $n items, nothing else."
   raw="$(llm-blurb --json --max-tokens 1200 "$prompt")" || die "llm-blurb failed"
-  items="$(jq -c '[.items[]? | select(.word and .definition) | {front: .word, back: (.definition + (if .example then "  e.g. " + .example else "" end)), category: "vocabulary"}]' <<<"$raw" 2>/dev/null)" || die "could not parse vocabulary JSON from model"
-  [ "$items" != "[]" ] && [ -n "$items" ] || die "model returned no usable vocabulary items"
+  cards_json="$(read_cards)"
+  items="$(jq -c --argjson cards "$cards_json" '
+    def clean: gsub("^\\s+|\\s+$"; "");
+    def norm: clean | ascii_downcase;
+    [
+      .items[]?
+      | select(type == "object")
+      | select((.word | type) == "string" and (.definition | type) == "string")
+      | select((.word | clean | length) > 0 and (.definition | clean | length) > 0)
+      | {
+          front: (.word | clean),
+          back: ((.definition | clean) + (if (.example | type) == "string" and (.example | clean | length) > 0 then "  e.g. " + (.example | clean) else "" end)),
+          category: "vocabulary"
+        }
+      | select(
+          (.front | norm) as $key
+          | ([$cards.cards[]? | select(.kind == "quiz" and .category == "vocabulary" and (.front | type) == "string") | .front | norm] | index($key)) == null
+        )
+    ]
+    | unique_by(.front | norm)
+  ' <<<"$raw" 2>/dev/null)" || die "could not parse vocabulary JSON from model"
 
-  jq -n --argjson cards "$(read_cards)" --argjson items "$items" --argjson now "$(now_ms)" --arg prefix "v$(now_ms)-" \
+  if [ "$(jq 'length' <<<"$items")" -eq 0 ]; then
+    echo "generated 0 vocabulary cards"
+    return 0
+  fi
+  jq -n --argjson cards "$cards_json" --argjson items "$items" --argjson now "$(now_ms)" --arg prefix "v$(now_ms)-" \
         '{cards:$cards.cards, items:$items, now:$now, idPrefix:$prefix}' \
     | engine add-quiz-batch | jq '{version:1, cards:.cards}' | put_cards
   echo "generated $(jq 'length' <<<"$items") vocabulary cards"
@@ -384,25 +422,44 @@ cmd_generate_vocab() {
 
 cmd_generate_technique() {
   local n="${1:-1}"
-  have llm-blurb || die "llm-blurb not found on PATH (Featherless helper)"
+  have llm-blurb || die "llm-blurb not found on PATH (NanoGPT helper)"
 
-  local existing exclude_clause=""
-  existing="$(jq -r '[.cards[]? | select(.kind=="lesson") | .title] | join(", ")' <<<"$(read_cards)")"
+  local existing exclude_clause="" cards_json prompt raw items count i title
+  cards_json="$(read_cards)"
+  existing="$(jq -r '[.cards[]? | select(.kind=="lesson" and (.title|type)=="string") | .title] | join(", ")' <<<"$cards_json")"
   [ -n "$existing" ] && exclude_clause=" Do not repeat any of these techniques already taught: $existing."
 
-  local prompt raw items count i title
   prompt="Write $n short, practical memory/learning-technique lessons (mnemonic devices, study methods, focus/attention tricks, note-taking systems, and the like) in a terse, no-fluff teaching voice. Each lesson has a short title and exactly 4 slides, each slide one or two punchy sentences, building toward a concrete technique the reader can apply immediately — the last slide should say why/when it matters or how it contrasts with a related technique.$exclude_clause Return ONLY a JSON object of the shape {\"items\":[{\"title\":\"...\",\"slides\":[\"...\",\"...\",\"...\",\"...\"]}]} with exactly $n items, nothing else."
   raw="$(llm-blurb --json --max-tokens 1500 "$prompt")" || die "llm-blurb failed"
-  items="$(jq -c '[.items[]? | select(.title and (.slides|type=="array") and (.slides|length)>0)]' <<<"$raw" 2>/dev/null)" || die "could not parse technique JSON from model"
+  items="$(jq -c --argjson cards "$cards_json" '
+    def clean: gsub("^\\s+|\\s+$"; "");
+    def norm: clean | ascii_downcase;
+    [
+      .items[]?
+      | select(type == "object" and (.title | type) == "string" and (.slides | type) == "array")
+      | {
+          title: (.title | clean),
+          slides: [.slides[]? | select(type == "string") | clean]
+        }
+      | select((.title | length) > 0 and (.slides | length) > 0 and all(.slides[]; length > 0))
+      | select(
+          (.title | norm) as $key
+          | ([$cards.cards[]? | select(.kind == "lesson" and (.title | type) == "string") | .title | norm] | index($key)) == null
+        )
+    ]
+    | unique_by(.title | norm)
+  ' <<<"$raw" 2>/dev/null)" || die "could not parse technique JSON from model"
   count="$(jq 'length' <<<"$items" 2>/dev/null || echo 0)"
-  [ "$count" -gt 0 ] 2>/dev/null || die "model returned no usable technique lessons"
+  if [ "$count" -eq 0 ]; then
+    echo "generated 0 technique lesson(s)"
+    return 0
+  fi
 
   local added=0 slides_arr
   for ((i = 0; i < count; i++)); do
     title="$(jq -r ".[$i].title" <<<"$items")"
     slides_arr=()
     mapfile -t slides_arr < <(jq -r ".[$i].slides[]" <<<"$items")
-    [ -n "$title" ] && [ "${#slides_arr[@]}" -gt 0 ] || continue
     cmd_add_lesson "$title" "${slides_arr[@]}" >/dev/null
     added=$((added + 1))
   done

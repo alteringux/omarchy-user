@@ -409,7 +409,7 @@ cmd_checkin() {
   ids="$(jq -n --argjson cards "$(read_cards)" --argjson now "$(now_ms)" '{cards:$cards.cards, now:$now}' \
     | engine due-ids | jq -c '.ids')"
   if [ "$ids" = "[]" ]; then echo "nothing due"; return 0; fi
-  jq --argjson id "$(jq -r '.[0]' <<<"$ids")" --argjson now "$(now_ms)" \
+  jq --arg id "$(jq -r '.[0]' <<<"$ids")" --argjson now "$(now_ms)" \
     '.prompt = {kind:"checkin", cardIds:[$id], reason:"manual"} | .lastPromptMs = $now' <<<"$st" | put_state
   notify normal "👁 Glimpse check-in" "A scheduled memory round is ready."
   pulse_prompt checkin

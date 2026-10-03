@@ -106,12 +106,15 @@ function cleanPromptText(raw) {
 // Build a readable "diff" for an Edit without a real diff algorithm: the
 // removed block prefixed with "- ", the added block with "+ ".
 function editDiff(input) {
-  var oldL = String(input.old_string || "").split("\n")
-  var newL = String(input.new_string || "").split("\n")
-  var out = []
-  for (var i = 0; i < oldL.length; i++) out.push("- " + oldL[i])
-  for (var j = 0; j < newL.length; j++) out.push("+ " + newL[j])
-  return out.join("\n")
+  var edits = Array.isArray(input.edits) ? input.edits : [input]
+  return edits.map(function (edit) {
+    var oldL = String(edit && edit.old_string || "").split("\n")
+    var newL = String(edit && edit.new_string || "").split("\n")
+    var out = []
+    for (var i = 0; i < oldL.length; i++) out.push("- " + oldL[i])
+    for (var j = 0; j < newL.length; j++) out.push("+ " + newL[j])
+    return out.join("\n")
+  }).join("\n")
 }
 
 function toolStepFrom(block) {
@@ -131,9 +134,12 @@ function toolStepFrom(block) {
       step.lang = "diff"
       step.body = editDiff(input)
       step.files = [basename(input.file_path)]
-      step.linesAdded = lineCount(input.new_string)
-      step.linesRemoved = lineCount(input.old_string)
-      if (input.replace_all) step.note = "replace all"
+      var edits = Array.isArray(input.edits) ? input.edits : [input]
+      for (var e = 0; e < edits.length; e++) {
+        step.linesAdded += lineCount(edits[e] && edits[e].new_string)
+        step.linesRemoved += lineCount(edits[e] && edits[e].old_string)
+        if (edits[e] && edits[e].replace_all) step.note = "replace all"
+      }
       break
     case "Write":
       step.title = basename(input.file_path) + "  (write)"

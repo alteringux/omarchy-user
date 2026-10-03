@@ -59,6 +59,27 @@ test("parseStatus: leading log noise before JSON is tolerated", () => {
 test("parseStatus: ok:false -> empty", () => {
   assert.equal(M.parseStatus('{"ok":false}').running, false)
 })
+test("safeVerbArgs: allows supported transport commands as argv", () => {
+  assert.deepEqual(M.safeVerbArgs(["toggle"]), ["toggle"])
+  assert.deepEqual(M.safeVerbArgs(["seek", "42"]), ["seek", "42"])
+  assert.deepEqual(M.safeVerbArgs(["volume", "-2"]), ["volume", "-2"])
+  assert.deepEqual(M.safeVerbArgs(["vis", "BarsDot"]), ["vis", "BarsDot"])
+})
+
+test("safeVerbArgs: rejects malformed or untrusted commands", () => {
+  const rejected = [
+    null,
+    [],
+    ["status"],
+    ["toggle", "unexpected"],
+    ["seek", "4.2"],
+    ["seek", "0; touch /tmp/pwned"],
+    ["volume", "NaN"],
+    ["vis", "Bars; touch /tmp/pwned"],
+    ["vis", "--help"],
+  ]
+  for (const args of rejected) assert.equal(M.safeVerbArgs(args), null, JSON.stringify(args))
+})
 
 test("parseBands: valid frame -> 10 clamped floats", () => {
   const b = M.parseBands('{"ok":true,"visualizer":"Bars","bands":[0.71,0.55,0.5,0.41,0.21,0.05,0,0,0,0]}')

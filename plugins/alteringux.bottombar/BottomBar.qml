@@ -28,30 +28,64 @@ Item {
   property var pluginRegistry: null
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string pluginsDir: home + "/.config/omarchy/plugins"
   readonly property int barSize: Math.max(20, Style.bar.sizeHorizontal)
 
-  // Hosted widgets. `src` is the plugin's real bar-widget entry point; loading
-  // it by absolute path keeps its relative imports ("Model.js",
-  // "../alteringux.kit") resolving against the plugin dir.
+  // Hosted widgets. The candidate arrays preserve the bar's intentional
+  // left/right order; the registry-backed properties below decide which
+  // candidates are actually instantiated.
   //
-  // Two zones: `leftSpecs` pack from the left edge; `rightSpecs` pack against
-  // the right edge (like alteringux.newsbar's split), so a wide marquee like
-  // countdown gets the whole right side of the strip to itself.
-  readonly property var leftSpecs: [
-    { id: "alteringux.pomodoro",  src: root.pluginsDir + "/alteringux.pomodoro/BarWidget.qml" },
-    { id: "alteringux.stopwatch", src: root.pluginsDir + "/alteringux.stopwatch/BarWidget.qml" },
-    { id: "alteringux.timers",    src: root.pluginsDir + "/alteringux.timers/BarWidget.qml" },
-    { id: "alteringux.grip",      src: root.pluginsDir + "/alteringux.grip/BarWidget.qml" },
-    { id: "alteringux.stocks",    src: root.pluginsDir + "/alteringux.stocks/BarWidget.qml" },
-    { id: "alteringux.score",     src: root.pluginsDir + "/alteringux.score/BarWidget.qml" },
-    { id: "alteringux.conductor", src: root.pluginsDir + "/alteringux.conductor/BarWidget.qml" }
+  // `src` is resolved from each manifest rather than trusted from this
+  // service's static list. That keeps loading in the plugin's own directory
+  // (so relative imports still work) while rejecting removed or unregistered
+  // plugins.
+  readonly property var leftCandidates: [
+    { id: "alteringux.pomodoro" },
+    { id: "alteringux.stopwatch" },
+    { id: "alteringux.timers" },
+    { id: "alteringux.grip" },
+    { id: "alteringux.stocks" },
+    { id: "alteringux.score" },
+    { id: "alteringux.conductor" },
+    { id: "alteringux.phone" }
   ]
-  readonly property var rightSpecs: [
-    { id: "alteringux.flow",      src: root.pluginsDir + "/alteringux.flow/BarWidget.qml" },
-    { id: "alteringux.cliamp",    src: root.pluginsDir + "/alteringux.cliamp/BarWidget.qml" },
-    { id: "alteringux.countdown", src: root.pluginsDir + "/alteringux.countdown/BarWidget.qml" }
+  readonly property var rightCandidates: [
+    { id: "alteringux.flow" },
+    { id: "alteringux.cliamp" },
+    { id: "alteringux.countdown" }
   ]
+
+  function enabledSpecs(candidates) {
+    var registry = root.pluginRegistry
+    // The revision is a binding dependency: a rescan/config mutation can
+    // change installedPlugins or enabled state without replacing the object.
+    var registryRevision = registry ? registry.registryRevision : -1
+    if (registryRevision < 0 || !registry || !registry.installedPlugins
+        || typeof registry.isEnabled !== "function"
+        || typeof registry.entryPointUrl !== "function") return []
+
+    var result = []
+    var seen = ({})
+    for (var i = 0; i < candidates.length; i++) {
+      var candidate = candidates[i]
+      var id = String(candidate.id || "")
+      if (!id || seen[id]) continue
+      seen[id] = true
+
+      var manifest = registry.installedPlugins[id]
+      if (!manifest || !registry.isEnabled(id)) continue
+      // A widget already present in the top-bar layout owns its one shell
+      // instance there; hosting it again would duplicate its IPC handlers.
+      if (typeof registry.inBar === "function" && registry.inBar(id)) continue
+
+      var src = registry.entryPointUrl(manifest, "barWidget")
+      if (!src) continue
+      result.push({ id: id, src: src })
+    }
+    return result
+  }
+
+  readonly property var leftSpecs: root.enabledSpecs(root.leftCandidates)
+  readonly property var rightSpecs: root.enabledSpecs(root.rightCandidates)
   readonly property var widgetSpecs: root.leftSpecs.concat(root.rightSpecs)
 
   property var widgetStates: ({})
@@ -75,6 +109,9 @@ Item {
   readonly property string ownFlagPath: togglesDir + "/bottombar-off"
   readonly property string topBarFlagPath: togglesDir + "/bar-off"
   property bool ownHidden: false
+  // Stay hidden until the first probe has read persisted flags; otherwise
+  // startup can paint one visible frame before a saved hide choice arrives.
+  property bool hiddenProbeReady: false
   property bool topBarHidden: false
   readonly property bool hidden: ownHidden || topBarHidden
 
@@ -109,6 +146,7 @@ Item {
       var p = String(line).trim().split(/\s+/)
       root.ownHidden = p[0] === "yes"
       root.topBarHidden = p[1] === "yes"
+      root.hiddenProbeReady = true
     } }
     onExited: {
       if (root.hiddenProbeDirty) {
@@ -132,8 +170,9 @@ Item {
     onTriggered: root.requestHiddenProbe()
   }
 
+  // Probe before the first frame so a persisted hide choice never flashes
+  // the bar while the slower periodic check is still pending.
   Component.onCompleted: root.requestHiddenProbe()
-
   IpcHandler {
     target: "alteringux.bottombar"
 
@@ -164,15 +203,23 @@ Item {
 
   // ------------------------------------------------------------- the bar(s)
   Variants {
+    // One bottom-bar window per connected monitor, matching the documented
+    // every-monitor service behavior. Widget implementations already guard
+    // shared polling/refresh work when they are hosted on multiple screens.
     model: Quickshell.screens
 
     delegate: Component {
       PanelWindow {
         id: win
         required property var modelData
+        // The surface remains on every monitor, but hosted widgets are
+        // singleton shell components: loading them per screen duplicates
+        // IpcHandlers, timers, and Kit.Usage writes. Keep ownership on the
+        // first connected screen while leaving the other bar surfaces visible.
+        readonly property bool ownsHostedWidgets: modelData === Quickshell.screens[0]
 
         screen: modelData
-        visible: !root.hidden
+        visible: root.hiddenProbeReady && !root.hidden
         exclusionMode: ExclusionMode.Auto
         color: "transparent"
         surfaceFormat.opaque: false
@@ -219,6 +266,7 @@ Item {
               width: slot.failed ? errorMark.width : (hostLoader.item ? Math.max(1, hostLoader.item.implicitWidth) : 0)
 
               Loader {
+                active: win.ownsHostedWidgets
                 id: hostLoader
                 anchors.fill: parent
                 asynchronous: false

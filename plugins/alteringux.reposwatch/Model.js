@@ -8,6 +8,10 @@ function num(value, fallback) {
   return isFinite(n) ? n : fallback
 }
 
+function validNum(value) {
+  return value === undefined || value === null || (typeof value === "number" && isFinite(value))
+}
+
 function defaultTotals() {
   return { reposScanned: 0, okRepos: 0, errorRepos: 0, dirtyRepos: 0, totalAhead: 0, totalBehind: 0 }
 }
@@ -17,27 +21,61 @@ function defaultState() {
 }
 
 function parseRepo(r) {
-  r = r || {}
-  var ok = r.ok === true
-  var dirty = r.dirty || {}
+  var source = r && typeof r === "object" && !Array.isArray(r) ? r : {}
+  var malformed = source !== r
+  var dirty = source.dirty
+  if (dirty !== undefined && (!dirty || typeof dirty !== "object" || Array.isArray(dirty))) malformed = true
+  if (source.ok !== undefined && typeof source.ok !== "boolean") malformed = true
+  if (source.path !== undefined && typeof source.path !== "string") malformed = true
+  if (source.name !== undefined && typeof source.name !== "string") malformed = true
+  if (source.error !== undefined && source.error !== null && typeof source.error !== "string") malformed = true
+  if (source.branch !== undefined && typeof source.branch !== "string") malformed = true
+  if (source.detached !== undefined && typeof source.detached !== "boolean") malformed = true
+  if (source.hasUpstream !== undefined && typeof source.hasUpstream !== "boolean") malformed = true
+  if (source.dirty && (
+    !validNum(source.dirty.staged) ||
+    !validNum(source.dirty.unstaged) ||
+    !validNum(source.dirty.untracked) ||
+    !validNum(source.dirty.total)
+  )) malformed = true
+  if (!validNum(source.ahead) || !validNum(source.behind) || !validNum(source.lastCommitTs)) malformed = true
+
+  var ok = !malformed && source.ok === true
   return {
-    path: typeof r.path === "string" ? r.path : "",
-    name: typeof r.name === "string" ? r.name : "",
+    path: typeof source.path === "string" ? source.path : "",
+    name: typeof source.name === "string" ? source.name : (malformed ? "Invalid repository" : ""),
     ok: ok,
-    error: (!ok && typeof r.error === "string") ? r.error : null,
-    branch: typeof r.branch === "string" ? r.branch : "",
-    detached: r.detached === true,
+    error: malformed ? "invalid repository data" : (!ok && typeof source.error === "string" ? source.error : null),
+    branch: typeof source.branch === "string" ? source.branch : "",
+    detached: source.detached === true,
     dirty: {
-      staged: num(dirty.staged, 0),
-      unstaged: num(dirty.unstaged, 0),
-      untracked: num(dirty.untracked, 0),
-      total: num(dirty.total, 0)
+      staged: num(source.dirty && source.dirty.staged, 0),
+      unstaged: num(source.dirty && source.dirty.unstaged, 0),
+      untracked: num(source.dirty && source.dirty.untracked, 0),
+      total: num(source.dirty && source.dirty.total, 0)
     },
-    hasUpstream: r.hasUpstream === true,
-    ahead: num(r.ahead, 0),
-    behind: num(r.behind, 0),
-    lastCommitTs: num(r.lastCommitTs, 0)
+    hasUpstream: source.hasUpstream === true,
+    ahead: num(source.ahead, 0),
+    behind: num(source.behind, 0),
+    lastCommitTs: num(source.lastCommitTs, 0)
   }
+}
+
+function totalsFor(repos) {
+  var totals = defaultTotals()
+  totals.reposScanned = repos.length
+  for (var i = 0; i < repos.length; i++) {
+    var repo = repos[i]
+    if (!repo.ok) {
+      totals.errorRepos++
+      continue
+    }
+    totals.okRepos++
+    if (repo.dirty.total > 0) totals.dirtyRepos++
+    totals.totalAhead += Math.max(0, repo.ahead)
+    totals.totalBehind += Math.max(0, repo.behind)
+  }
+  return totals
 }
 
 function parseState(raw) {
@@ -52,20 +90,12 @@ function parseState(raw) {
   if (!parsed || typeof parsed !== "object") return d
 
   var repos = Array.isArray(parsed.repos) ? parsed.repos.map(parseRepo) : []
-  var t = parsed.totals || {}
 
   return {
     version: 1,
     updatedAt: num(parsed.updatedAt, 0),
     repos: repos,
-    totals: {
-      reposScanned: num(t.reposScanned, repos.length),
-      okRepos: num(t.okRepos, 0),
-      errorRepos: num(t.errorRepos, 0),
-      dirtyRepos: num(t.dirtyRepos, 0),
-      totalAhead: num(t.totalAhead, 0),
-      totalBehind: num(t.totalBehind, 0)
-    }
+    totals: totalsFor(repos)
   }
 }
 

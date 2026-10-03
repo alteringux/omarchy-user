@@ -4,7 +4,7 @@
   "name": "VPN Rotate",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "Proton VPN free-tier connection with an IP rotator (protonvpn-rotate script)",
+  "description": "Proton VPN free-tier connection with an IP rotator (protonvpn-rotate script); connects only over WiFi",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "VPN Rotate",
-    "description": "Shield icon showing Proton VPN state + exit country; click for connect / disconnect, rotate-now, and auto-rotate on a configurable interval",
+    "description": "Shield icon showing Proton VPN state + exit country; click for connect / disconnect, rotate-now, and auto-rotate on a configurable interval; right-click to disconnect. Connect is gated on an active WiFi link.",
     "category": "Network",
     "allowMultiple": false
   }

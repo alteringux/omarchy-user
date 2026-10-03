@@ -133,13 +133,16 @@ function parseAttentionItem(raw) {
   if (!raw || typeof raw !== "object") return null
   var label = slug(raw.label)
   if (!label) return null
-  return {
+  var out = {
     level: clampLevel(raw.level, "warning"),
     label: label,
     action: slug(raw.action),
     actionLabel: slug(raw.actionLabel, slug(raw.action) ? "Do it" : ""),
     ts: coerceNumber(raw.ts, 0)
   }
+  var source = slug(raw.source)
+  if (source) out.source = source
+  return out
 }
 
 function parseAttention(raw) {
@@ -175,8 +178,153 @@ function parseState(raw) {
   }
   return out
 }
+// ── plugin usage (Kit.Usage scanner contract) ─────────────────────────────
+//
+// Pulse never reads individual usage files. The Kit-owned scanner supplies one
+// normalized document, either as JSON text or as an object passed by the CLI.
+// Keep this parser total because a scanner may be unavailable while the panel
+// is starting up.
+function defaultUsage() {
+  return {
+    version: 1,
+    generatedAt: 0,
+    thresholdDays: 0,
+    plugins: [],
+    summary: { tracked: 0, untracked: 0, neverUsed: 0, stale: 0 }
+  }
+}
+
+function parseUsagePlugin(raw, now, thresholdDays) {
+  if (!raw || typeof raw !== "object") return null
+  var id = slug(raw.id)
+  if (!id) return null
+  var tracked = raw.tracked === true
+  var uses = Math.max(0, Math.floor(coerceNumber(raw.uses, 0)))
+  var lastAt = Math.max(0, coerceNumber(raw.lastAt, 0))
+  var neverUsed = raw.neverUsed === true || (tracked && uses === 0 && lastAt === 0)
+  var idle = raw.daysIdle
+  if (typeof idle !== "number" || !isFinite(idle) || idle < 0) {
+    idle = lastAt > 0 ? Math.max(0, Math.floor((now - lastAt) / DAY)) : null
+  } else {
+    idle = Math.max(0, idle)
+  }
+  var stale = tracked && (neverUsed || (idle !== null && thresholdDays > 0 && idle >= thresholdDays))
+  return {
+    id: id,
+    label: coerceString(raw.label, id),
+    source: coerceString(raw.source, ""),
+    enabled: raw.enabled !== false,
+    tracked: tracked,
+    uses: uses,
+    lastAt: lastAt,
+    daysIdle: idle,
+    neverUsed: neverUsed,
+    stale: stale
+  }
+}
+
+function makeAttentionItem(input, opts) {
+  opts = opts || {}
+  var now = coerceNumber(opts.now, Date.now())
+  var action = slug(input && input.action)
+  var out = {
+    level: clampLevel(input && input.level, "warning"),
+    label: slug(input && input.label),
+    action: action,
+    actionLabel: slug(input && input.actionLabel, action ? "Do it" : ""),
+    ts: now
+  }
+  var source = slug(input && input.source)
+  if (source) out.source = source
+  return out
+}
+
+
+function parseUsage(raw, now) {
+  var out = defaultUsage()
+  var src = raw
+  if (typeof src === "string") {
+    if (!src.trim().length) return out
+    try { src = JSON.parse(src) } catch (e) { return out }
+  }
+  if (src && typeof src === "object" && src.usage && typeof src.usage === "object") src = src.usage
+  if (!src || typeof src !== "object") return out
+  var t = coerceNumber(now, Date.now())
+  var threshold = Math.max(0, Math.floor(coerceNumber(src.thresholdDays, 0)))
+  out.generatedAt = src.generatedAt == null ? 0 : src.generatedAt
+  out.thresholdDays = threshold
+  var list = Array.isArray(src.plugins) ? src.plugins : []
+  for (var i = 0; i < list.length; i++) {
+    var p = parseUsagePlugin(list[i], t, threshold)
+    if (p) out.plugins.push(p)
+  }
+  out.plugins.sort(function (a, b) {
+    if (b.uses !== a.uses) return b.uses - a.uses
+    return b.lastAt - a.lastAt
+  })
+  var counts = { tracked: 0, untracked: 0, neverUsed: 0, stale: 0 }
+  out.plugins.forEach(function (p) {
+    if (p.tracked) counts.tracked++
+    else counts.untracked++
+    if (p.neverUsed) counts.neverUsed++
+    if (p.stale) counts.stale++
+  })
+  out.summary = counts
+  return out
+}
+
+function usageMostUsed(usage, n) {
+  var list = usage && Array.isArray(usage.plugins) ? usage.plugins.slice() : []
+  list.sort(function (a, b) {
+    if (b.uses !== a.uses) return b.uses - a.uses
+    return b.lastAt - a.lastAt
+  })
+  return list.slice(0, n > 0 ? n : 3)
+}
+function usageLeastUsed(usage, n) {
+  var list = usage && Array.isArray(usage.plugins) ? usage.plugins.slice() : []
+  list.sort(function (a, b) {
+    if (a.uses !== b.uses) return a.uses - b.uses
+    return a.lastAt - b.lastAt
+  })
+  return list.slice(0, n > 0 ? n : 3)
+}
+
+
+function usageStale(usage) {
+  return usage && Array.isArray(usage.plugins)
+    ? usage.plugins.filter(function (p) { return p.tracked && p.stale })
+    : []
+}
+
 
 // ── builders (pulse-cli.js hands these back for the bash side to write) ────
+// One stable attention item for all stale tracked plugins. Keeping this as a
+// model builder makes the shell bridge data-only: no scanner output is ever
+// interpreted as shell code.
+function makeUsageAttention(usage, opts) {
+  opts = opts || {}
+  var acknowledged = opts.acknowledged && typeof opts.acknowledged === "object"
+    ? opts.acknowledged : {}
+  var stale = usageStale(usage).filter(function (p) {
+    var ack = acknowledged[p.id]
+    if (!ack || typeof ack !== "object") return true
+    return Number(ack.lastAt || 0) !== Number(p.lastAt || 0)
+      || Number(ack.uses || 0) !== Number(p.uses || 0)
+  })
+  if (!stale.length) return null
+  var parts = stale.map(function (p) {
+    return p.id + " (" + (p.neverUsed ? "never used" : String(Math.floor(p.daysIdle)) + "d idle") + ")"
+  })
+  return makeAttentionItem({
+    label: "Plugin usage stale: " + parts.join(", "),
+    level: "warning",
+    action: "omarchy-pulse usage",
+    actionLabel: "Refresh",
+    source: "plugin-usage"
+  }, opts)
+}
+
 
 // input: { plugin, message, action?, actionLabel?, level? }
 function makeEvent(input, opts) {
@@ -194,20 +342,6 @@ function makeEvent(input, opts) {
   }
 }
 
-// input: { plugin, label, action?, actionLabel?, level? } -> the item object
-// stored under attention.items[plugin].
-function makeAttentionItem(input, opts) {
-  opts = opts || {}
-  var now = coerceNumber(opts.now, Date.now())
-  var action = slug(input && input.action)
-  return {
-    level: clampLevel(input && input.level, "warning"),
-    label: slug(input && input.label),
-    action: action,
-    actionLabel: slug(input && input.actionLabel, action ? "Do it" : ""),
-    ts: now
-  }
-}
 
 // ── read side ────────────────────────────────────────────────────────────
 
@@ -216,7 +350,7 @@ function attentionList(attention) {
   var att = attention && attention.items ? attention.items : {}
   return Object.keys(att).map(function (plugin) {
     var it = att[plugin]
-    return {
+    var out = {
       plugin: plugin,
       level: it.level,
       label: it.label,
@@ -224,6 +358,8 @@ function attentionList(attention) {
       actionLabel: it.actionLabel,
       ts: it.ts
     }
+    if (it.source) out.source = it.source
+    return out
   }).sort(function (a, b) {
     var d = levelRank(b.level) - levelRank(a.level)
     return d !== 0 ? d : b.ts - a.ts
@@ -266,19 +402,29 @@ function nextAction(activity, attention, state) {
   return null
 }
 
-function summary(activity, attention, state) {
+function summary(activity, attention, state, usage) {
   var atts = attentionList(attention)
   var unread = unreadEvents(activity, state)
+  var pluginUsage = parseUsage(usage)
+  var stalePlugins = usageStale(pluginUsage)
   var topLevel = ""
   for (var i = 0; i < atts.length; i++) topLevel = maxLevel(topLevel || "info", atts[i].level)
   if (!atts.length) topLevel = ""
-  return {
+  var result = {
     unread: unread.length,
     total: activity && activity.events ? activity.events.length : 0,
     needAction: atts.length,
     topLevel: atts.length ? topLevel : "",
     nextAction: nextAction(activity, attention, state)
   }
+  if (usage !== undefined && usage !== null) {
+    result.usage = pluginUsage
+    result.pluginUsage = pluginUsage
+    result.mostUsed = usageMostUsed(pluginUsage, 3)
+    result.leastUsed = usageLeastUsed(pluginUsage, 3)
+    result.stalePlugins = stalePlugins
+  }
+  return result
 }
 
 // ── formatting (omarchy-pulse list) ──────────────────────────────────────
@@ -316,15 +462,21 @@ if (typeof module !== "undefined" && module.exports) {
     defaultActivity: defaultActivity,
     defaultAttention: defaultAttention,
     defaultState: defaultState,
+    defaultUsage: defaultUsage,
     parseActivity: parseActivity,
     parseAttention: parseAttention,
     parseState: parseState,
+    parseUsage: parseUsage,
     pruneEvents: pruneEvents,
     makeEvent: makeEvent,
     makeAttentionItem: makeAttentionItem,
+    makeUsageAttention: makeUsageAttention,
     attentionList: attentionList,
     unreadEvents: unreadEvents,
     nextAction: nextAction,
+    usageMostUsed: usageMostUsed,
+    usageLeastUsed: usageLeastUsed,
+    usageStale: usageStale,
     summary: summary,
     relTime: relTime,
     formatList: formatList

@@ -22,6 +22,17 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property var stat: (hostWidget && hostWidget.stat) ? hostWidget.stat : Model.defaultState()
+  // Keep the age label reactive while the popup is open; Date.now() alone is
+  // not a QML dependency and would otherwise remain frozen.
+  property double clockMs: Date.now()
+
+  Timer {
+    interval: 1000
+    running: root.opened
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.clockMs = Date.now()
+  }
 
   function levelColor(level) {
     if (level === "critical") return Kit.Palette.negative
@@ -71,7 +82,7 @@ Panel {
             glyph: "󰘚" // nf-fae-chip
             title: "System"
             meta: root.stat.updatedAt > 0
-              ? "UPDATED " + Math.max(0, Math.round((Date.now() - root.stat.updatedAt) / 1000)) + "S AGO"
+              ? "UPDATED " + Math.max(0, Math.round((root.clockMs - root.stat.updatedAt) / 1000)) + "S AGO"
               : "NO DATA YET"
             foreground: root.barForeground
           }

@@ -28,12 +28,22 @@ BarWidget {
   readonly property string level: Model.pctLevel(stat.memory.pct)
   readonly property bool warn: level === "warning"
   readonly property bool crit: level === "critical"
+  // Date.now() is not a QML dependency. Keep a small reactive clock so a
+  // stalled sampler eventually changes the bar from a live reading to stale.
+  property double nowMs: Date.now()
+
+  Timer {
+    interval: 1000
+    running: true
+    repeat: true
+    onTriggered: root.nowMs = Date.now()
+  }
 
   // Model.isStale is tested (test/model.test.js) but was never wired into any
   // of the three sysmon-family widgets. A hung sampler left the bar showing a
   // confident, silently ageing number. 3 missed ticks is the same "gone
   // quiet" threshold netwatch already uses for its own staleness label.
-  readonly property bool stale: stateLoaded && Model.isStale(root.stat, Date.now(), root.sampleIntervalMs * 3)
+  readonly property bool stale: stateLoaded && Model.isStale(root.stat, root.nowMs, root.sampleIntervalMs * 3)
 
   readonly property string tooltipText: stateLoaded
     ? "MEM " + Model.formatGb(root.stat.memory.usedKb) + " / " + Model.formatGb(root.stat.memory.totalKb)

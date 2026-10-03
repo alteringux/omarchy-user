@@ -4,7 +4,7 @@
   "name": "Calendar",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "Birthdays, public holidays and time-blocking with a click-to-block month view; feeds alteringux.agenda for timed-event notifications and asks Featherless to help reschedule",
+  "description": "Birthdays, public holidays and time-blocking with a click-to-block month view; feeds alteringux.agenda for timed-event notifications and asks NanoGPT to help reschedule",
   "kinds": [
     "bar-widget"
   ],

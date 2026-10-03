@@ -29,6 +29,22 @@ function stateIn(p) {
   if (typeof p.stateRaw === "string") return Model.parseState(p.stateRaw)
   return Model.parseState(p.state || {})
 }
+function usageIn(p) {
+  if (p.usageRaw !== undefined) return Model.parseUsage(p.usageRaw, nowIn(p))
+  return Model.parseUsage(p.usage || {}, nowIn(p))
+}
+
+function acknowledgedIn(p) {
+  if (p.acknowledged && typeof p.acknowledged === "object") return p.acknowledged
+  if (typeof p.ackRaw === "string") {
+    try {
+      const value = JSON.parse(p.ackRaw)
+      return value && typeof value === "object" ? value : {}
+    } catch (e) {}
+  }
+  return {}
+}
+
 function nowIn(p) {
   return typeof p.now === "number" && isFinite(p.now) ? p.now : Date.now()
 }
@@ -58,18 +74,28 @@ switch (op) {
   }
 
   case "summary":
-    out = Model.summary(activityIn(p), attentionIn(p), stateIn(p))
+    out = Model.summary(activityIn(p), attentionIn(p), stateIn(p), usageIn(p))
     break
 
-  case "get":
+  case "usage-attention":
+    out = Model.makeUsageAttention(usageIn(p), { now: nowIn(p), acknowledged: acknowledgedIn(p) })
+    break
+
+  case "get": {
+    const activity = activityIn(p)
+    const attention = attentionIn(p)
+    const state = stateIn(p)
+    const usage = usageIn(p)
     out = {
-      activity: activityIn(p),
-      attention: attentionIn(p),
-      state: stateIn(p),
-      attentionList: Model.attentionList(attentionIn(p)),
-      summary: Model.summary(activityIn(p), attentionIn(p), stateIn(p))
+      activity,
+      attention,
+      state,
+      usage,
+      attentionList: Model.attentionList(attention),
+      summary: Model.summary(activity, attention, state, usage)
     }
     break
+  }
 
   case "render": {
     const n = typeof p.n === "number" ? p.n : 20

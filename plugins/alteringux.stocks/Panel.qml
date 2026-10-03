@@ -25,6 +25,8 @@ Panel {
   readonly property var losers: hostWidget ? hostWidget.losers : []
   readonly property var trendingSymbols: hostWidget ? hostWidget.trendingSymbols : []
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
+  readonly property bool providerStale: hostWidget ? hostWidget.providerStale : false
+  readonly property string providerError: hostWidget && hostWidget.providerError ? hostWidget.providerError : ""
 
   // Panel-local, not persisted: resets to FILTER_ALL each time the panel opens.
   property string filterMode: Model.FILTER_ALL
@@ -85,7 +87,11 @@ Panel {
         Kit.PanelHead {
           glyph: ""   // nf-fa-line_chart, matches the bar widget
           title: "Stocks"
-          meta: root.refreshing ? "refreshing…" : "global top movers"
+          meta: root.refreshing
+            ? "refreshing…"
+            : (root.providerStale
+              ? "provider unavailable · showing stale data"
+              : (root.providerError || "global top movers"))
           foreground: root.barForeground
           trailingControl: Component {
             Button {
@@ -194,7 +200,9 @@ Panel {
 
         Kit.EmptyState {
           visible: root.filteredGainers.length === 0
-          text: root.gainers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet") : "None match this filter."
+          text: root.gainers.length === 0
+            ? (root.refreshing ? "Loading…" : (root.providerError ? "Provider unavailable" : "No data yet"))
+            : "None match this filter."
           hint: root.gainers.length === 0 && !root.refreshing ? "Try Refresh." : ""
           foreground: root.barForeground
         }
@@ -225,7 +233,9 @@ Panel {
 
         Kit.EmptyState {
           visible: root.filteredLosers.length === 0
-          text: root.losers.length === 0 ? (root.refreshing ? "Loading…" : "No data yet") : "None match this filter."
+          text: root.losers.length === 0
+            ? (root.refreshing ? "Loading…" : (root.providerError ? "Provider unavailable" : "No data yet"))
+            : "None match this filter."
           hint: root.losers.length === 0 && !root.refreshing ? "Try Refresh." : ""
           foreground: root.barForeground
         }

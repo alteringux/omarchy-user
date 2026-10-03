@@ -82,13 +82,15 @@ BarWidget {
     parse: function (raw) { return Model.parseConfig(raw) }
     serialize: function (value) { return Model.serializeConfig(value) }
     seedOnCreate: true
+    watch: true
+    pollMs: 60000
   }
 
   Kit.Store {
     id: sessionStore
     fileName: "breathe-session.json"
     watch: true
-    pollMs: 1200
+    pollMs: 60000
     parse: function (raw) { return Model.parseSession(raw) }
     // Re-baseline the display clock the moment the daemon heartbeats, so the
     // orb never jumps when a write lands mid-phase.
@@ -99,7 +101,7 @@ BarWidget {
     id: statsStore
     fileName: "breathe-stats.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseStats(raw) }
   }
 
@@ -107,13 +109,52 @@ BarWidget {
     id: historyStore
     fileName: "breathe-history.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 
   // ---- the CLI that owns the session -----------------------------------
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-breathe"
 
+  // Keep the optional reminder timer in sync with the widget-owned policy.
+  // The nudge helper reads the same config file, so flush before dispatching
+  // rather than racing the Store's debounce window.
+  readonly property string nudgeScriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-breathe-nudge"
+
+  Process {
+    id: nudgeSyncProc
+    running: false
+  }
+
+  function syncNudge() {
+    guard.run("syncNudge", function () {
+      if (!configStore.loaded) return
+      configStore.flush()
+      var argv = [root.nudgeScriptPath, "sync"]
+      if (nudgeSyncProc.running) { Quickshell.execDetached(argv); return }
+      nudgeSyncProc.command = argv
+      nudgeSyncProc.running = true
+    })
+  }
+
+  Connections {
+    target: configStore
+    function onLoadedChanged() {
+      if (configStore.loaded) Qt.callLater(root.syncNudge)
+    }
+    function onExternallyChanged() { Qt.callLater(root.syncNudge) }
+  }
+
+  // ---- nudge sync ----------------------------------------------------
+  // A setting edited before the first load must not overwrite the user's
+  // existing config, hence syncNudge() also checks configStore.loaded.
+  //
+  // The existing action Process remains exclusively for session verbs; nudge
+  // installation is independent and can finish without delaying the guide.
+  //
+  // (The actual config mutation lives below with the other config helpers.)
+
+  // ---- config writes ---------------------------------------------------
   Process {
     id: actionProc
     running: false
@@ -203,8 +244,10 @@ BarWidget {
     guard.run("updateConfig", function () {
       if (!configStore.loaded) return
       var next = JSON.parse(JSON.stringify(root.config))
+      var touchesNudge = false
       for (var key in patch) {
         if (key === "nudge" && patch.nudge && typeof patch.nudge === "object") {
+          touchesNudge = true
           if (!next.nudge) next.nudge = {}
           for (var nk in patch.nudge) next.nudge[nk] = patch.nudge[nk]
         } else {
@@ -212,7 +255,13 @@ BarWidget {
         }
       }
       root.config = next
-      configStore.save()
+      if (touchesNudge) {
+        // syncNudge flushes synchronously before launching the helper, so an
+        // enabled policy cannot race the Store's 200ms debounce.
+        root.syncNudge()
+      } else {
+        configStore.save()
+      }
     })
   }
 

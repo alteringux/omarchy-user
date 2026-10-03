@@ -28,7 +28,7 @@ BarWidget {
     id: indexStore
     fileName: "devcast-index.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseIndex(raw) }
   }
 

@@ -10,7 +10,7 @@ import "../alteringux.kit" as Kit
 //
 // Division of labour, same shape as alteringux.ttsplayer / .stopwatch:
 //   ~/.local/bin/protonvpn-rotate  owns the mechanism — it drives the official
-//     `protonvpn-cli`, verifies the exit IP moved, and publishes
+//     `protonvpn` CLI, verifies the exit IP moved, and publishes
 //     ~/.local/state/omarchy/vpnrotate.json.
 //   this widget  owns the policy — connect / disconnect / rotate-now buttons,
 //     and an auto-rotate loop on a user-set interval. Auto-rotate is a plain
@@ -29,6 +29,15 @@ BarWidget {
   // Wall clock in seconds, ticked once a second — drives the countdown and the
   // auto-rotate check without waiting on a file write.
   property int nowSec: Math.floor(Date.now() / 1000)
+  // NetworkManager wifi link state, re-read off the 20 s reconcile timer via a
+  // cheap `nmcli` call and parsed by Model.parseWifiState (pure — no fork on
+  // this side beyond the one Process). "connected" | "disconnected" |
+  // "unavailable" | "unknown". The VPN only connects over wifi: on a wired link
+  // the tunnel would still come up but leave the Ethernet IP uncovered, which
+  // is the leak the gate below closes. "unknown" (no wifi device / no nmcli) is
+  // allowed through — the script is the backstop.
+  property string wifiState: "unknown"
+  readonly property bool wifiBlocksConnect: root.wifiState === "disconnected" || root.wifiState === "unavailable"
   // Set the instant a button is pressed so the shield reacts before the
   // script has rewritten the file; cleared when the Process exits.
   property string pendingAction: ""
@@ -37,16 +46,36 @@ BarWidget {
   property int lastAutoAt: 0
 
   // "I want a tunnel up" intent, separate from whether one is up right now.
-  // Set when the user connects (or the shell restarts while connected, or the
-  // kill switch is armed); cleared only when the user disconnects. The
-  // watchdog below uses it to auto-reconnect a tunnel that dropped on its own
-  // — the "Proton turned itself off after a while" failure, which was a
-  // rotate whose reconnect got rejected with nothing retrying it.
+  // Set only when a tunnel is actually *observed* up (a successful connect, or
+  // the shell restarting while connected); cleared when the user disconnects.
+  // The watchdog uses it to auto-reconnect a tunnel that dropped on its own.
+  // It is deliberately NOT set optimistically when a connect is merely
+  // attempted — a failed attempt used to leave this armed and the watchdog
+  // spinning forever.
   property bool keepUp: false
+  // An intentional disconnect is a user command, not a dropped tunnel. Keep
+  // this separate from keepUp because a stale connected-state reload can
+  // arrive after the disconnect process exits and otherwise re-arm the
+  // watchdog before the next tick.
+  property bool intentionalDisconnect: false
+  // True once a tunnel has been up at least once this session. The kill switch
+  // being armed in config is only treated as "keep a tunnel up" intent after
+  // this — otherwise a signed-out box with killSwitch:true in its config file
+  // reconnect-loops on every shell start.
+  property bool everConnected: false
   // Seeded to "now" so the watchdog holds off for its first debounce window
   // after load — lets the startup state read and the kill-switch sync settle
   // before it considers reconnecting.
   property int lastKeepUpAt: Math.floor(Date.now() / 1000)
+  // Consecutive watchdog/connect failures. Drives exponential backoff and,
+  // past watchdogMaxFails, parks the watchdog until a manual connect or a
+  // sign-in. Reset to 0 the moment a tunnel is observed up.
+  property int watchdogFails: 0
+  readonly property int watchdogMaxFails: 5
+
+  // proton-vpn-cli refuses connect / kill-switch changes while signed out. The
+  // watchdog must not spin against that. Probed cheaply by authProc below.
+  property bool signedOut: false
 
   readonly property var cfg: configStore.value || Model.defaultConfig()
 
@@ -60,7 +89,9 @@ BarWidget {
     connected: root.st.connected,
     action: root.effectiveAction,
     country: root.st.country,
-    error: root.st.error
+    error: (root.signedOut && !root.st.connected)
+      ? "Not signed in — run: protonvpn signin"
+      : root.st.error
   })
 
   readonly property string icon: Model.iconFor(root.viewState)
@@ -90,7 +121,7 @@ BarWidget {
     id: stateStore
     fileName: "vpnrotate.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     polling: true
     parse: function (raw) { return Model.parseState(raw) }
     onExternallyChanged: function (value) { root.applyState(value) }
@@ -120,7 +151,7 @@ BarWidget {
     id: metricsStore
     fileName: "vpnrotate-metrics.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     polling: true
     parse: function (raw) { return Model.parseMetrics(raw) }
     onExternallyChanged: function (value) { root.applyMetrics(value) }
@@ -155,28 +186,44 @@ BarWidget {
   }
 
   Timer {
-    interval: 10000
+    interval: 60000
     repeat: true
     running: true
     triggeredOnStart: true
     onTriggered: {
       if (!root.st.connected || metricsProc.running || actionProc.running) return
       if (!root.opened && !root.cfg.autoRotate) return
+      // vpnrotate-metrics.json is shared by every instance (top bar renders
+      // per screen). Skip if another instance refreshed it < 8s ago.
+      if (root.metrics && (Date.now() / 1000 - Number(root.metrics.updated || 0)) < 8) return
       metricsProc.running = true
     }
   }
 
   function applyState(value) {
     guard.run("applyState", function () {
-      root.st = value || Model.parseState("")
+      var next = value || Model.parseState("")
+      // Multiple bar instances watch the same file. File-watch delivery can
+      // be out of order, so never let an older connected snapshot overwrite a
+      // newer disconnected one and re-arm the keep-up watchdog.
+      if (root.st && root.st.updated > 0 && next.updated > 0
+          && next.updated < root.st.updated)
+        return
+      root.st = next
       // The file has caught up with (or overtaken) the optimistic guess.
       if (root.pendingAction !== "" && root.st.action === root.pendingAction)
         root.pendingAction = ""
       // Observed a live tunnel we didn't just tear down → adopt "keep it up"
       // intent, so a later unexpected drop gets auto-reconnected. A shell
-      // restart while connected lands here too.
-      if (root.st.connected && root.pendingAction !== "disconnecting")
+      // restart while connected lands here too. This is the ONLY place keepUp
+      // and everConnected get set, and a live tunnel clears the failure count.
+      if (root.st.connected && root.pendingAction !== "disconnecting"
+          && !root.intentionalDisconnect) {
         root.keepUp = true
+        root.everConnected = true
+        root.watchdogFails = 0
+        root.signedOut = false
+      }
     })
   }
 
@@ -186,6 +233,14 @@ BarWidget {
     running: false
     onExited: function (code) {
       root.pendingAction = ""
+      // Exit-code taxonomy from protonvpn-rotate: 0 ok, 1 transient, 2 wifi
+      // gate, 3 not possible (signed out / free-plan) — stop auto-retrying.
+      if (code === 3) {
+        root.signedOut = true
+        root.watchdogFails = root.watchdogMaxFails   // park the watchdog until sign-in
+      } else if (code === 1) {
+        root.watchdogFails = Math.min(root.watchdogFails + 1, root.watchdogMaxFails)
+      }
       // Nudge a re-read in case the write landed a hair before the watch armed,
       // then reconcile against `protonvpn status` so a failed / partial verb
       // still leaves the widget showing reality.
@@ -203,9 +258,24 @@ BarWidget {
     })
   }
 
-  function runConnect() { root.keepUp = true; root.runVerb("connect", "connecting") }
+  function runConnect() {
+    // WiFi-only: don't even spawn the script off WiFi (it would refuse with
+    // rc=2 anyway). "unknown" is allowed through — the script is the backstop.
+    // Signed out: don't spawn either — the script refuses with rc=3 and the
+    // watchdog is already parked, this just avoids the fork.
+    if (root.wifiBlocksConnect) return
+    if (root.signedOut) return
+    // A new explicit connect is the user clearing an intentional disconnect.
+    root.intentionalDisconnect = false
+    root.runVerb("connect", "connecting")
+  }
   function runRotate() { root.runVerb("rotate", "rotating") }
-  function runDisconnect() { root.keepUp = false; root.runVerb("disconnect", "disconnecting") }
+  function runDisconnect() {
+    root.intentionalDisconnect = true
+    root.keepUp = false
+    root.everConnected = false
+    root.runVerb("disconnect", "disconnecting")
+  }
 
   // ── reconcile with ground truth ────────────────────────────────────────
   // The status file is only written by this widget's own verbs, so anything
@@ -223,16 +293,77 @@ BarWidget {
   function reconcile() {
     guard.run("reconcile", function () {
       if (actionProc.running || reconcileProc.running) return
+      // shared vpnrotate.json; skip if fresh (another instance just reconciled)
+      if (root.st && (Date.now() / 1000 - Number(root.st.updated || 0)) < 15) return
       reconcileProc.running = true
     })
   }
 
+  // ── wifi link probe (feeds the WiFi-only connect gate) ─────────────────
+  Process {
+    id: wifiProc
+    command: ["nmcli", "-t", "-f", "TYPE,STATE", "dev"]
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyWifi(text)
+    }
+  }
+
+  function applyWifi(raw) {
+    guard.run("applyWifi", function () {
+      root.wifiState = Model.parseWifiState(raw)
+    })
+  }
+
+  function refreshWifi() {
+    if (!wifiProc.running) wifiProc.running = true
+  }
+
+  // `protonvpn-rotate auth` uses the same bounded CLI wrapper as every other
+  // VPN operation, so a stale Proton daemon cannot leave this Process stuck.
+  // It still emits the Account line shape consumed by applyAuth below.
+  //
+  Process {
+    id: authProc
+    command: [root.scriptPath, "auth"]
+    running: false
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.applyAuth(text)
+    }
+  }
+
+  function applyAuth(raw) {
+    guard.run("applyAuth", function () {
+      var none = /account:\s*'?none'?/i.test(raw)
+      var hasAccount = /account:\s*'?[^'\s]/i.test(raw)
+      var out = none || !hasAccount
+      // A fresh sign-in should let the watchdog try again immediately.
+      if (root.signedOut && !out && root.watchdogFails >= root.watchdogMaxFails)
+        root.watchdogFails = 0
+      root.signedOut = out
+    })
+  }
+
+  function refreshAuth() {
+    if (!authProc.running) authProc.running = true
+  }
+
   Timer {
-    interval: 20000
+    interval: 60000
     repeat: true
     running: true
     triggeredOnStart: true
-    onTriggered: root.reconcile()
+    onTriggered: { root.reconcile(); root.refreshWifi() }
+  }
+
+  Timer {
+    interval: 60000
+    repeat: true
+    running: true
+    triggeredOnStart: true
+    onTriggered: root.refreshAuth()
   }
 
   // ── auto-rotate ─────────────────────────────────────────────────────────
@@ -258,17 +389,26 @@ BarWidget {
     })
   }
 
-  // Keep-up watchdog: the user wants a tunnel (keepUp, or the kill switch is
-  // armed) but the status file says there isn't one and nothing is in flight.
-  // Reconnect. 90 s debounce so a genuinely unreachable Proton free pool
-  // isn't hammered, and so the reconnect + its own retries get time to land.
+  // Keep-up watchdog: the user wants a tunnel (a tunnel was observed up this
+  // session, or the kill switch is armed *and* we've connected at least once)
+  // but the status file says there isn't one and nothing is in flight.
+  // Reconnect — with exponential backoff (90 s, 3 m, 6 m, 12 m, 24 m, capped
+  // at 1 h) and a hard stop after watchdogMaxFails so a genuinely unreachable
+  // free pool, or a signed-out box, is never hammered.
   function evaluateWatchdog() {
     guard.run("evaluateWatchdog", function () {
-      if (!(root.keepUp || root.cfg.killSwitch)) return
+      if (!(root.keepUp || (root.cfg.killSwitch && root.everConnected))) return
       if (root.st.connected || root.busy) return
+      if (root.signedOut) return
+      if (root.watchdogFails >= root.watchdogMaxFails) return   // parked; needs a manual connect / sign-in
       if (killSwitchProc.running || killSwitchSyncProc.running || reconcileProc.running) return
       if (root.effectiveAction === "disconnecting") return   // don't fight a user disconnect
-      if (root.nowSec - root.lastKeepUpAt < 90) return
+      // Off WiFi there's nothing to reconnect to — hold the intent (keepUp
+      // stays set) but don't burn the debounce window, so the reconnect fires
+      // on the next tick once WiFi is back rather than a backoff later.
+      if (root.wifiBlocksConnect) return
+      var wait = Math.min(90 * Math.pow(2, root.watchdogFails), 3600)
+      if (root.nowSec - root.lastKeepUpAt < wait) return
       root.lastKeepUpAt = root.nowSec
       root.runConnect()
     })
@@ -288,7 +428,7 @@ BarWidget {
   function toggleAutoRotate() { root.setAutoRotate(!root.cfg.autoRotate) }
   function setIntervalSec(sec) { root.patchConfig({ intervalSec: Model.clampInterval(sec) }) }
 
-  // The underlying `protonvpn-cli` killswitch verb can fail (older CLI
+  // The underlying `protonvpn` killswitch verb can fail (signed out, older CLI
   // version, missing permission) and protonvpn-rotate reports that with a
   // non-zero exit — execDetached() throws that away, so a failed call used
   // to leave the toggle showing "on" (and its reassuring "no leak" copy)
@@ -304,8 +444,11 @@ BarWidget {
       if (code === 0) {
         root.killSwitchError = ""
         root.patchConfig({ killSwitch: killSwitchProc.pendingOn })
+      } else if (code === 3) {
+        root.killSwitchError = "kill switch needs sign-in — run: protonvpn signin"
+        root.signedOut = true
       } else {
-        root.killSwitchError = "kill switch " + (killSwitchProc.pendingOn ? "on" : "off") + " failed — check protonvpn-cli"
+        root.killSwitchError = "kill switch " + (killSwitchProc.pendingOn ? "on" : "off") + " failed — check protonvpn"
       }
     }
   }
@@ -322,24 +465,25 @@ BarWidget {
   }
   function toggleKillSwitch() { root.setKillSwitch(!root.cfg.killSwitch) }
 
-  // Startup reconciliation. The old code ran `killswitch on` here, but
-  // proton-vpn-cli 1.0.3 rejects a kill-switch change while connected — which
-  // is exactly the state at shell start — so it always failed silently and
-  // the tunnel ran with the kill switch OFF while the panel showed it ON.
-  // `killswitch sync` reads the config flag, does the disconnect→set→reconnect
-  // dance only if the CLI's real setting differs, and is a no-op otherwise.
+  // Startup reconciliation. Probe sign-in first, then let `killswitch sync`
+  // reconcile the CLI's real setting to the widget config flag — the script
+  // now no-ops that quietly when signed out, so this can't spam the CLI the
+  // way the old unconditional `killswitch on` did.
   Process {
     id: killSwitchSyncProc
     command: [root.scriptPath, "killswitch", "sync"]
     running: false
     onExited: function (code) {
-      if (code !== 0)
-        root.killSwitchError = "kill switch sync failed — check protonvpn-cli"
+      if (code !== 0 && code !== 3)
+        root.killSwitchError = "kill switch sync failed — check protonvpn"
       stateStore.reload()
     }
   }
 
-  Component.onCompleted: killSwitchSyncProc.running = true
+  Component.onCompleted: {
+    root.refreshAuth()
+    killSwitchSyncProc.running = true
+  }
 
   // ── IPC (read-only status + the same verbs the panel exposes) ───────────
   IpcHandler {
@@ -365,7 +509,9 @@ BarWidget {
           org: root.st.org,
           since: root.st.since,
           lastRotate: root.st.lastRotate,
-          error: root.st.error,
+          error: root.viewState.error,
+          signedOut: root.signedOut,
+          wifiState: root.wifiState,
           autoRotate: root.cfg.autoRotate,
           intervalSec: root.cfg.intervalSec,
           killSwitch: root.cfg.killSwitch,
@@ -433,7 +579,17 @@ BarWidget {
     text: root.displayText
     horizontalMargin: 8.75
     verticalPadding: 8.75
-    onPressed: function (b) { root.togglePanel() }
+    // Left click opens the panel (unchanged). Right / middle click is a
+    // shortcut for the panel's Disconnect button — a one-click teardown
+    // without opening the panel first, mirroring score's / ttsplayer's
+    // bar-widget shortcuts.
+    onPressed: function (b) {
+      if ((b === Qt.RightButton || b === Qt.MiddleButton) && root.st.connected && !root.busy) {
+        root.runDisconnect()
+        return
+      }
+      root.togglePanel()
+    }
 
     Kit.AttentionDot {
       anchors.top: parent.top

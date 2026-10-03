@@ -17,6 +17,28 @@ test("parseState is tolerant of a half-written repos/totals shape", () => {
   assert.equal(r.totals.reposScanned, 0)
 })
 
+test("parseState keeps valid repos while surfacing malformed entries", () => {
+  const r = Model.parseState(JSON.stringify({
+    updatedAt: 700,
+    repos: [
+      { path: "/good", name: "good", ok: true },
+      null,
+      { path: "/bad", name: "bad", ok: true, dirty: "not an object" }
+    ],
+    totals: { reposScanned: 0, okRepos: 3, errorRepos: 0 }
+  }))
+  assert.equal(r.repos.length, 3)
+  assert.equal(r.repos[0].ok, true)
+  assert.equal(r.repos[1].name, "Invalid repository")
+  assert.equal(r.repos[1].error, "invalid repository data")
+  assert.equal(r.repos[2].error, "invalid repository data")
+  assert.equal(r.totals.reposScanned, 3)
+  assert.equal(r.totals.okRepos, 1)
+  assert.equal(r.totals.errorRepos, 2)
+  assert.equal(Model.barLabel(r), "2")
+  assert.equal(Model.overallLevel(r), "critical")
+})
+
 test("parseRepo defaults a missing dirty/ahead/behind shape", () => {
   const r = Model.parseRepo({ path: "/x", name: "x", ok: true })
   assert.deepEqual(r.dirty, { staged: 0, unstaged: 0, untracked: 0, total: 0 })

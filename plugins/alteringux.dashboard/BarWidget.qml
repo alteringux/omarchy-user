@@ -27,6 +27,7 @@ BarWidget {
   // so the Store watches it for outside changes rather than owning it.
   property alias state: stateStore.value
   property bool refreshing: false
+  property bool refreshPending: false
 
   readonly property bool hasUpdates: state.system.items.length > 0
 
@@ -39,7 +40,7 @@ BarWidget {
     // so after the very first external write, the watch goes dead and
     // onFileChanged never fires again without this idle poll. Same
     // watch-on-create blind spot Kit.Store's own header documents.
-    pollMs: 5000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -48,12 +49,23 @@ BarWidget {
     command: ["bash", root.refreshScript]
     running: false
     onRunningChanged: root.refreshing = running
-    onExited: stateStore.reload()
+    onExited: {
+      stateStore.reload()
+      if (root.refreshPending) {
+        root.refreshPending = false
+        Qt.callLater(function() {
+          if (!refreshProc.running) root.runRefresh()
+        })
+      }
+    }
   }
 
   function runRefresh() {
     guard.run("runRefresh", function() {
-      if (refreshProc.running) return
+      if (refreshProc.running) {
+        root.refreshPending = true
+        return
+      }
       refreshProc.running = true
     })
   }

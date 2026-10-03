@@ -117,6 +117,8 @@ Item {
     debounceTimer.restart()
   }
 
+  property string suggestForFilter: ""
+
   function runSuggest() {
     guard.run("runSuggest", function() {
       if (!root.filterText) {
@@ -124,6 +126,7 @@ Item {
         suggestModel.clear()
         return
       }
+      root.suggestForFilter = root.filterText
       suggestProcess.command = ["omarchy-dictionary-suggest-summaries", root.filterText, "8"]
       suggestProcess.running = true
     })
@@ -131,6 +134,7 @@ Item {
 
   function applySuggestions(list) {
     guard.run("applySuggestions", function() {
+      if (root.filterText !== root.suggestForFilter) return
       root.suggestions = list
       suggestModel.clear()
       for (var i = 0; i < list.length; i++) {
@@ -252,7 +256,6 @@ Item {
   Process {
     id: trackProcess
     running: false
-    property string forWord: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {

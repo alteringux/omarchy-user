@@ -66,7 +66,10 @@ BarWidget {
   function pokePet() { guard.run("poke", function () { root._commit(Model.poke(root._tick(), root.nowMs)) }) }
   function toggleSleep() {
     guard.run("toggleSleep", function () {
-      root._commit(Model.setSleep(root._tick(), !root.state.manualSleep))
+      // Key off the pet's ACTUAL sleep state, not just manualSleep: an
+      // energy-exhausted pet has manualSleep=false, so the old toggle sent
+      // it a redundant "sleep" on the first press and never woke it.
+      root._commit(Model.setSleep(root._tick(), !root.liveState.asleep))
     })
   }
   function selectPet(id) { guard.run("selectPet:" + id, function () { root._commit(Model.selectPet(root._tick(), id)) }) }

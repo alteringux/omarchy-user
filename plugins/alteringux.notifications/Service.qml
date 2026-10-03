@@ -19,10 +19,10 @@ Item {
 
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string home: Quickshell.env("HOME")
-  // History + DND live under XDG_STATE_HOME: they're persistent user state
-  // (the notifications received, the last-set DND preference), not
-  // regeneratable cache that a `rm -rf ~/.cache` should wipe.
-  readonly property string stateDir: home + "/.local/state/omarchy/"
+  // Keep state with the user's configured XDG state directory. Omarchy's
+  // historical default remains ~/.local/state when the variable is unset.
+  readonly property string xdgStateHome: Quickshell.env("XDG_STATE_HOME")
+  readonly property string stateDir: (xdgStateHome || (home + "/.local/state")).replace(/\/+$/, "") + "/omarchy/"
   readonly property string settingsPath: stateDir + "notifications.json"
   // One file per on-screen popup, so live toasts survive shell restarts.
   // A file exists exactly as long as its popup is showing: written when the
@@ -685,6 +685,40 @@ Item {
     }
     return rows
   }
+  function ensureEmptyHistoryPlaceholder() {
+    var existing = []
+    for (var i = 0; i < popupModel.count; i++) existing.push(popupModel.get(i))
+
+    var unique = NotificationLogic.dedupeHistoryPlaceholders(existing)
+    var hasPlaceholder = false
+    for (var j = 0; j < unique.length; j++) {
+      if (NotificationLogic.isHistoryPlaceholder(unique[j])) {
+        hasPlaceholder = true
+        break
+      }
+    }
+    if (unique.length === existing.length && hasPlaceholder) return
+
+    for (var k = popupModel.count - 1; k >= 0; k--) {
+      if (NotificationLogic.isHistoryPlaceholder(popupModel.get(k)))
+        popupModel.remove(k)
+    }
+    popupModel.insert(0, {
+      id: -1,
+      originalId: -1,
+      app: "omarchy-action",
+      appIcon: "",
+      summary: "No recent notifications",
+      body: "",
+      image: "",
+      glyph: "󰂚",
+      execArgv: "",
+      urgency: NotificationUrgency.Low,
+      expireTimeout: 0,
+      timestamp: Date.now()
+    })
+  }
+
 
   function replayHistory(raw) {
     var rows = NotificationLogic.historyRows(
@@ -692,21 +726,9 @@ Item {
     service.replayCarryOver = []
 
     // Replaying nothing at all looks like a dead keybinding, so say so.
+    // The helper is idempotent: repeated empty replays keep one placeholder.
     if (rows.length === 0) {
-      popupModel.insert(0, {
-        id: -1,
-        originalId: -1,
-        app: "omarchy-action",
-        appIcon: "",
-        summary: "No recent notifications",
-        body: "",
-        image: "",
-        glyph: "󰂚",
-        execArgv: "",
-        urgency: NotificationUrgency.Low,
-        expireTimeout: 0,
-        timestamp: Date.now()
-      })
+      service.ensureEmptyHistoryPlaceholder()
       return
     }
 

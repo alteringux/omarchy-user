@@ -71,6 +71,13 @@ echo "$json" | jq -e '.[0].title == "Dentist" and .[0].location == "Clinic"' >/d
 [ "$(jq 'length' <<<"$("$CLI" block list --json)")" = "1" ] && ok "block add shows up in block list" || bad "block list"
 [ "$(jq 'length' <<<"$("$CLI" event list --json)")" = "2" ] && ok "a block is also an entry in event list" || bad "block not in event list"
 
+"$CLI" block add 2026-09-10 15:00 15:00 "Zero" >/dev/null 2>&1
+[ "$?" != 0 ] && ok "block add rejects zero duration" || bad "zero-duration block accepted"
+"$CLI" block add 2026-09-10 16:00 15:00 "Backwards" >/dev/null 2>&1
+[ "$?" != 0 ] && ok "block add rejects an end before start" || bad "backwards block accepted"
+[ "$(jq 'length' <<<"$("$CLI" block list --json)")" = "1" ] \
+  && ok "rejected blocks do not leak rows" || bad "invalid block leaked a row"
+
 "$CLI" event move 1 2026-09-11 11:00 11:30 >/dev/null
 moved="$("$CLI" event list --json | jq -c '.[] | select(.id == 1)')"
 echo "$moved" | jq -e '.date == "2026-09-11" and .start == "11:00" and .end == "11:30"' >/dev/null \
@@ -171,6 +178,28 @@ grep -q "OnCalendar=\*-\*-\* 08:00:00" "$FAKEHOME/.config/systemd/user/omarchy-c
   && ok "digest timer uses the configured digest time" || bad "digest time not applied"
 grep -q "enable --now omarchy-calendar-digest.timer omarchy-calendar-refresh.timer" "$CALLS" \
   && ok "install-timers enables both timers" || bad "enable call missing" "$(cat "$CALLS")"
+# ── Ask AI helper: success and backend failure stay observable ───────────
+AI="${OMARCHY_CALENDAR_AI_BIN:-$HOME/.config/omarchy/local-bin/omarchy-calendar-ai}"
+cat > "$BIN/hermes" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "${AI_CALLS:?}"
+printf 'Calendar helper reply\n'
+EOF
+chmod +x "$BIN/hermes"
+AI_CALLS="$WORK/ai-calls"; export AI_CALLS
+ai_out="$("$AI" "show Friday slots")"
+[ "$ai_out" = "Calendar helper reply" ] && ok "Ask AI helper returns the backend answer" || bad "Ask AI helper answer" "$ai_out"
+grep -q "show Friday slots" "$AI_CALLS" && ok "Ask AI helper forwards the prompt" || bad "Ask AI prompt forwarding"
+cat > "$BIN/hermes" <<'EOF'
+#!/usr/bin/env bash
+echo "backend unavailable" >&2
+exit 7
+EOF
+chmod +x "$BIN/hermes"
+ai_err="$WORK/ai-error"
+"$AI" "fail visibly" >/dev/null 2>"$ai_err"
+[ "$?" != 0 ] && grep -q "hermes exited 7" "$ai_err" \
+  && ok "Ask AI helper exposes backend failures" || bad "Ask AI failure visibility" "$(cat "$ai_err")"
 
 # ── summary ─────────────────────────────────────────────────────────
 echo
