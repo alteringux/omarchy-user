@@ -47,6 +47,15 @@ test("parseState pulls through well-formed sections", () => {
   assert.strictEqual(s.digest.text, "all quiet")
 })
 
+test("parseState exposes a tolerant skill snapshot", () => {
+  const s = Model.parseState(JSON.stringify({
+    skills: { generatedAt: "2026-01-01T00:00:00Z", thresholdDays: 7, summary: { total: 1 }, skills: [{ id: "product-teardown", uses: 4 }] }
+  }))
+  assert.strictEqual(s.skills.generatedAt, "2026-01-01T00:00:00Z")
+  assert.strictEqual(s.skills.thresholdDays, 7)
+  assert.strictEqual(s.skills.items[0].id, "product-teardown")
+})
+
 test("parseState ignores a section whose items field is not an array", () => {
   const s = Model.parseState(JSON.stringify({ news: { items: "nope", updatedAt: "t" } }))
   assert.deepStrictEqual(s.news.items, [])
@@ -76,4 +85,25 @@ test("formatRelative buckets minutes, hours, and days", () => {
 
 test("formatRelative clamps a future timestamp to 'just now'", () => {
   assert.strictEqual(Model.formatRelative(new Date(Date.now() + 60000).toISOString()), "just now")
+})
+
+test("parseState filters malformed items before the panel sees them", () => {
+  const s = Model.parseState(JSON.stringify({
+    notes: { items: [null, "bad", { text: "keep", at: 42 }] },
+    news: { items: [{ title: "keep", url: 7 }, {}, { title: 9 }, "bad"] },
+    system: { items: [{ text: "keep" }, null, { text: 4 }] }
+  }))
+  assert.deepStrictEqual(s.notes.items, [{ text: "keep" }])
+  assert.deepStrictEqual(s.news.items, [{ title: "keep" }])
+  assert.deepStrictEqual(s.system.items, [{ text: "keep" }])
+})
+
+test("parseState ignores non-string timestamps and digest text", () => {
+  const s = Model.parseState(JSON.stringify({
+    news: { updatedAt: 42, items: [] },
+    digest: { text: { nope: true }, updatedAt: ["bad"] }
+  }))
+  assert.strictEqual(s.news.updatedAt, null)
+  assert.strictEqual(s.digest.text, "")
+  assert.strictEqual(s.digest.updatedAt, null)
 })

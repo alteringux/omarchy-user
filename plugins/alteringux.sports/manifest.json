@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.sports",
+  "name": "Sports",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Multi-sport dashboard: live scores, upcoming fixtures, recent results, player rosters, standings, and a form-based match predictor, all from TheSportsDB's free API",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Sports",
+    "description": "Live scores and next fixtures on the bar; click for the full dashboard — fixtures, results, players, standings, and predictions",
+    "category": "Sports",
+    "allowMultiple": false
+  }
+}

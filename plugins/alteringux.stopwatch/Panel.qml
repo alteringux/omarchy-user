@@ -15,7 +15,9 @@ Panel {
   property var anchorItem: null
   property var hostWidget: null
 
-  property int intervalValue: 5
+  // Seeds from the persisted last-used interval once hostWidget is injected;
+  // a user edit below breaks this binding and pins their choice for the session.
+  property int intervalValue: hostWidget ? hostWidget.lastInterval : 5
   property string labelValue: ""
 
   readonly property var guard: Kit.BugGuard.create("alteringux.stopwatch", function(argv) { Quickshell.execDetached(argv) })
@@ -36,7 +38,7 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened && root.anchorItem !== null
-    contentWidth: panel.fittedContentWidth(Style.space(260))
+    contentWidth: panel.fittedContentWidth(Style.space(280))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
     PanelKeyCatcher {
@@ -60,24 +62,34 @@ Panel {
         Kit.PanelHead {
           glyph: "\uf2f2"   // nf-fa-stopwatch, matches the bar widget
           title: "Stopwatch"
-          meta: (hostWidget && hostWidget.active) ? "Running" : "Ready"
+          meta: {
+            if (!(hostWidget && hostWidget.active)) return "Ready"
+            return hostWidget.paused ? "Paused" : "Running"
+          }
           foreground: root.barForeground
         }
 
+        // The live readout, promoted to a hero figure (like the countdown
+        // cards' days-remaining number, or timers' elapsed line) instead of
+        // flat body text — it's the one thing this panel exists to show while
+        // a stopwatch is running, and the accent/warning colour repeats the
+        // running/paused distinction the badge glyphs already carry.
         Text {
           visible: hostWidget && hostWidget.active
-          text: hostWidget ? ("Running: " + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
-          color: root.barForeground
+          text: hostWidget ? ((hostWidget.paused ? "Paused: " : "Running: ") + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
+          color: (hostWidget && hostWidget.paused) ? Kit.Palette.warning : Color.accent
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.heading
           font.bold: true
           width: content.width
           wrapMode: Text.WordWrap
         }
 
-        // Voice on/off for the running stopwatch. Flips the CLI's marker file
+        // Sound on/off for the running stopwatch. Flips the CLI's marker file
         // via hostWidget.toggleVoice(); speak() re-reads it each interval, so
         // the change applies on the next announcement with no unit restart.
+        // Shown in bell mode too now — the mute marker silences the bell as
+        // well, for "show me the interval in the bar, don't ring it".
         // Mouse-only (activeFocusOnTab off) to stay out of the panel's
         // Enter=start / X=cancel / Esc=close keyboard model.
         Toggle {
@@ -85,21 +97,65 @@ Panel {
           visible: hostWidget && hostWidget.active
           width: content.width
           activeFocusOnTab: false
-          label: "Voice announcements"
+          label: (hostWidget && hostWidget.chimeMode) ? "Interval bell" : "Voice announcements"
           description: (hostWidget && hostWidget.voiceMuted)
-            ? "Muted — silent until you switch this back on"
-            : "Speaking the elapsed time every interval"
+            ? "Muted — the interval still ticks over in the bar, silently"
+            : ((hostWidget && hostWidget.chimeMode)
+               ? "Ringing a bell every interval"
+               : "Speaking the elapsed time every interval")
           checked: !(hostWidget && hostWidget.voiceMuted)
           foreground: root.barForeground
           onClicked: if (hostWidget) hostWidget.toggleVoice()
         }
 
+        // Bell instead of the spoken time. Shown even while idle so it can be
+        // set as the default for the next stopwatch (persisted to config); a
+        // click while one is running also flips it live via the CLI marker.
+        // Turning it on also clears any mute, so the bell is actually audible.
+        // Mouse-only, same as the voice toggle.
+        Toggle {
+          id: bellToggle
+          width: content.width
+          activeFocusOnTab: false
+          label: "Ring a bell"
+          readonly property bool chOn: hostWidget
+            ? (hostWidget.active ? hostWidget.chimeMode : hostWidget.chimeDefault)
+            : false
+          description: chOn
+            ? "A bell at each interval, instead of speaking the time"
+            : "Speak the elapsed time at each interval"
+          checked: chOn
+          foreground: root.barForeground
+          onClicked: {
+            if (!hostWidget) return
+            var v = !chOn
+            hostWidget.rememberChimeDefault(v)
+            if (hostWidget.active) {
+              hostWidget.setChimeMode(v)
+              if (v && hostWidget.voiceMuted) hostWidget.setVoiceMuted(false)
+            }
+          }
+        }
+
         Text {
           visible: hostWidget && !hostWidget.active && hostWidget.lastSessionSummary.length > 0
           text: hostWidget ? ("Last session: " + hostWidget.lastSessionSummary) : ""
-          color: root.barForeground
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
+          width: content.width
+          wrapMode: Text.WordWrap
+        }
+
+        // "N sessions today, HH:MM total" — an at-a-glance daily total from
+        // the same history log the last-session comparison already reads,
+        // shown only once idle and once there's something to report.
+        Text {
+          visible: hostWidget && !hostWidget.active && hostWidget.todaySummary.length > 0
+          text: hostWidget ? hostWidget.todaySummary : ""
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
           width: content.width
           wrapMode: Text.WordWrap
         }
@@ -114,7 +170,10 @@ Panel {
             from: 1
             to: 60
             foreground: root.barForeground
-            onModified: function(v) { root.intervalValue = v }
+            onModified: function(v) {
+              root.intervalValue = v
+              if (hostWidget) hostWidget.rememberInterval(v)
+            }
           }
         }
 
@@ -150,6 +209,21 @@ Panel {
             onClicked: root.startIfPossible()
           }
           Button {
+            text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
+            foreground: root.barForeground
+            bordered: true
+            onClicked: {
+              if (!hostWidget) return
+              if (hostWidget.paused) {
+                hostWidget.resumeStopwatch()
+                hostWidget.pausedEpoch = 0
+              } else {
+                hostWidget.pauseStopwatch()
+                hostWidget.pausedEpoch = Math.floor(Date.now() / 1000)
+              }
+            }
+          }
+          Button {
             text: "Cancel"
             foreground: root.barForeground
             bordered: true
@@ -160,9 +234,9 @@ Panel {
 
         Text {
           text: "Enter: start  ·  X: cancel  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          font.pixelSize: Style.font.caption
         }
       }
     }

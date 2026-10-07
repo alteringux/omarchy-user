@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.memmon",
+  "name": "Memory Monitor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live memory pressure on the bar with its own panel: RAM used/total/available, swap, a 10-minute trend sparkline with min/avg/max stats, and the top processes by memory. Shares the ~/.local/bin/omarchy-sysmon sampler with cpumon and tempmon.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Memory Monitor",
+    "description": "RAM % with swap and trend breakdown",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

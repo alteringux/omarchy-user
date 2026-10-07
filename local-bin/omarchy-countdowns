@@ -77,21 +77,32 @@ write_json() {   # $1 = target file; stdin = JSON
   fi
 }
 
+# Locked so two verbs invoked back-to-back (the bar widget's own execDetached
+# fallback fires one of these while the queued one is still running) can't
+# race a read-modify-write of the same file: without this, both reads see the
+# same "before" state and the second write silently clobbers the first.
 state_jq() {   # [extra jq args...] <program> — input = current state; writes back
   local prog="${!#}"
   local args=("${@:1:$#-1}")
-  read_state | jq "${args[@]}" "$prog" | write_json "$STATE_FILE"
+  (
+    flock 9
+    read_state | jq "${args[@]}" "$prog" | write_json "$STATE_FILE"
+  ) 9>"$STATE_FILE.lock"
 }
 
-# Fold a just-added countdown into the log (newest first, capped).
+# Fold a just-added countdown into the log (newest first, capped). Locked like
+# state_jq, against the history file's own concurrent-write race.
 record_add() {   # $1 = label, $2 = days
-  read_history | jq \
-    --arg label "$1" \
-    --argjson days "$2" \
-    --argjson now "$(now_ms)" \
-    --argjson cap "$HISTORY_CAP" '
-      .added = ([{label: $label, days: $days, addedAt: $now}] + (.added // []))[0:$cap]
-    ' | write_json "$HISTORY_FILE"
+  (
+    flock 9
+    read_history | jq \
+      --arg label "$1" \
+      --argjson days "$2" \
+      --argjson now "$(now_ms)" \
+      --argjson cap "$HISTORY_CAP" '
+        .added = ([{label: $label, days: $days, addedAt: $now}] + (.added // []))[0:$cap]
+      ' | write_json "$HISTORY_FILE"
+  ) 9>"$HISTORY_FILE.lock"
 }
 
 # Prepend one entry and record it. $1 = label (trimmed, non-empty),
@@ -174,9 +185,12 @@ case "$cmd" in
     label="$(trim "$@")"
     [ -n "$label" ] || exit 0
     lc="$(printf '%s' "$label" | tr '[:upper:]' '[:lower:]')"
-    read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
-      .added = ([ .added[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
-    ' | write_json "$HISTORY_FILE"
+    (
+      flock 9
+      read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
+        .added = ([ .added[]? | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
+      ' | write_json "$HISTORY_FILE"
+    ) 9>"$HISTORY_FILE.lock"
     ;;
 
   -h | --help | help)

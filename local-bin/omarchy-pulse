@@ -1,0 +1,414 @@
+#!/usr/bin/env bash
+# omarchy-pulse — the alteringux.* activity feed + "this plugin needs action"
+# signal.
+#
+# Sole writer of three files in ~/.local/state/omarchy/:
+#   alteringux-activity.jsonl    append-only log, one event per line, auto-pruned
+#   alteringux-attention.json    { items: { <pluginId>: {level,label,action,ts} } }
+#   alteringux-pulse-state.json  { lastReadTs }  — the "mark all read" watermark
+#
+# The alteringux.pulse bar widget is a thin view: it watches the files, shows a
+# bell with an unread count, lists recent activity + a "do this next" pick, and
+# calls the verbs below. Other plugins/CLIs emit into it with `omarchy-pulse
+# log ...`. The engine (Model.js, via pulse-cli.js) is shared with the widget so
+# there is one implementation of prune/summary/next-action.
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-pulse log <plugin> <message...> [--action CMD] [--action-label TEXT]
+#                     [--level info|warning|urgent|critical] [--attention] [--notify]
+#                                    append an activity event. --attention also
+#                                    raises an attention item for <plugin>
+#                                    (label = message). A toast fires for
+#                                    urgent/critical or with --notify.
+#   omarchy-pulse attention <plugin> --label TEXT [--level L] [--action CMD] [--action-label TEXT]
+#                                    raise/replace <plugin>'s attention item
+#   omarchy-pulse clear <plugin> | --all       drop an attention item
+#   omarchy-pulse act <plugin>                 run <plugin>'s attention action, then clear it
+#   omarchy-pulse read                         mark everything read (lastReadTs = now)
+#   omarchy-pulse list [-n N] [--json]         recent activity, newest first
+#   omarchy-pulse get                          raw { activity, attention, state, usage, summary }
+#   omarchy-pulse usage [--json] [--days N]    refresh/report Kit.Usage plugin data
+#   omarchy-pulse status                       live { unread, total, needAction, topLevel, usage, mostUsed, stalePlugins }
+#   omarchy-pulse prune                        force a prune of the log
+#
+# Env: OMARCHY_STATE_DIR   override the state dir (tests)
+#      OMARCHY_PULSE_DIR   override the plugin dir holding Model.js / pulse-cli.js
+#      OMARCHY_PULSE_QUIET=1   skip notify-send (tests)
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+PULSE_DIR="${OMARCHY_PULSE_DIR:-$HOME/.config/omarchy/plugins/alteringux.pulse}"
+ACT_FILE="$STATE_DIR/alteringux-activity.jsonl"
+ATT_FILE="$STATE_DIR/alteringux-attention.json"
+ACT_LOCK="$STATE_DIR/.alteringux-activity.lock"
+ATT_LOCK="$STATE_DIR/.alteringux-attention.lock"
+STATE_FILE="$STATE_DIR/alteringux-pulse-state.json"
+USAGE_FILE="$STATE_DIR/alteringux-plugin-usage.json"
+USAGE_ACK_FILE="$STATE_DIR/alteringux-pulse-usage-acks.json"
+USAGE_BIN="${OMARCHY_PLUGIN_USAGE_BIN:-$HOME/.local/bin/omarchy-plugin-usage}"
+USAGE_DAYS="${OMARCHY_PLUGIN_USAGE_DAYS:-30}"
+CLI="$PULSE_DIR/pulse-cli.js"
+QUIET="${OMARCHY_PULSE_QUIET:-0}"
+
+die() { echo "omarchy-pulse: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+now_ms() { date +%s%N | cut -c1-13; }
+ensure_dir() { mkdir -p "$STATE_DIR"; }
+read_file() { if [ -f "$1" ]; then cat "$1"; else printf ''; fi; }
+
+have node || die "needs node on PATH"
+have jq || die "needs jq on PATH"
+
+bridge() { node "$CLI" "$1"; }
+
+put_file() {  # put_file <path>  ; content on stdin, atomic
+  local f="$1" tmp
+  ensure_dir
+  tmp="$(mktemp "${f}.XXXXXX")"
+  cat > "$tmp"
+  mv -f "$tmp" "$f"
+}
+
+build_payload() {  # -> {activityRaw, attentionRaw, stateRaw, usageRaw, now}
+  jq -n \
+    --arg act "$(read_file "$ACT_FILE")" \
+    --arg att "$(read_file "$ATT_FILE")" \
+    --arg st "$(read_file "$STATE_FILE")" \
+    --arg usage "$(read_file "$USAGE_FILE")" \
+    --argjson now "$(now_ms)" \
+    '{activityRaw:$act, attentionRaw:$att, stateRaw:$st, usageRaw:$usage, now:$now}'
+}
+
+usage_refresh() {
+  local raw
+  [ -x "$USAGE_BIN" ] || return 1
+  raw="$("$USAGE_BIN" --json --days "$USAGE_DAYS")" || return 1
+  printf '%s' "$raw" | jq -e 'type == "object" and .version == 1 and (.plugins | type == "array")' >/dev/null || return 1
+  printf '%s' "$raw" | jq -c . | put_file "$USAGE_FILE"
+}
+usage_item() {
+  local raw ack
+  raw="$(read_file "$USAGE_FILE")"
+  [ -n "$raw" ] || { printf 'null'; return 0; }
+  ack="$(read_file "$USAGE_ACK_FILE")"
+  [ -n "$ack" ] || ack='{}'
+  jq -e 'type == "object"' <<<"$ack" >/dev/null 2>&1 || ack='{}'
+  printf '%s' "$raw" | jq --argjson acknowledged "$ack" \
+    '{usageRaw: ., now: ('"$(now_ms)"'), acknowledged:$acknowledged}' \
+    | bridge usage-attention
+}
+
+sync_usage_attention() {
+  local raw
+  raw="$(read_file "$USAGE_FILE")"
+  ensure_dir
+  (
+    flock 9
+    local cur item ack
+    cur="$(read_file "$ATT_FILE")"
+    [ -n "$cur" ] || cur='{"version":1,"items":{}}'
+
+    # Drop acknowledgements once their snapshot is no longer stale. This
+    # allows the same plugin to raise again when it becomes stale later.
+    if [ -n "$raw" ] && jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1; then
+      ack="$(read_file "$USAGE_ACK_FILE")"
+      [ -n "$ack" ] || ack='{}'
+      jq -e 'type == "object"' <<<"$ack" >/dev/null 2>&1 || ack='{}'
+      ack="$(jq --argjson usage "$raw" '
+        reduce ($usage.plugins // [])[] as $p (.;
+          if ($p.tracked == true and
+              ($p.neverUsed == true or
+               (($usage.thresholdDays // 0) > 0 and
+                ($p.daysIdle != null) and ($p.daysIdle >= $usage.thresholdDays))))
+          then .
+          else del(.[$p.id])
+          end)
+        | with_entries(.key as $id | select(any(($usage.plugins // [])[]; .id == $id)))
+      ' <<<"$ack")" || ack='{}'
+      printf '%s' "$ack" | put_file "$USAGE_ACK_FILE"
+    fi
+
+    item="$(usage_item)" || return 0
+    if [ "$item" = "null" ]; then
+      printf '%s' "$cur" | jq '
+        .items //= {} |
+        if .items["plugin-usage"].usageManaged == true and .items["plugin-usage"].usageBase != null
+        then .items["plugin-usage"] = .items["plugin-usage"].usageBase
+        elif .items["plugin-usage"].source == "plugin-usage"
+        then del(.items["plugin-usage"])
+        else . end
+      ' | put_file "$ATT_FILE"
+      return 0
+    fi
+    printf '%s' "$cur" | jq --argjson item "$item" '
+      .version = 1 | .items //= {} |
+      if (.items["plugin-usage"] == null)
+        or (.items["plugin-usage"].source == "plugin-usage")
+      then .items["plugin-usage"] = ($item + {usageManaged:true})
+      elif .items["plugin-usage"].usageManaged == true and .items["plugin-usage"].usageBase != null
+      then
+        .items["plugin-usage"] =
+          (.items["plugin-usage"].usageBase +
+           {label: (.items["plugin-usage"].usageBase.label + " · " + $item.label),
+            usageBase: .items["plugin-usage"].usageBase, usageManaged:true})
+      else
+        .items["plugin-usage"] =
+          (.items["plugin-usage"] +
+           {label: ((.items["plugin-usage"].label // "") + " · " + $item.label),
+            action: (.items["plugin-usage"].action // ($item.action // "")),
+            actionLabel: (.items["plugin-usage"].actionLabel // ($item.actionLabel // "")),
+            usageBase: .items["plugin-usage"], usageManaged:true})
+      end
+    ' | put_file "$ATT_FILE"
+  ) 9>"$ATT_LOCK"
+}
+
+prune_log_unlocked() {
+  [ -f "$ACT_FILE" ] || return 0
+  jq -Rs --argjson now "$(now_ms)" '{activityRaw:., now:$now}' < "$ACT_FILE" \
+    | bridge prune | put_file "$ACT_FILE"
+}
+
+prune_log() {
+  ensure_dir
+  (
+    flock 9
+    prune_log_unlocked
+  ) 9>"$ACT_LOCK"
+}
+
+raise_attention() {  # <plugin> <label> <level> <action> <action_label>
+  local item
+  item="$(jq -n --arg label "$2" --arg level "$3" --arg action "$4" --arg alabel "$5" \
+    --argjson now "$(now_ms)" \
+    '{input:{label:$label, level:$level, action:$action, actionLabel:$alabel}, now:$now}' \
+    | bridge make-attention)"
+  ensure_dir
+  # alteringux-attention.json is a shared map keyed by plugin id — a dozen
+  # plugin CLIs and timers raise or clear their own entry. Serialise the
+  # read-modify-write so two overlapping writers can't lose one entry to
+  # last-writer-wins and silently drop a "needs you" signal from the single
+  # bar surface meant to collect them all. The locked section is just a read +
+  # jq + atomic rename, so a blocking wait is trivially short.
+  (
+    flock 9
+    local cur
+    cur="$(read_file "$ATT_FILE")"
+    [ -n "$cur" ] || cur='{"version":1,"items":{}}'
+    printf '%s' "$cur" | jq --arg p "$1" --argjson item "$item" \
+      '(.version = 1) | (.items //= {}) | .items[$p] = $item' | put_file "$ATT_FILE"
+  ) 9>"$ATT_LOCK"
+}
+
+maybe_notify() {  # <level> <plugin> <message> <force>
+  [ "$QUIET" = 1 ] && return 0
+  have notify-send || return 0
+  local urg
+  case "$1" in
+    critical) urg=critical ;;
+    urgent)   urg=normal ;;
+    *) [ "${4:-0}" = 1 ] && urg=normal || return 0 ;;
+  esac
+  notify-send -a "Pulse" -u "$urg" "󰂚  ${2#alteringux.}" "$3" 2>/dev/null || true
+}
+
+# ── verbs ────────────────────────────────────────────────────────────────
+
+cmd_log() {
+  local plugin="" message="" action="" alabel="" level="info" want_att=0 want_notify=0
+  [ $# -ge 1 ] || die "usage: omarchy-pulse log <plugin> <message...> [flags]"
+  plugin="$1"; shift
+  local parts=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --action)        action="${2:-}"; shift 2 ;;
+      --action-label)  alabel="${2:-}"; shift 2 ;;
+      --level)         level="${2:-info}"; shift 2 ;;
+      --attention)     want_att=1; shift ;;
+      --notify)        want_notify=1; shift ;;
+      --) shift; parts+=("$@"); break ;;
+      *)  parts+=("$1"); shift ;;
+    esac
+  done
+  message="${parts[*]}"
+  [ -n "$plugin" ] || die "log needs a <plugin>"
+  [ -n "$message" ] || die "log needs a <message>"
+
+  local event
+  event="$(jq -n --arg plugin "$plugin" --arg message "$message" --arg action "$action" \
+    --arg alabel "$alabel" --arg level "$level" --argjson now "$(now_ms)" \
+    '{input:{plugin:$plugin, message:$message, action:$action, actionLabel:$alabel, level:$level}, now:$now}' \
+    | bridge make-event)"
+  ensure_dir
+  # Appending and pruning are one transaction. Without the shared lock, one
+  # writer can prune from an older snapshot after another writer appends,
+  # replacing the newer file and losing that activity line.
+  (
+    flock 9
+    printf '%s\n' "$event" >> "$ACT_FILE"
+    prune_log_unlocked
+  ) 9>"$ACT_LOCK"
+
+  if [ "$want_att" = 1 ]; then
+    local alevel="$level"
+    [ "$alevel" = "info" ] && alevel="warning"
+    raise_attention "$plugin" "$message" "$alevel" "$action" "$alabel"
+  fi
+  maybe_notify "$level" "$plugin" "$message" "$want_notify"
+}
+
+cmd_attention() {
+  local plugin="" label="" level="warning" action="" alabel=""
+  [ $# -ge 1 ] || die "usage: omarchy-pulse attention <plugin> --label TEXT [--level L] [--action CMD]"
+  plugin="$1"; shift
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --label)         label="${2:-}"; shift 2 ;;
+      --level)         level="${2:-warning}"; shift 2 ;;
+      --action)        action="${2:-}"; shift 2 ;;
+      --action-label)  alabel="${2:-}"; shift 2 ;;
+      *) die "attention: unexpected arg '$1'" ;;
+    esac
+  done
+  [ -n "$plugin" ] || die "attention needs a <plugin>"
+  [ -n "$label" ] || die "attention needs --label"
+  raise_attention "$plugin" "$label" "$level" "$action" "$alabel"
+}
+
+cmd_clear() {
+  local p="${1:-}"
+  [ "$#" -eq 1 ] || die "usage: omarchy-pulse clear <plugin> | --all"
+  case "$p" in
+    --all) ;;
+    "") die "usage: omarchy-pulse clear <plugin> | --all" ;;
+    -*) die "clear: unexpected arg '$p'" ;;
+  esac
+  ensure_dir
+  # Same shared-map read-modify-write as raise_attention — hold the same lock
+  # so a clear can't race a concurrent raise from another plugin.
+  (
+    flock 9
+    local cur raw ack
+    cur="$(read_file "$ATT_FILE")"
+    [ -n "$cur" ] || cur='{"version":1,"items":{}}'
+
+    # The usage item is an aggregate, so acknowledge each stale snapshot it
+    # represents. A changed use count or lastAt will not match this entry.
+    if [ "$p" = "--all" ] || [ "$p" = "plugin-usage" ]; then
+      raw="$(read_file "$USAGE_FILE")"
+      if [ -n "$raw" ] && jq -e 'type == "object"' <<<"$raw" >/dev/null 2>&1; then
+        ack="$(read_file "$USAGE_ACK_FILE")"
+        [ -n "$ack" ] || ack='{}'
+        jq -e 'type == "object"' <<<"$ack" >/dev/null 2>&1 || ack='{}'
+        ack="$(jq --argjson usage "$raw" --argjson current "$ack" '
+          reduce ($usage.plugins // [])[] as $p ($current;
+            if ($p.tracked == true and
+                ($p.neverUsed == true or
+                 (($usage.thresholdDays // 0) > 0 and
+                  ($p.daysIdle != null) and ($p.daysIdle >= $usage.thresholdDays))))
+            then .[$p.id] = {lastAt: ($p.lastAt // 0), uses: ($p.uses // 0)}
+            else .
+            end)
+        ' <<<"$ack")" || ack='{}'
+        printf '%s' "$ack" | put_file "$USAGE_ACK_FILE"
+      fi
+    fi
+
+    if [ "$p" = "--all" ]; then
+      printf '%s' "$cur" | jq '.items = {}' | put_file "$ATT_FILE"
+    elif [ "$p" = "plugin-usage" ]; then
+      printf '%s' "$cur" | jq '
+        if .items["plugin-usage"].usageManaged == true
+           and .items["plugin-usage"].usageBase != null
+        then .items["plugin-usage"] = .items["plugin-usage"].usageBase
+        else del(.items["plugin-usage"])
+        end
+      ' | put_file "$ATT_FILE"
+    else
+      printf '%s' "$cur" | jq --arg p "$p" 'del(.items[$p])' | put_file "$ATT_FILE"
+    fi
+  ) 9>"$ATT_LOCK"
+}
+
+cmd_act() {
+  local p="${1:-}"
+  [ -n "$p" ] || die "usage: omarchy-pulse act <plugin>"
+  local action
+  action="$(read_file "$ATT_FILE" | jq -r --arg p "$p" '.items[$p].action // empty' 2>/dev/null || true)"
+  cmd_clear "$p"
+  [ -n "$action" ] || return 0
+  setsid sh -c "$action" >/dev/null 2>&1 &
+}
+
+cmd_read() {
+  jq -n --argjson now "$(now_ms)" '{version:1, lastReadTs:$now}' | put_file "$STATE_FILE"
+}
+
+cmd_list() {
+  local n=20 json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -n) n="${2:-20}"; shift 2 ;;
+      --json) json=1; shift ;;
+      *) die "list: unexpected arg '$1'" ;;
+    esac
+  done
+  if [ "$json" = 1 ]; then
+    build_payload | bridge get | jq --argjson n "$n" '.activity.events[:$n]'
+  else
+    build_payload | jq --argjson n "$n" '.n = $n' | bridge render
+  fi
+}
+
+cmd_usage() {
+  local json=0 days="$USAGE_DAYS"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift ;;
+      --days) days="${2:-$USAGE_DAYS}"; shift 2 ;;
+      *) die "usage: omarchy-pulse usage [--json] [--days N]" ;;
+    esac
+  done
+  USAGE_DAYS="$days"
+  usage_refresh || true
+  sync_usage_attention
+  if [ "$json" = 1 ]; then
+    read_file "$USAGE_FILE" | jq .
+  else
+    read_file "$USAGE_FILE" | jq -r '
+      "most-used: " + ((.plugins // [])[:3] | map(.id + " (" + ((.uses // 0) | tostring) + ")") | join(", ")) +
+      "\nleast-used: " + ((.plugins // []) | sort_by(.uses // 0)[:3] | map(.id + " (" + (if .neverUsed then "never used" else ((.uses // 0) | tostring) end) + ")") | join(", ")) +
+      "\nstale: " + ((.plugins // []) | map(select(.tracked == true and (.neverUsed == true or ((.daysIdle // 0) >= (.thresholdDays // 0))))) |
+        map(.id + " (" + (if .neverUsed then "never used" else ((.daysIdle // 0) | floor | tostring) + "d idle" end) + ")") | join(", "))
+    '
+  fi
+}
+cmd_get() {
+  usage_refresh || true
+  sync_usage_attention
+  build_payload | bridge get
+}
+
+cmd_status() {
+  usage_refresh || true
+  sync_usage_attention
+  build_payload | bridge summary
+}
+cmd_prune() { prune_log; }
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-}" in
+  log)        shift; cmd_log "$@" ;;
+  attention)  shift; cmd_attention "$@" ;;
+  clear)      shift; cmd_clear "$@" ;;
+  act)        shift; cmd_act "$@" ;;
+  read)       shift; cmd_read ;;
+  list|ls)    shift; cmd_list "$@" ;;
+  get)        shift; cmd_get ;;
+  usage)      shift; cmd_usage "$@" ;;
+  status)     shift; cmd_status ;;
+  prune)      shift; cmd_prune ;;
+  ""|-h|--help) usage ;;
+  *) die "unknown command '$1' (try --help)" ;;
+esac

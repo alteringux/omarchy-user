@@ -6,14 +6,13 @@ import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
 
-// Stocks bar widget: owns the watchlist (which tickers to track — config,
-// written directly by this widget, same convention as alteringux.pomodoro)
-// and a background refresh timer that shells out to
-// bin/omarchy-stocks-refresh (Yahoo Finance's free/keyless endpoints) and
-// writes quotes + market-wide movers/trending to a state file (same
-// convention as alteringux.dashboard). The bar icon shows whichever
-// watchlist ticker moved most since previous close; the popup panel shows
-// the full card grid plus trending/movers.
+// Stocks bar widget: a background refresh timer shells out to
+// bin/omarchy-stocks-refresh (Yahoo Finance's free/keyless screener,
+// queried per-region and merged) and writes global top-10 gainers/losers +
+// trending symbols to a state file (same convention as
+// alteringux.dashboard). The bar icon cycles through the current top
+// movers; the popup panel shows the full gainers/losers card grid plus
+// trending searches.
 BarWidget {
   id: root
   moduleName: "alteringux.stocks"
@@ -21,52 +20,32 @@ BarWidget {
   readonly property string home: Quickshell.env("HOME")
   readonly property string pluginDir: home + "/.config/omarchy/plugins/alteringux.stocks"
   readonly property string refreshScript: pluginDir + "/bin/omarchy-stocks-refresh"
-  readonly property string searchScript: pluginDir + "/bin/omarchy-stocks-search"
-  readonly property string engageScript: pluginDir + "/bin/omarchy-stocks-engage"
 
-  // Four JSON files under ~/.local/state/omarchy/ (outside the plugin's own
-  // source tree — the shell's plugin-file watcher would reload the widget on
-  // every write). stocks.json / -engagement / -commentary are rewritten by
-  // bin/omarchy-stocks-{refresh,engage,commentary}, so their Stores watch for
-  // outside changes; the watchlist is plugin-owned.
+  // stocks.json lives under ~/.local/state/omarchy/ (outside the plugin's
+  // own source tree — the shell's plugin-file watcher would reload the
+  // widget on every write) and is rewritten by bin/omarchy-stocks-refresh.
   property alias state: stateStore.value
-  property alias watchlistConfig: watchlistStore.value
-  readonly property bool watchlistLoaded: watchlistStore.loaded
   property bool refreshing: false
-  property alias engagement: engagementStore.value
-  property alias commentary: commentaryStore.value
-
-  // ---- ticker autocomplete (read by Panel.qml's Add field) -------------
-  // Debounced results from bin/omarchy-stocks-search; each row is
-  // {symbol,name,exchange,type} (see Model.parseSearchResults). Non-US
-  // listings keep their suffix, so picking "BHP.AX" adds the ASX line.
-  property var searchResults: []
-  property string searchQuery: ""
+  // The refresh script keeps the last valid quotes on provider failure. Do
+  // not let that cache look like a current market snapshot.
+  readonly property bool providerStale: state && state.stale === true
+  readonly property string providerError: state && state.providerError ? String(state.providerError) : ""
 
   // ---- derived, read by Panel.qml -----------------------------------
-  // Most-clicked tickers surface first — the panel's one piece of learned
-  // behavior; see Model.sortByEngagement.
-  readonly property var watchlistQuotes: Model.sortByEngagement(
-    watchlistConfig.tickers.map(function (t) {
-      var raw = root.state.watchlist ? root.state.watchlist[t] : null
-      return Model.parseChartQuote(raw, t)
-    }),
-    root.engagement
-  )
+
   readonly property var gainers: (state.gainers || []).map(Model.parseScreenerQuote)
   readonly property var losers: (state.losers || []).map(Model.parseScreenerQuote)
   readonly property var trendingSymbols: Model.parseTrendingSymbols(state.trending, 12)
 
-  readonly property var biggestMover: Model.biggestMoverAbs(watchlistQuotes)
+  readonly property var biggestMover: Model.biggestMoverAbs(gainers.concat(losers))
 
   // ---- bar-icon cycling ----------------------------------------------------
-  // The bar icon rotates through every watchlist quote that has a live
-  // change%, one every `cycleSeconds` (read from this widget's shell.json
-  // layout entry, default 5), newest-engagement-first (watchlistQuotes is
-  // already engagement-sorted). Put "cycle": false in the layout entry to pin
-  // it to the single biggest mover instead. Scrolling the widget steps the
-  // rotation by hand and nudges the timer.
-  readonly property var cycleQuotes: watchlistQuotes.filter(function (q) {
+  // The bar icon rotates through the global top gainers/losers, one every
+  // `cycleSeconds` (read from this widget's shell.json layout entry, default
+  // 5), gainers first then losers. Put "cycle": false in the layout entry to
+  // pin it to the single biggest mover instead. Scrolling the widget steps
+  // the rotation by hand and nudges the timer.
+  readonly property var cycleQuotes: gainers.concat(losers).filter(function (q) {
     return q && q.changePct !== null && q.changePct !== undefined && !isNaN(q.changePct)
   })
   readonly property bool cycleEnabled: setting("cycle", true) && cycleQuotes.length > 1
@@ -102,12 +81,19 @@ BarWidget {
     ? ("  " + currentQuote.symbol + " " + Model.formatChangePct(currentQuote.changePct))
     : "  Stocks"
 
-  readonly property string tickerTooltip: currentQuote && currentQuote.symbol
-    ? (currentQuote.symbol
-       + (currentQuote.price !== null && currentQuote.price !== undefined ? "  " + Model.formatPrice(currentQuote.price, currentQuote.currency) : "")
-       + "  " + Model.formatChangePct(currentQuote.changePct)
-       + (currentQuote.name ? "\n" + currentQuote.name : ""))
-    : "Stocks — no watchlist quotes yet"
+  readonly property string tickerTooltip: {
+    var text = currentQuote && currentQuote.symbol
+      ? (currentQuote.symbol
+         + (currentQuote.price !== null && currentQuote.price !== undefined ? "  " + Model.formatPrice(currentQuote.price, currentQuote.currency) : "")
+         + "  " + Model.formatChangePct(currentQuote.changePct)
+         + (currentQuote.name ? "\n" + currentQuote.name : ""))
+      : "Stocks — no mover data yet"
+    if (root.providerStale)
+      text += "\nProvider unavailable — showing stale data"
+    else if (root.providerError)
+      text += "\n" + root.providerError
+    return text
+  }
 
   Timer {
     id: cycleTimer
@@ -125,133 +111,10 @@ BarWidget {
     parse: function (raw) { return Model.parseState(raw) }
   }
 
-  // self-improvement state — per-ticker click counts (bin/omarchy-stocks-engage)
-  // and cached AI commentary (bin/omarchy-stocks-commentary)
-  Kit.Store {
-    id: engagementStore
-    fileName: "stocks-engagement.json"
-    watch: true
-    parse: function (raw) { return Model.parseEngagement(raw) }
-  }
-
-  Kit.Store {
-    id: commentaryStore
-    fileName: "stocks-commentary.json"
-    watch: true
-    parse: function (raw) { return Model.parseCommentary(raw) }
-  }
-
-  // Fire-and-forget: records a card click for Model.sortByEngagement and
-  // bin/omarchy-stocks-commentary to learn from. Not gated on `running`
-  // like refreshProc — clicks are rare enough that overlap isn't a concern,
-  // and each invocation is a fresh Process so consecutive clicks don't fight
-  // for the same one.
-  function engageTicker(symbol) {
-    var proc = engageProcComponent.createObject(root, { command: ["bash", root.engageScript, symbol] })
-    proc.running = true
-  }
-
-  Component {
-    id: engageProcComponent
-    Process {
-      running: false
-      onExited: destroy()
-    }
-  }
-
-  // watchlist — plugin-owned config (which tickers to track)
-  Kit.Store {
-    id: watchlistStore
-    fileName: "stocks-watchlist.json"
-    parse: function (raw) { return Model.parseWatchlist(raw) }
-    // Kick the first price fetch once the watchlist has loaded.
-    onLoadedChanged: if (loaded) root.runRefresh()
-  }
-
-  function saveWatchlist() {
-    watchlistStore.save()
-  }
-
-  function addTicker(symbol) {
-    guard.run("addTicker", function() {
-      root.watchlistConfig = Model.addTicker(root.watchlistConfig, symbol)
-      root.saveWatchlist()
-      root.runRefresh()
-    })
-  }
-
-  function removeTicker(symbol) {
-    guard.run("removeTicker", function() {
-      root.watchlistConfig = Model.removeTicker(root.watchlistConfig, symbol)
-      root.saveWatchlist()
-    })
-  }
-
-  function clearWatchlist() {
-    guard.run("clearWatchlist", function() {
-      root.watchlistConfig = Model.defaultWatchlist()
-      root.saveWatchlist()
-    })
-  }
-
-  // -------------------------------------------------- ticker autocomplete
-  // Panel.qml calls searchTickers() on every keystroke in the Add field;
-  // this debounces (searchDebounce) and shells out to bin/omarchy-stocks-search,
-  // whose trimmed JSON stdout is parsed straight into searchResults. Kept
-  // separate from the price-refresh Process so an in-flight search never
-  // blocks (or is blocked by) a refresh.
-  function searchTickers(query) {
-    guard.run("searchTickers", function() {
-      var q = (query || "").trim()
-      root.searchQuery = q
-      if (q.length < 1) {
-        root.searchResults = []
-        searchDebounce.stop()
-        return
-      }
-      searchDebounce.restart()
-    })
-  }
-
-  function clearSearchResults() {
-    root.searchQuery = ""
-    root.searchResults = []
-    searchDebounce.stop()
-  }
-
-  Timer {
-    id: searchDebounce
-    interval: 220
-    repeat: false
-    onTriggered: {
-      if (!root.searchQuery) return
-      searchProc.command = ["bash", root.searchScript, root.searchQuery]
-      searchProc.running = true
-    }
-  }
-
-  Process {
-    id: searchProc
-    running: false
-    stdout: StdioCollector {
-      waitForEnd: true
-      onStreamFinished: {
-        guard.run("searchProc.onStreamFinished", function() {
-          try {
-            root.searchResults = Model.parseSearchResults(JSON.parse(text || "[]"), 8)
-          } catch (e) {
-            root.searchResults = []
-          }
-        })
-      }
-    }
-  }
-
   // -------------------------------------------------------------- refresh
-  // Set when runRefresh() is called while a refresh is already in flight
-  // (e.g. adding a second ticker moments after adding the first) — without
-  // this, that request would just be dropped until the next timer tick,
-  // silently leaving the newly-added ticker unfetched for up to 2 minutes.
+  // Set when runRefresh() is called while a refresh is already in flight —
+  // without this, that request would just be dropped until the next timer
+  // tick, silently delaying a manual refresh click by up to a full cycle.
   property bool refreshPending: false
 
   Process {
@@ -267,21 +130,34 @@ BarWidget {
     }
   }
 
+  // Wall-clock of the last fetch this instance started. Instance-local, so it
+  // breaks a single-widget refresh loop even when the shared file timestamp
+  // is unreadable.
+  property real lastRefreshAt: 0
   function runRefresh() {
-    if (!watchlistLoaded) return
-    if (refreshProc.running) {
-      root.refreshPending = true
-      return
-    }
-    refreshProc.command = ["bash", root.refreshScript].concat(root.watchlistConfig.tickers)
+    if (refreshProc.running) { root.refreshPending = true; return }
+    // Circuit breakers for the multi-screen refresh storm (one bottom bar PER
+    // screen) and for any caller that over-triggers this:
+    //  1. this instance fetched very recently
+    //  2. another instance already refreshed the shared stocks.json
+    var since = Date.now() - root.lastRefreshAt
+    if (root.lastRefreshAt > 0 && since >= 0 && since < root.refreshIntervalMs * 0.75) { root.refreshPending = false; return }
+    var age = Date.now() - (Date.parse(String((root.state && root.state.updatedAt) || "")) || 0)
+    if (age >= 0 && age < root.refreshIntervalMs * 0.75) { root.refreshPending = false; return }
+    root.lastRefreshAt = Date.now()
+    refreshProc.command = ["bash", root.refreshScript]
     refreshProc.running = true
   }
 
+  Component.onCompleted: root.runRefresh()
+
   // Poll cadence. Yahoo's keyless endpoints have no push/stream, so this is
-  // plain polling — default every 120s, floored at 30s. Override per-widget
-  // with "refreshSeconds" in this widget's shell.json layout entry (e.g. 300
-  // for a lighter 5-minute poll).
-  readonly property int refreshIntervalMs: Math.max(30, setting("refreshSeconds", 120)) * 1000
+  // plain polling — default every 30s (the floor). Global movers change more
+  // than a personal watchlist did, so this stays livelier than the old
+  // 120s default; override per-widget with "refreshSeconds" in this widget's
+  // shell.json layout entry (e.g. 60 for a lighter poll) if Yahoo's screener
+  // starts rate-limiting at this cadence.
+  readonly property int refreshIntervalMs: Math.max(120, setting("refreshSeconds", 300)) * 1000
 
   Timer {
     id: refreshTimer
@@ -292,6 +168,11 @@ BarWidget {
   }
 
   readonly property var guard: Kit.BugGuard.create("alteringux.stocks", function(argv) { Quickshell.execDetached(argv) })
+
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.stocks"
+  }
 
   // ---- Popup panel. Shape contract for shell.summon/hide/toggle routing:
   //      Bar.findPanelWidget requires open/close/opened on the bar-widget root.
@@ -344,14 +225,15 @@ BarWidget {
     function close(): void { root.close() }
     function toggle(): void { root.togglePanel() }
     function refresh(): void { root.runRefresh() }
-    function addTicker(symbol: string): void { root.addTicker(symbol) }
-    function removeTicker(symbol: string): void { root.removeTicker(symbol) }
     function status(): string {
       return guard.call("ipc.status", function() {
         return JSON.stringify({
-          tickers: root.watchlistConfig.tickers,
           updatedAt: root.state.updatedAt,
           refreshing: root.refreshing,
+          stale: root.providerStale,
+          providerError: root.providerError || null,
+          gainers: root.gainers.length,
+          losers: root.losers.length,
           showing: root.currentQuote && root.currentQuote.symbol ? root.currentQuote.symbol : null
         })
       }, "{}")
@@ -370,6 +252,7 @@ BarWidget {
     horizontalMargin: 8.75
     verticalPadding: 8.75
     tooltipText: root.tickerTooltip
+    dimmed: root.providerStale
 
     onPressed: function(b) {
       root.togglePanel()
@@ -388,6 +271,14 @@ BarWidget {
       color: root.tickerColor
       fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       fontSize: Style.font.body
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }

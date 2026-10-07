@@ -10,8 +10,9 @@ import "../alteringux.kit" as Kit
 // event's date (today and every past day are disabled), a "what's it for"
 // field, one-tap chips for labels you've counted down to before, then a
 // soonest-first list of cards — each with the label, its big days-remaining
-// figure (amber inside 3 days, dimmed once past), the target date, and a × to
-// delete it. Same shape as the alteringux.timers overlay.
+// figure (click it to toggle exact minutes remaining; amber inside 3 days,
+// dimmed once past), the target date, and a × to delete it. Same shape as the
+// alteringux.timers overlay.
 Panel {
   id: root
   moduleName: "alteringux.countdown"
@@ -25,9 +26,9 @@ Panel {
   // of treating them as panel shortcuts. See docs/adr/0003.
   property int inlineEditors: 0
 
-  // "soon" tint — a warm amber, matching the alteringux.timers "running long"
-  // colour. The theme palette has no dedicated warning role.
-  readonly property color soonColor: "#d29922"
+  // "soon" tint — the shared warning amber (alteringux.timers' "running
+  // long" colour lives here too now: Kit.Palette.warning, not a re-hardcoded hex).
+  readonly property color soonColor: Kit.Palette.warning
 
   // Month the calendar is showing, and the day picked in it ("" = none yet).
   property int viewYear: (new Date()).getFullYear()
@@ -367,13 +368,11 @@ Panel {
           }
 
           // ---- countdown list ------------------------------------
-          Text {
+          Kit.EmptyState {
             visible: root.entries.length === 0
             text: "No countdowns yet."
-            color: root.barForeground
-            opacity: 0.55
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            hint: "Pick a future date above, or type what you're counting down to."
+            foreground: root.barForeground
           }
 
           Repeater {
@@ -382,6 +381,7 @@ Panel {
               id: card
               required property var modelData
               readonly property int daysLeft: Model.daysRemaining(modelData.targetEpoch, root.nowMs)
+              property bool showingMinutes: false
               readonly property bool soon: daysLeft >= 0 && daysLeft <= 3
               readonly property bool past: daysLeft < 0
 
@@ -434,13 +434,29 @@ Panel {
                     if (hostWidget) hostWidget.renameEntry(card.modelData.id, value)
                   }
                 }
-                Text {
-                  text: Model.formatRemaining(card.daysLeft)
-                  color: card.soon ? root.soonColor : (card.past ? root.barForeground : Color.accent)
-                  opacity: card.past ? 0.6 : 1
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.heading
-                  font.bold: true
+                Item {
+                  width: parent.width
+                  height: remainingText.implicitHeight
+
+                  Text {
+                    id: remainingText
+                    width: parent.width
+                    text: card.showingMinutes
+                      ? Model.formatMinutesRemaining(
+                          Model.minutesRemaining(modelData.targetEpoch, root.nowMs))
+                      : Model.formatRemaining(card.daysLeft)
+                    color: card.soon ? root.soonColor : (card.past ? root.barForeground : Color.accent)
+                    opacity: card.past ? 0.6 : 1
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.heading
+                    font.bold: true
+                  }
+
+                  MouseArea {
+                    anchors.fill: parent
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: card.showingMinutes = !card.showingMinutes
+                  }
                 }
                 Text {
                   text: Model.formatTarget(modelData.targetEpoch)
@@ -457,7 +473,7 @@ Panel {
 
           Text {
             text: "Enter: add  ·  Esc: close"
-            color: Qt.darker(root.barForeground, 1.4)
+            color: Kit.Palette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
           }

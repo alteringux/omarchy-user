@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# omarchy-calendar-ai — one-shot scheduling assistant.
+#
+# Hermes is the supported headless agent on this workstation. It can inspect
+# calendar state and use ~/.local/bin/omarchy-calendar for requested changes;
+# the final response is printed for the panel. Failures stay on stderr and use
+# a non-zero status so the QML caller can show them instead of "no answer".
+set -uo pipefail
+
+prompt="${*:-}"
+if [[ -z "${prompt// }" ]]; then
+  echo "omarchy-calendar-ai: prompt is required" >&2
+  exit 2
+fi
+
+command -v hermes >/dev/null 2>&1 || {
+  echo "omarchy-calendar-ai: hermes not on PATH" >&2
+  exit 3
+}
+
+system='You are the Omarchy calendar assistant. Use the calendar CLI at ~/.local/bin/omarchy-calendar for calendar reads and mutations; never edit calendar JSON or ICS files directly. When the user asks to add, move, or remove something, perform the requested operation with the CLI, validate the result, and then give a concise plain-text summary. For planning questions, inspect the relevant day or free slots first. Do not claim an operation succeeded unless the CLI succeeded.'
+timeout_s="${OMARCHY_CALENDAR_AI_TIMEOUT:-120}"
+
+if ! [[ "$timeout_s" =~ ^[0-9]+$ ]] || (( timeout_s < 1 )); then
+  echo "omarchy-calendar-ai: invalid timeout: $timeout_s" >&2
+  exit 2
+fi
+
+err_file="$(mktemp "${TMPDIR:-/tmp}/omarchy-calendar-ai.XXXXXX")"
+trap 'rm -f "$err_file"' EXIT
+out="$(timeout -k 5 "$timeout_s" hermes -z "$system
+
+$prompt" --in "$HOME/.config/omarchy" --ignore-rules 2>"$err_file")"
+rc=$?
+if (( rc == 124 )); then
+  echo "omarchy-calendar-ai: timed out after ${timeout_s}s" >&2
+  exit 4
+fi
+if (( rc != 0 )); then
+  detail="$(sed -n '1p' "$err_file" 2>/dev/null || true)"
+  echo "omarchy-calendar-ai: hermes exited $rc${detail:+: $detail}" >&2
+  exit 4
+fi
+
+out="$(printf '%s' "$out" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if [[ -z "${out// }" ]]; then
+  echo "omarchy-calendar-ai: hermes returned an empty answer" >&2
+  exit 5
+fi
+printf '%s\n' "$out"

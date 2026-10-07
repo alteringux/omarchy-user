@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.pulse",
+  "name": "Pulse",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A cross-plugin activity feed and 'this plugin needs action' signal: a bar bell with an unread count, a panel that lists what the alteringux.* plugins have been doing and picks the one thing to do next. Log + attention state owned by ~/.local/bin/omarchy-pulse.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Pulse",
+    "description": "Bell with an unread badge that reddens when a plugin needs action; click for the activity feed and the next-action pick.",
+    "category": "Productivity",
+    "allowMultiple": false
+  }
+}

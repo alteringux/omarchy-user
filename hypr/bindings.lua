@@ -33,6 +33,7 @@ o.bind("SUPER + ALT + O", "Score: open panel", "omarchy-shell -q alteringux.scor
 o.bind("SUPER + ALT + L", "Stocks: open panel", "omarchy-shell -q alteringux.stocks toggle")
 o.bind("SUPER + ALT + U", "Stopwatch: open panel", "omarchy-shell -q alteringux.stopwatch toggle")
 o.bind("SUPER + ALT + H", "Dashboard: open panel", "omarchy-shell -q shell toggle alteringux.dashboard")
+o.bind("SUPER + SHIFT + ALT + K", "Recall: open panel", "omarchy-shell -q alteringux.recall toggle")
 
 -- Conductor plugin (alteringux.conductor): runs whole "rituals" -- ordered
 -- sequences of every other alteringux plugin's CLI verb -- and shows a live
@@ -232,3 +233,19 @@ o.bind("SUPER + ALT + BACKSPACE", "Hide all windows (scratchpad, auto-close 5 mi
 -- reboot. SUPER+CTRL+L is Omarchy's Lock and SUPER+L its layout toggle, so
 -- this rides SHIFT.
 o.bind("SUPER + SHIFT + L", "Toggle lid-close suspend", "lid-suspend-toggle")
+
+-- Recall (~/.local/bin/omarchy-recall): opens a terminal running the
+-- interactive review session -- unseen lessons, then due quiz/vocab cards,
+-- self-graded again/hard/good/easy (SM-2 spaced repetition).
+o.bind("SUPER + SHIFT + ALT + R", "Recall: review now", "foot -e omarchy-recall review")
+
+-- God's Eye View (~/Work/gods-eye-view): real-time 3D globe intelligence
+-- console. Runs keyless off a gev-server.service --user unit (survives reboot).
+-- G opens/focuses it in a dedicated Chromium app window that also exposes the
+-- DevTools port the voice bridge drives.
+o.bind("SUPER + SHIFT + ALT + G", "God's Eye View: open / focus", "gev-open")
+-- E = push-to-talk voice control. Tap once to start recording, tap again to
+-- send: whisper-cli transcribes, gev-agent (Claude + GEV's own tool schema,
+-- over CDP) drives the globe, Piper speaks the reply. There is no Anthropic
+-- equivalent of GEV's built-in OpenAI Realtime voice, so this is the stand-in.
+o.bind("SUPER + SHIFT + ALT + E", "God's Eye View: voice command (tap twice)", "gev-voice")

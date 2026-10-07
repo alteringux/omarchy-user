@@ -4,19 +4,13 @@
     "layout": {
       "center": [
         {
+          "id": "alteringux.calendar"
+        },
+        {
           "id": "omarchy.indicators"
         },
         {
-          "id": "alteringux.dashboard"
-        },
-        {
           "id": "omarchy.keyboard-layout"
-        },
-        {
-          "id": "omarchy.weather"
-        },
-        {
-          "id": "omarchy.system-update"
         }
       ],
       "left": [
@@ -25,20 +19,35 @@
         },
         {
           "id": "omarchy.workspaces"
+        },
+        {
+          "id": "alteringux.cpumon"
+        },
+        {
+          "id": "alteringux.memmon"
+        },
+        {
+          "id": "alteringux.tempmon"
+        },
+        {
+          "id": "alteringux.diskmon"
+        },
+        {
+          "id": "alteringux.netwatch"
         }
       ],
       "right": [
         {
-          "id": "omarchy.tray"
+          "id": "omarchy.weather"
         },
         {
-          "id": "alteringux.pulse"
+          "id": "omarchy.system-update"
+        },
+        {
+          "id": "alteringux.vpnrotate"
         },
         {
           "id": "omarchy.tailscale"
-        },
-        {
-          "id": "omarchy.agents"
         },
         {
           "id": "omarchy.bluetooth"
@@ -47,16 +56,43 @@
           "id": "omarchy.network"
         },
         {
-          "id": "alteringux.netwatch"
+          "id": "alteringux.nanogpt"
+        },
+        {
+          "id": "alteringux.deskpet"
         },
         {
           "id": "alteringux.devcast"
         },
         {
-          "id": "alteringux.vpnrotate"
+          "id": "alteringux.pulse"
+        },
+        {
+          "id": "alteringux.crochet"
+        },
+        {
+          "id": "alteringux.dashboard"
+        },
+        {
+          "id": "alteringux.glimpse"
+        },
+        {
+          "id": "alteringux.reposwatch"
+        },
+        {
+          "id": "omarchy.agents"
         },
         {
           "id": "alteringux.ttsplayer"
+        },
+        {
+          "id": "omarchy.tray"
+        },
+        {
+          "id": "alteringux.breathe"
+        },
+        {
+          "id": "alteringux.recall"
         },
         {
           "id": "omarchy.audio"
@@ -66,12 +102,26 @@
         },
         {
           "id": "omarchy.monitor"
+        },
+        {
+          "id": "alteringux.clock",
+          "format": "dddd h:mm:ss AP",
+          "formatAlt": "d MMMM 'W'ww yyyy",
+          "verticalFormat": "h\n—\nmm:ss AP"
         }
       ]
     },
     "position": "top",
     "transparent": false
   },
+  "cloneSourceRestores": [
+    "alteringux.notifications",
+    "alteringux.reminders"
+  ],
+  "disabledPlugins": [
+    "omarchy.notifications",
+    "omarchy.reminders"
+  ],
   "idle": {
     "lock": 300,
     "screensaver": 150
@@ -96,43 +146,8 @@
       "id": "alteringux.reminders"
     },
     {
-      "id": "alteringux.pomodoro"
-    },
-    {
-      "id": "alteringux.stopwatch"
-    },
-    {
-      "id": "alteringux.countdown"
-    },
-    {
-      "id": "alteringux.timers"
-    },
-    {
-      "id": "alteringux.score"
-    },
-    {
-      "id": "alteringux.stocks"
-    },
-    {
-      "id": "alteringux.grip"
-    },
-    {
-      "id": "alteringux.flow"
-    },
-    {
-      "id": "alteringux.conductor"
-    },
-    {
-      "id": "alteringux.cliamp"
+      "id": "alteringux.recall"
     }
   ],
-  "version": 1,
-  "disabledPlugins": [
-    "omarchy.notifications",
-    "omarchy.reminders"
-  ],
-  "cloneSourceRestores": [
-    "alteringux.notifications",
-    "alteringux.reminders"
-  ]
+  "version": 1
 }

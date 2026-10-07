@@ -6,10 +6,11 @@ import "UsageModel.js" as UsageModel
 //
 // Drop one into a bar widget, give it `pluginId`, and call record() from
 // every user action. It keeps a small JSON file
-// (~/.local/state/omarchy/usage/<pluginId>.json) with per-action counts, a
-// last-used stamp, and a capped recency ring, and exposes ranking /
-// dead-feature helpers so a panel can reorder chips, demote unused controls,
-// and pick smart defaults WITHOUT any code change.
+// (`$XDG_STATE_HOME/omarchy/usage/<pluginId>.json`, falling back to
+// `~/.local/state/omarchy/usage/`) with per-action counts, a last-used stamp,
+// and a capped recency ring, and exposes ranking / dead-feature helpers so a
+// panel can reorder chips, demote unused controls, and pick smart defaults
+// WITHOUT any code change.
 //
 //   import "../alteringux.kit" as Kit
 //
@@ -49,9 +50,15 @@ Item {
   // ── persistence ─────────────────────────────────────────────────────────
   // Store owns the FileView, atomic write, `mkdir -p` of the usage/ subdir,
   // and the save debounce. parse() is total (see UsageModel).
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME")
+    || ((Quickshell.env("HOME") || "") + "/.local/state")
+
+  // The writer re-reads and merges under a per-file flock, so duplicate
+  // hosted instances cannot overwrite each other's action counts.
+  readonly property string writerPath: Quickshell.env("HOME") + "/.local/bin/omarchy-usage-record"
   Store {
     id: store
-    dir: Quickshell.env("HOME") + "/.local/state/omarchy/usage/"
+    dir: usage.stateHome + (usage.stateHome.endsWith("/") ? "" : "/") + "omarchy/usage/"
     fileName: usage.pluginId ? (usage.pluginId + ".json") : "unknown.plugin.json"
     parse: function (raw) { return UsageModel.parse(raw) }
   }
@@ -59,10 +66,13 @@ Item {
   // ── write ───────────────────────────────────────────────────────────────
   function record(action) {
     if (!store.loaded || !usage.pluginId) return
-    store.value = UsageModel.record(store.value, action, Date.now())
-    store.save()
+    var name = String(action || "")
+    if (!name.trim().length) return
+    var now = Date.now()
+    store.value = UsageModel.record(store.value, name, now)
+    Quickshell.execDetached([usage.writerPath, store.path, name, String(now)])
     usage.revision++
-    usage.recorded(String(action || ""))
+    usage.recorded(name)
   }
 
   // ── read (all pure, all total, all safe pre-load) ──────────────────────
@@ -76,6 +86,9 @@ Item {
   }
   function actionScore(action) { return UsageModel.score(usage.doc, action, Date.now()) }
   function rankActions(subset) { return UsageModel.rank(usage.doc, subset || null, Date.now()) }
+  // Aggregate activity without requiring callers to know the on-disk schema.
+  // This is read-only and never records bar construction or other passive use.
+  function pluginSummary() { return UsageModel.pluginSummary(usage.doc, Date.now()) }
   function topActions(n)       { return UsageModel.top(usage.doc, n || 0, Date.now()) }
   function isActionDead(action){ return UsageModel.isDead(usage.doc, action, Date.now()) }
 }

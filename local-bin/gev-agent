@@ -1,0 +1,211 @@
+#!/usr/bin/env node
+/*
+ * gev-agent — drive God's Eye View by natural language, backed by Claude.
+ *
+ * Pipeline: transcript -> Anthropic Messages API (with GEV's own tool schema)
+ * -> execute each tool_use in the running GEV page over the Chrome DevTools
+ * Protocol (window.__gevVoiceCommands.runner) -> feed results back -> repeat
+ * until Claude answers in prose. Prints the final spoken line on stdout.
+ *
+ * This is the Anthropic-backed stand-in for GEV's built-in OpenAI Realtime
+ * voice control (which has no Anthropic equivalent).
+ *
+ * Usage:  gev-agent "take me to tokyo and turn on flights"
+ *         echo "zoom out to the globe" | gev-agent
+ *
+ * Env:
+ *   ANTHROPIC_API_KEY   required (or in ~/.config/gods-eye-view/anthropic.env)
+ *   GEV_AGENT_MODEL     default claude-sonnet-5
+ *   GEV_DIR             default ~/Work/gods-eye-view  (source of the tool schema)
+ *   GEV_CDP_PORT        default 9333
+ *   GEV_URL            default http://localhost:4173
+ */
+import { readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+const HOME = homedir();
+const GEV_DIR = process.env.GEV_DIR || join(HOME, 'Work', 'gods-eye-view');
+// Haiku by default for voice-latency; the GEV tool schema is simple enough.
+// Export GEV_AGENT_MODEL=claude-sonnet-5 for trickier multi-step requests.
+const MODEL = process.env.GEV_AGENT_MODEL || 'claude-haiku-4-5-20251001';
+const CDP_PORT = process.env.GEV_CDP_PORT || '9333';
+const GEV_URL = process.env.GEV_URL || 'http://localhost:4173';
+const CDP_BASE = `http://127.0.0.1:${CDP_PORT}`;
+// Default is Anthropic direct. Point at an Anthropic-compatible gateway
+// (e.g. a LiteLLM proxy) by exporting ANTHROPIC_BASE_URL if the direct key
+// is unavailable.
+const API_BASE = (process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com').replace(/\/$/, '');
+
+function loadApiKey() {
+  if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY.trim();
+  for (const p of [
+    join(HOME, '.config', 'gods-eye-view', 'anthropic.env'),
+    join(GEV_DIR, '.env'),
+  ]) {
+    try {
+      const m = readFileSync(p, 'utf8').match(/^ANTHROPIC_API_KEY=(.+)$/m);
+      if (m) return m[1].trim();
+    } catch {}
+  }
+  return null;
+}
+
+/* --- 1. Tool schema, lifted verbatim from GEV's vite.config.js ------------- */
+function loadGevTools() {
+  const src = readFileSync(join(GEV_DIR, 'vite.config.js'), 'utf8');
+  const start = src.indexOf('const GEV_REALTIME_TOOLS = [');
+  if (start < 0) throw new Error('GEV_REALTIME_TOOLS not found in vite.config.js');
+  const openBracket = src.indexOf('[', start);
+  // find the matching close bracket at column 0 ("\n];")
+  const end = src.indexOf('\n];', openBracket);
+  if (end < 0) throw new Error('could not find end of GEV_REALTIME_TOOLS');
+  const literal = src.slice(openBracket, end + 2); // include "]"
+  // The array is pure data (type/name/description/parameters). Safe to eval.
+  // eslint-disable-next-line no-new-func
+  const arr = Function(`"use strict";return (${literal});`)();
+  return arr.map((t) => ({
+    name: t.name,
+    description: t.description,
+    input_schema: t.parameters || { type: 'object', properties: {} },
+  }));
+}
+
+const SYSTEM = [
+  "You are the voice controller for God's Eye View, a real-time 3D globe intelligence console.",
+  'Translate the user request into GEV tool calls. Call every tool needed to satisfy the request, then reply with ONE short spoken sentence (max ~20 words) describing what you did.',
+  'Only call tools for clear GEV control: navigation, camera/zoom, visual style, data layers, panels, tracking, annotations, radio, cockpit, scenes. For an ordinary question, just answer briefly without tools.',
+  'For "take me to / go to / fly to X" use fly_to_location (prefer the known locationId when X is austin, sf, nyc, tokyo, london, paris, dubai, or dc; otherwise pass query).',
+  '"globe view" / "whole earth" / "zoom all the way out" = zoom_to_globe once. Relative "zoom in/out a bit" = adjust_camera_zoom.',
+  'Layer common names: fires->local-firms, ships->ais-live-vessels, space missions->rocket-launches, cables->telegeography-submarine-cables, stations/internet radio->radio.',
+  'Do not invent tool names or arguments. If a tool returns ok:false, say briefly what failed.',
+  'Keep the final spoken reply terse and factual - it is read aloud by a TTS voice.',
+].join(' ');
+
+/* --- 2. CDP: evaluate an expression in the live GEV page ------------------- */
+async function cdpEval(expression, timeoutMs = 60000) {
+  const list = await (await fetch(`${CDP_BASE}/json/list`)).json();
+  let page = list.find((t) => t.type === 'page' && t.url.startsWith(GEV_URL));
+  if (!page) {
+    await fetch(`${CDP_BASE}/json/new?${encodeURIComponent(GEV_URL)}`, { method: 'PUT' })
+      .catch(() => fetch(`${CDP_BASE}/json/new?${encodeURIComponent(GEV_URL)}`));
+    for (let i = 0; i < 30 && !page; i++) {
+      await new Promise((s) => setTimeout(s, 500));
+      const l2 = await (await fetch(`${CDP_BASE}/json/list`)).json();
+      page = l2.find((t) => t.type === 'page' && t.url.startsWith(GEV_URL));
+    }
+  }
+  if (!page) throw new Error(`GEV page not open at ${GEV_URL} and could not open one`);
+
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
+  await new Promise((res, rej) => {
+    ws.addEventListener('open', res, { once: true });
+    ws.addEventListener('error', () => rej(new Error('CDP websocket error')), { once: true });
+  });
+  const send = (id, method, params) =>
+    new Promise((resolve, reject) => {
+      const onMsg = (ev) => {
+        const msg = JSON.parse(typeof ev.data === 'string' ? ev.data : ev.data.toString());
+        if (msg.id !== id) return;
+        ws.removeEventListener('message', onMsg);
+        msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+      };
+      ws.addEventListener('message', onMsg);
+      ws.send(JSON.stringify({ id, method, params }));
+    });
+  try {
+    await send(1, 'Runtime.enable', {});
+    const res = await Promise.race([
+      send(2, 'Runtime.evaluate', {
+        expression: `(async () => { ${expression} })()`,
+        awaitPromise: true,
+        returnByValue: true,
+        userGesture: true,
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('CDP eval timeout')), timeoutMs)),
+    ]);
+    if (res.exceptionDetails) {
+      throw new Error(res.exceptionDetails.exception?.description || 'eval exception');
+    }
+    return res.result?.value;
+  } finally {
+    ws.close();
+  }
+}
+
+async function runGevTool(name, args) {
+  const payload = JSON.stringify({ name, args: args || {} });
+  const expr = `
+    const { name, args } = ${payload};
+    const c = window.__gevVoiceCommands;
+    if (!c || typeof c.runner !== 'function') return JSON.stringify({ ok:false, error:'GEV voice runner not ready' });
+    try {
+      const r = await c.runner(name, args, {});
+      return JSON.stringify(r ?? { ok:true });
+    } catch (e) {
+      return JSON.stringify({ ok:false, error:String(e && e.message || e) });
+    }
+  `;
+  const raw = await cdpEval(expr);
+  try { return JSON.parse(raw); } catch { return { ok: false, error: 'unparseable tool result', raw }; }
+}
+
+/* --- 3. Anthropic tool loop --------------------------------------------- */
+async function anthropic(messages, tools, apiKey) {
+  const r = await fetch(`${API_BASE}/v1/messages`, {
+    method: 'POST',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ model: MODEL, max_tokens: 1024, system: SYSTEM, tools, messages }),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error(`Anthropic ${r.status}: ${JSON.stringify(data).slice(0, 400)}`);
+  return data;
+}
+
+async function main() {
+  const apiKey = loadApiKey();
+  if (!apiKey) { console.error('gev-agent: no ANTHROPIC_API_KEY'); process.exit(3); }
+
+  let prompt = process.argv.slice(2).join(' ').trim();
+  if (!prompt) prompt = readFileSync(0, 'utf8').trim();
+  if (!prompt) { console.error('gev-agent: empty prompt'); process.exit(2); }
+
+  const tools = loadGevTools();
+  const messages = [{ role: 'user', content: prompt }];
+  const spoken = [];
+
+  for (let turn = 0; turn < 8; turn++) {
+    const resp = await anthropic(messages, tools, apiKey);
+    messages.push({ role: 'assistant', content: resp.content });
+
+    const toolUses = resp.content.filter((b) => b.type === 'tool_use');
+    for (const b of resp.content) {
+      if (b.type === 'text' && b.text.trim()) spoken.push(b.text.trim());
+    }
+    if (resp.stop_reason !== 'tool_use' || toolUses.length === 0) break;
+
+    const results = [];
+    for (const tu of toolUses) {
+      process.stderr.write(`  → ${tu.name} ${JSON.stringify(tu.input)}\n`);
+      let out;
+      try { out = await runGevTool(tu.name, tu.input); }
+      catch (e) { out = { ok: false, error: String(e.message || e) }; }
+      results.push({
+        type: 'tool_result',
+        tool_use_id: tu.id,
+        content: JSON.stringify(out).slice(0, 4000),
+        is_error: out && out.ok === false,
+      });
+    }
+    messages.push({ role: 'user', content: results });
+  }
+
+  const line = spoken.filter(Boolean).join(' ').trim() || 'Done.';
+  console.log(line);
+}
+
+main().catch((e) => { console.error('gev-agent error:', e.message); process.exit(1); });

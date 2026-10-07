@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.nanogpt",
+  "name": "NanoGPT",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "NanoGPT usage analytics: weekly subscription-quota gauge, token breakdown by day and model, per-model detail, and token composition from your API key's usage rollups.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "NanoGPT",
+    "description": "Weekly quota gauge plus token and cost analytics for nano-gpt.com",
+    "category": "AI",
+    "allowMultiple": false
+  }
+}

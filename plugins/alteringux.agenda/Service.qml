@@ -17,6 +17,7 @@ import "../alteringux.kit" as Kit
 // IPC (target "alteringux.agenda"):
 //   omarchy-shell ipc call alteringux.agenda next
 //   omarchy-shell ipc call alteringux.agenda today
+//   omarchy-shell ipc call alteringux.agenda upcoming
 //   omarchy-shell ipc call alteringux.agenda status
 //   omarchy-shell ipc call alteringux.agenda refresh
 Item {
@@ -50,6 +51,17 @@ Item {
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
+  // The next/today mirror for external consumers. Owned mode — this service is
+  // the only writer. Written straight through FileView rather than a base64 +
+  // `bash -lc` hop through Qt.btoa(), which is deprecated and fired a console
+  // warning on every poll.
+  Kit.Store {
+    id: stateStore
+    dir: root.runtimeDir + "/omarchy-agenda/"
+    fileName: "state"
+    serialize: function (v) { return JSON.stringify(v) + "\n" }
+  }
+
   // Persisted so a shell reload doesn't re-fire notifications we already sent.
   PersistentProperties {
     id: persisted
@@ -80,30 +92,49 @@ Item {
       var known = []
       try { known = JSON.parse(persisted.notifiedKeys || "[]") } catch (e) { known = [] }
       var decision = Model.shouldNotify(root.agenda, now, root.leadSeconds, known)
-      persisted.notifiedKeys = JSON.stringify(decision.keys || [])
-      if (decision.notify) sendNotification(decision.event)
+      if (decision.notify) {
+        var sent = sendNotification(decision.event)
+        // sendNotification() drops the alert (returns false) when notifyProc is
+        // still busy from a previous poll. Persisting decision.keys unconditionally
+        // would mark this event "notified" even though nothing was shown, and
+        // shouldNotify() would then never retry it for the rest of the lead
+        // window. Keep the pre-add key list instead so the next poll tries again.
+        persisted.notifiedKeys = JSON.stringify(sent
+          ? decision.keys
+          : decision.keys.filter(function (k) { return k !== decision.key }))
+      } else {
+        persisted.notifiedKeys = JSON.stringify(decision.keys || [])
+      }
     })
   }
 
   function writeState(now) {
-    var json = JSON.stringify(Model.stateJson(root.agenda, now))
-    var dir = root.statePath.slice(0, root.statePath.lastIndexOf("/"))
-    // base64 hop so arbitrary event text can't break out of the shell quoting.
-    Quickshell.execDetached(["bash", "-lc",
-      "mkdir -p '" + dir + "' && printf %s '" + Qt.btoa(json) + "' | base64 -d > '" + root.statePath + "'"])
+    guard.run("writeState", function () {
+      stateStore.value = Model.stateJson(root.agenda, now)
+      stateStore.flush()
+    })
   }
 
+  // Returns whether the notification was actually dispatched (false if
+  // notifyProc was already busy or there's no event) — the caller uses this
+  // to decide whether the event's key may be recorded as delivered.
   function sendNotification(ev) {
-    if (notifyProc.running || !ev) return
+    if (notifyProc.running || !ev) return false
     var now = Math.floor(Date.now() / 1000)
+    var minutesUntil = Math.round((ev.start - now) / 60)
+    // Match the urgent/critical visual language the rest of alteringux.* uses
+    // for "about to happen" (Kit.Palette / AttentionDot levels) so an event
+    // that's essentially now stands out from one that's still 8 minutes off.
+    var urgency = minutesUntil <= 2 ? "critical" : "normal"
     var body = Model.formatRelative(ev.start - now) + " · " + Model.formatClock(ev.start)
     if (ev.location) body += "\n" + ev.location
     notifyProc.command = [
-      "notify-send", "-a", "Agenda", "-u", "normal", "-i", "x-office-calendar",
+      "notify-send", "-a", "Agenda", "-u", urgency, "-i", "x-office-calendar",
       "-h", "string:x-canonical-private-synchronous:agenda",
       ev.summary || "Upcoming event", body
     ]
     notifyProc.running = true
+    return true
   }
 
   Process { id: notifyProc }
@@ -118,7 +149,7 @@ Item {
   }
 
   Timer {
-    interval: Math.max(15, root.pollSeconds) * 1000
+    interval: Math.max(60, root.pollSeconds) * 1000
     running: true
     repeat: true
     triggeredOnStart: true
@@ -139,6 +170,14 @@ Item {
     function today(): string {
       return guard.call("ipc.today", function () {
         return JSON.stringify(root.agenda.today || [])
+      }, "[]")
+    }
+
+    // The full not-yet-ended list (up to 20, per Model.computeAgenda), for a
+    // widget/CLI that wants more than just the single soonest event.
+    function upcoming(): string {
+      return guard.call("ipc.upcoming", function () {
+        return JSON.stringify(root.agenda.upcoming || [])
       }, "[]")
     }
 

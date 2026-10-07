@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.sysmon",
+  "name": "System Monitor",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Live CPU / memory / temperature readout on the bar, with a panel breaking down per-core usage, swap, load average, and uptime. State engine is ~/.local/bin/omarchy-sysmon; the widget is a thin view.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "System Monitor",
+    "description": "CPU %, RAM %, and temperature at a glance",
+    "category": "System",
+    "allowMultiple": false
+  }
+}

@@ -21,5 +21,16 @@ Card 1.0 Card.qml
 SectionHeading 1.0 SectionHeading.qml
 Bullet 1.0 Bullet.qml
 PanelHead 1.0 PanelHead.qml
+PanelKeys 1.0 PanelKeys.qml
+RecoveryCatalog 1.0 RecoveryCatalog.qml
+RecoveryHelp 1.0 RecoveryHelp.qml
+RecoveryModel 1.0 RecoveryModel.js
+RecoveryTrigger 1.0 RecoveryTrigger.js
+RecoveryClock 1.0 RecoveryClock.qml
+RecoverySuggestions 1.0 RecoverySuggestions.qml
 MetaText 1.0 MetaText.qml
-singleton Palette 1.0 Palette.qml
+AttentionDot 1.0 AttentionDot.qml
+PulseTint 1.0 PulseTint.qml
+Palette 1.0 Palette.qml
+ActionButton 1.0 ActionButton.qml
+KeyboardPanel 1.0 KeyboardPanel.qml

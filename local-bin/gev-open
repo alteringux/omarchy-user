@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# gev-open — open (or focus) God's Eye View in a dedicated Chromium app window
+# with the DevTools port the Claude voice bridge (gev-agent) drives.
+#
+#   * ensures the gev-server user service is running
+#   * if a GEV app window exists, focuses it
+#   * otherwise launches chromium --app with --remote-debugging-port
+set -euo pipefail
+
+URL="${GEV_URL:-http://localhost:4173}"
+CDP_PORT="${GEV_CDP_PORT:-9333}"
+PROFILE="$HOME/.local/share/gev-chromium"
+CLASS="gods-eye-view"
+
+# 0. one-time: pre-grant mic + camera to the GEV origin in this isolated
+#    profile, so the in-app MIC button also works without a permission prompt.
+#    (The gev-voice push-to-talk path records via PipeWire and does not need this.)
+if [[ ! -f "$PROFILE/Default/Preferences" ]]; then
+  mkdir -p "$PROFILE/Default"
+  cat > "$PROFILE/Default/Preferences" <<'JSON'
+{"profile":{"content_settings":{"exceptions":{
+  "media_stream_mic":{"http://localhost:4173,*":{"setting":1},"http://127.0.0.1:4173,*":{"setting":1}},
+  "media_stream_camera":{"http://localhost:4173,*":{"setting":1},"http://127.0.0.1:4173,*":{"setting":1}}
+}}}}
+JSON
+fi
+
+# 1. server up
+systemctl --user start gev-server.service 2>/dev/null || true
+for _ in $(seq 1 30); do
+  curl -sf -o /dev/null "$URL/" && break
+  sleep 0.5
+done
+
+# 2. focus existing window if present
+if command -v hyprctl >/dev/null 2>&1; then
+  if hyprctl clients -j 2>/dev/null | grep -q "\"$CLASS\""; then
+    hyprctl dispatch focuswindow "class:^${CLASS}$" >/dev/null 2>&1 || true
+    exit 0
+  fi
+fi
+
+# 3. launch
+exec chromium \
+  --app="$URL" \
+  --class="$CLASS" \
+  --user-data-dir="$PROFILE" \
+  --remote-debugging-port="$CDP_PORT" \
+  --remote-allow-origins=http://127.0.0.1:"$CDP_PORT" \
+  --no-first-run --no-default-browser-check \
+  --disable-features=Translate \
+  >/dev/null 2>&1

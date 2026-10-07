@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# protonvpn-rotate — thin, stateless wrapper around the official `protonvpn-cli`
-# (Arch pkg: proton-vpn-cli) that the alteringux.vpnrotate bar widget drives.
+# protonvpn-rotate — thin, stateless wrapper around the official `protonvpn`
+# CLI (Arch pkg: proton-vpn-cli 1.0.3) that the alteringux.vpnrotate bar
+# widget drives.
 #
 # The widget owns *policy* (auto-rotate on/off, interval, kill switch); this
-# script owns *mechanism*: connect to a random Proton free server, switch to a
-# fresh one, disconnect, and publish a JSON status file the widget reads.
+# script owns *mechanism*: connect to a Proton free server, switch to a fresh
+# one, disconnect, and publish a JSON status file the widget reads.
 #
 #   protonvpn-rotate connect          # connect to a Proton free server
 #   protonvpn-rotate rotate           # reconnect (new server / new exit IP)
@@ -12,7 +13,16 @@
 #   protonvpn-rotate refresh          # reconcile the status file with `protonvpn status`
 #   protonvpn-rotate status [--json]  # print cached status (--json for the raw file)
 #   protonvpn-rotate probe            # re-check the exit IP, update status
-#   protonvpn-rotate killswitch on|off
+#   protonvpn-rotate metrics          # refresh server load / protocol / latency / throughput
+#   protonvpn-rotate killswitch on|off|sync   # sync = match CLI to widget config
+#
+# Exit codes for the mutating verbs (the widget branches on these):
+#   0  ok, or nothing to do
+#   1  transient failure — safe to retry later (network, busy free pool)
+#   2  WiFi-only gate refused a fresh connect off WiFi
+#   3  not possible right now — NOT signed in, or the free plan forbids it;
+#      the caller must stop auto-retrying until a human acts
+#   4  reserved
 #
 # Exit IP is verified through the tunnel after every connect/rotate, so the
 # status file is proof the public IP actually moved, not just that the CLI
@@ -27,31 +37,194 @@ set -uo pipefail
 # edit here, not a rewrite. Protocol is not a connect flag on this CLI (the
 # client picks WireGuard itself); kill switch is a persisted config setting.
 CLI_BIN="${PROTONVPN_CLI_BIN:-protonvpn}"
+CLI_TIMEOUT="${PROTONVPN_CLI_TIMEOUT:-30}"
+CLI_KILL_AFTER="${PROTONVPN_CLI_KILL_AFTER:-2}"
+TIMEOUT_BIN="${PROTONVPN_TIMEOUT_BIN:-/usr/bin/timeout}"
 
 strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
+run_bounded() {
+  # timeout starts the command in its own process group, so a timed-out CLI
+  # and children it spawned receive TERM/KILL together instead of accumulating
+  # orphaned proton processes.
+  "$TIMEOUT_BIN" --signal=TERM --kill-after="${CLI_KILL_AFTER}s" \
+    "${1}s" "${@:2}"
+}
+
+run_cli() { run_bounded "$CLI_TIMEOUT" "$CLI_BIN" "$@"; }
 
 # NOTE: on the FREE plan the official CLI rejects `connect --random`,
 # `connect --country`, and named servers ("not available on the free plan").
 # Bare `protonvpn connect` is all we get — Proton picks the free server by
 # load, so a reconnect only *sometimes* lands a different exit IP. Real
 # per-request IP rotation on free needs the WireGuard-config + nmcli path.
-cli_connect_random() { "$CLI_BIN" connect 2>&1 | strip_ansi; }
-cli_disconnect()     { "$CLI_BIN" disconnect 2>&1 | strip_ansi; }
-cli_status_raw()     { "$CLI_BIN" status 2>&1 | strip_ansi; }
+cli_connect_random() { run_cli connect 2>&1 | strip_ansi; }
+cli_disconnect()     { run_cli disconnect 2>&1 | strip_ansi; }
+cli_status_raw()     { run_cli status 2>&1 | strip_ansi; }
 cli_killswitch() {                                   # $1 = on|off
   case "$1" in
-    on) "$CLI_BIN" config set kill-switch standard 2>&1 | strip_ansi ;;
-    *)  "$CLI_BIN" config set kill-switch off 2>&1 | strip_ansi ;;
+    on) run_cli config set kill-switch standard 2>&1 | strip_ansi ;;
+    *)  run_cli config set kill-switch off 2>&1 | strip_ansi ;;
   esac
 }
+# proton-vpn-cli 1.0.3 prints the current kill-switch in `config list` as
+# "kill-switch   standard" / "kill-switch   off". Echoes standard|off (|"" on error).
+cli_killswitch_current() {
+  run_cli config list 2>/dev/null | strip_ansi \
+    | sed -n 's/^[[:space:]]*kill-switch[[:space:]]\+\([A-Za-z]\+\).*/\1/p' | head -n1
+}
+
+# ── auth gate ──────────────────────────────────────────────────────────────
+# proton-vpn-cli refuses `connect` and `config set` while signed out, with
+# "Authentication required. Please sign in with 'protonvpn signin'". Retrying
+# that is pointless and every invocation re-initialises the Proton core API
+# (the system daemon logs a "Clearing config for user" churn), which is what
+# used to pin the shell at ~50% CPU. Callers gate on this first.
+#
+# `protonvpn info` prints exactly "Account: 'None'" when signed out and a real
+# account line when signed in. Cached 15s so the widget's 1s watchdog tick
+# never forks it directly — only the 20s reconcile timer does — and an
+# unreadable / erroring `info` is treated as "not signed in" so the safe
+# direction is *fewer* connect attempts, never more.
+AUTH_CACHE=""
+AUTH_CACHE_AT=0
+cli_signed_in() {
+  local now; now="$(date +%s 2>/dev/null || echo 0)"
+  if [ -n "$AUTH_CACHE" ] && [ "$((now - AUTH_CACHE_AT))" -lt 15 ]; then
+    [ "$AUTH_CACHE" = yes ]; return
+  fi
+  local out ans=no
+  out="$(run_cli info 2>/dev/null | strip_ansi)"
+  if printf '%s\n' "$out" | grep -qiE "^[[:space:]]*account:[[:space:]]*'?none'?[[:space:]]*$"; then
+    ans=no
+  elif printf '%s\n' "$out" | grep -qiE "^[[:space:]]*account:[[:space:]]*'?[^'[:space:]]"; then
+    ans=yes
+  fi
+  AUTH_CACHE="$ans"; AUTH_CACHE_AT="$now"
+  [ "$ans" = yes ]
+}
+
+# Classify a failed `protonvpn connect` so cli_connect_retry knows whether a
+# retry is worth anything. "auth" and "plan" are permanent for this session —
+# retrying just re-hammers the daemon. Echoes: auth | plan | usage | transient.
+connect_error_class() {
+  local out="$1"
+  printf '%s\n' "$out" | grep -qiE 'authentication required|please sign in|not (logged|signed) in' && { echo auth; return; }
+  printf '%s\n' "$out" | grep -qiE 'not available on the free plan|free plan' && { echo plan; return; }
+  printf '%s\n' "$out" | grep -qiE 'no such command|unknown option|usage:' && { echo usage; return; }
+  echo transient
+}
+
+# Connect with a few retries. proton's FREE pool intermittently rejects a
+# reconnect with `rc=1 :: Connection failed` — a plain retry a minute later
+# almost always succeeds (see vpnrotate.log history). A non-retryable class
+# (auth / plan / usage) returns 3 immediately with no sleep and no re-loop.
+# Echoes the last CLI output; returns 0 on success, 3 non-retryable, 1 exhausted.
+cli_connect_retry() {
+  local tries="${1:-3}" gap="${2:-4}" out rc i cls
+  for (( i = 1; i <= tries; i++ )); do
+    out="$(cli_connect_random)"; rc=$?
+    if [ $rc -eq 0 ] || is_connected_cli; then
+      printf '%s\n' "$out"; return 0
+    fi
+    cls="$(connect_error_class "$out")"
+    if [ "$cls" != transient ]; then
+      log "connect: non-retryable ($cls) :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+      printf '%s\n' "$out"; return 3
+    fi
+    log "connect attempt $i/$tries failed rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    [ "$i" -lt "$tries" ] && sleep "$gap"
+  done
+  printf '%s\n' "$out"; return 1
+}
+
+# ── wifi link gate ─────────────────────────────────────────────────────────
+# The alteringux.vpnrotate widget only brings the VPN up over WiFi: on a wired
+# link the tunnel still connects but leaves the Ethernet-side IP uncovered,
+# which is the leak this gate closes. `connect` (manual / IPC / watchdog) is
+# refused off WiFi; `rotate` is exempt — it rides an already-live tunnel.
+#
+# `nmcli -t -f TYPE,STATE dev` prints colon-separated rows ("wifi:connected",
+# "ethernet:connected", "wifi:disconnected", …). wifi_state_str echoes one of:
+#   connected | disconnected | unavailable | unknown
+# "unknown" (no WiFi device, or nmcli missing / errored) is treated as "don't
+# block" so a non-NetworkManager box still works — the widget is the first
+# gate, this is the backstop. Cached 5s so a tight watchdog/reconnect loop
+# doesn't fork nmcli every tick.
+WIFI_CACHE=""
+WIFI_CACHE_AT=0
+NMCLI_TIMEOUT="${PROTONVPN_NMCLI_TIMEOUT:-5}"
+run_nmcli() {
+  # Tests and callers may provide nmcli as a shell function; functions cannot
+  # be exec'd by timeout, while the real command is always bounded.
+  if declare -F nmcli >/dev/null 2>&1; then
+    nmcli "$@"
+  else
+    run_bounded "$NMCLI_TIMEOUT" nmcli "$@"
+  fi
+}
+wifi_state_str() {
+  local now; now="$(date +%s 2>/dev/null || echo 0)"
+  if [ -n "$WIFI_CACHE" ] && [ "$((now - WIFI_CACHE_AT))" -lt 5 ]; then
+    printf '%s\n' "$WIFI_CACHE"; return 0
+  fi
+  local out best="unknown" best_rank=0 s rank line
+  out="$(run_nmcli -t -f TYPE,STATE dev 2>/dev/null)" || out=""
+  while IFS= read -r line; do
+    case "$line" in
+      wifi:*) s="${line#wifi:}" ;;
+      *)      continue ;;
+    esac
+    case "$s" in
+      connected)    rank=4 ;;
+      disconnected) rank=3 ;;
+      unavailable)  rank=2 ;;
+      *)            s="unavailable"; rank=2 ;;
+    esac
+    if [ "$rank" -gt "$best_rank" ]; then best_rank="$rank"; best="$s"; fi
+  done <<< "$out"
+  WIFI_CACHE="$best"; WIFI_CACHE_AT="$now"
+  printf '%s\n' "$best"
+}
+
+wifi_active() { [ "$(wifi_state_str)" = connected ]; }
 
 # ── paths ──────────────────────────────────────────────────────────────────
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE_FILE="$STATE_DIR/vpnrotate.json"
+CONFIG_FILE="$STATE_DIR/vpnrotate-config.json"    # widget-owned policy (read-only here)
+METRICS_FILE="$STATE_DIR/vpnrotate-metrics.json"  # sidecar: volatile stats + counters
+IPS_FILE="$STATE_DIR/vpnrotate-ips.txt"           # every exit IP seen, for the distinct count
 LOG_FILE="$STATE_DIR/vpnrotate.log"
+LOCK_FILE="$STATE_DIR/.vpnrotate.lock"            # single-flight guard for mutating verbs
+PROTON_IFACE="${PROTON_IFACE:-proton0}"           # wireguard tunnel iface (recreated per connect)
 mkdir -p "$STATE_DIR"
 
 log() { printf '%s %s\n' "$(date -Is)" "$*" >>"$LOG_FILE" 2>/dev/null; }
+
+# Single-flight guard. The widget serialises its own spawns, but a shell
+# hot-reload or an IPC caller can still start a second run on top of one that
+# is mid-retry; without this they race the CLI and the state file (we have
+# seen two `connect` runs live at once). Contention is not an error — the
+# other run owns the work — so exit 0 quietly.
+lock_or_skip() {
+  exec 9>"$LOCK_FILE" 2>/dev/null || return 0
+  if ! flock -n 9; then
+    log "skipped: another protonvpn-rotate run holds the lock"
+    exit 0
+  fi
+}
+
+# Sanitise a value for a bare (unquoted) JSON number slot: anything non-integer
+# becomes 0 so a stray parse never produces invalid JSON.
+num_or_zero() { case "${1:-}" in ''|*[!0-9]*) echo 0 ;; *) echo "$1" ;; esac; }
+
+# Desired kill-switch state from the widget's config file. Echoes on|off
+# (defaults off when the file is missing / unreadable / malformed).
+desired_killswitch() {
+  [ -f "$CONFIG_FILE" ] || { echo off; return; }
+  grep -q '"killSwitch"[[:space:]]*:[[:space:]]*true' "$CONFIG_FILE" && echo on || echo off
+}
 
 # ── status file helpers ────────────────────────────────────────────────────
 # Fields: connected, action, server, exitIp, country, city, org,
@@ -85,6 +258,32 @@ write_state() {
 }
 EOF
   mv -f "$tmp" "$STATE_FILE"
+  notify_pulse "$error"
+}
+
+# Cross-plugin signal: surface a connection error on the shared alteringux.pulse
+# attention feed so other plugins' bar icons (and the pulse bell) can react to
+# it via Kit.PulseTint, not just this widget's own local state. Clears itself
+# once write_state stops being called with an error.
+notify_pulse() {
+  local error="${1:-}"
+  command -v omarchy-pulse >/dev/null 2>&1 || return 0
+  if [ -n "$error" ]; then
+    if declare -F omarchy-pulse >/dev/null 2>&1; then
+      omarchy-pulse attention alteringux.vpnrotate --label "$error" --level critical \
+        >/dev/null 2>&1 || true
+    else
+      run_bounded "$CLI_TIMEOUT" omarchy-pulse attention alteringux.vpnrotate \
+        --label "$error" --level critical >/dev/null 2>&1 || true
+    fi
+  else
+    if declare -F omarchy-pulse >/dev/null 2>&1; then
+      omarchy-pulse clear alteringux.vpnrotate >/dev/null 2>&1 || true
+    else
+      run_bounded "$CLI_TIMEOUT" omarchy-pulse clear alteringux.vpnrotate \
+        >/dev/null 2>&1 || true
+    fi
+  fi
 }
 
 json_escape() { printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/ /g'; }
@@ -97,6 +296,101 @@ set_action() {
     "$action" "$(state_get server)" "$(state_get exitIp)" "$(state_get country)" \
     "$(state_get city)" "$(state_get org)" "$(state_get since)" "$(state_get lastRotate)" \
     "$error"
+}
+
+# ── metrics sidecar (vpnrotate-metrics.json) ───────────────────────────────
+# Kept separate from the connection state file so the widget can watch/poll it
+# on a faster cadence without churning the state file, and so adding a stat is
+# never a positional-arg change to write_state.
+#
+# Fields: load (server load %), protocol, latencyMs (RTT to the exit),
+#   rxBytes/txBytes/bytesAt (tunnel iface byte counters + sample epoch — they
+#   reset on every connect, so they read as "this session"), rotations /
+#   rotationsToday / todayDate, distinctIps (unique exit IPs ever seen),
+#   ipChangedCount (rotations that actually moved the exit IP), failures
+#   (connect attempts that gave up after retries).
+metric_get() {
+  [ -f "$METRICS_FILE" ] || { echo ""; return; }
+  sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\{0,1\}\([^\",}]*\)\"\{0,1\}.*/\1/p" "$METRICS_FILE" | head -n1
+}
+
+load_metrics() {
+  m_load="$(num_or_zero "$(metric_get load)")"
+  m_protocol="$(metric_get protocol)"
+  m_latencyMs="$(num_or_zero "$(metric_get latencyMs)")"
+  m_latencyAt="$(num_or_zero "$(metric_get latencyAt)")"
+  m_rxBytes="$(num_or_zero "$(metric_get rxBytes)")"
+  m_txBytes="$(num_or_zero "$(metric_get txBytes)")"
+  m_bytesAt="$(num_or_zero "$(metric_get bytesAt)")"
+  m_rotations="$(num_or_zero "$(metric_get rotations)")"
+  m_rotationsToday="$(num_or_zero "$(metric_get rotationsToday)")"
+  m_todayDate="$(metric_get todayDate)"
+  m_distinctIps="$(num_or_zero "$(metric_get distinctIps)")"
+  m_ipChangedCount="$(num_or_zero "$(metric_get ipChangedCount)")"
+  m_failures="$(num_or_zero "$(metric_get failures)")"
+}
+
+save_metrics() {
+  local tmp; tmp="$(mktemp "$STATE_DIR/.vpnmetrics.XXXXXX")" || return 1
+  cat >"$tmp" <<EOF
+{
+  "load": $(num_or_zero "${m_load:-0}"),
+  "protocol": "$(json_escape "${m_protocol:-}")",
+  "latencyMs": $(num_or_zero "${m_latencyMs:-0}"),
+  "latencyAt": $(num_or_zero "${m_latencyAt:-0}"),
+  "rxBytes": $(num_or_zero "${m_rxBytes:-0}"),
+  "txBytes": $(num_or_zero "${m_txBytes:-0}"),
+  "bytesAt": $(num_or_zero "${m_bytesAt:-0}"),
+  "rotations": $(num_or_zero "${m_rotations:-0}"),
+  "rotationsToday": $(num_or_zero "${m_rotationsToday:-0}"),
+  "todayDate": "$(json_escape "${m_todayDate:-}")",
+  "distinctIps": $(num_or_zero "${m_distinctIps:-0}"),
+  "ipChangedCount": $(num_or_zero "${m_ipChangedCount:-0}"),
+  "failures": $(num_or_zero "${m_failures:-0}"),
+  "updated": $(date +%s)
+}
+EOF
+  mv -f "$tmp" "$METRICS_FILE"
+}
+
+# rx<TAB>tx from the tunnel iface's kernel counters (blank if the iface is gone).
+iface_bytes() {
+  local d="/sys/class/net/$PROTON_IFACE/statistics"
+  [ -r "$d/rx_bytes" ] || return 1
+  printf '%s\t%s\n' "$(cat "$d/rx_bytes" 2>/dev/null)" "$(cat "$d/tx_bytes" 2>/dev/null)"
+}
+
+# Round-trip ms through the tunnel. ICMP to the exit IP first (most direct);
+# then ICMP to 1.1.1.1 (always answers, anycast-near, still traverses the
+# tunnel); then TCP-connect time to a stable host as a last resort. Echoes an
+# integer or nothing.
+measure_latency() {
+  local ip="$1" out ms
+  for target in "$ip" "1.1.1.1"; do
+    [ -n "$target" ] || continue
+    if out="$(ping -n -c1 -W2 "$target" 2>/dev/null)"; then
+      ms="$(printf '%s\n' "$out" | sed -n 's/.*time=\([0-9.]\+\).*/\1/p' | head -n1)"
+      [ -n "$ms" ] && break
+    fi
+  done
+  if [ -z "${ms:-}" ]; then
+    ms="$(curl -o /dev/null -s -w '%{time_connect}' --max-time 5 https://1.1.1.1 2>/dev/null)"
+    [ -n "$ms" ] && ms="$(awk -v t="$ms" 'BEGIN{printf "%f", t*1000}')"
+  fi
+  [ -n "${ms:-}" ] || return 1
+  awk -v t="$ms" 'BEGIN{printf "%d", (t+0.5)}'
+}
+
+# Record an exit IP into the distinct-IP set and refresh m_distinctIps.
+# Bounded to the last 500 entries so it can't grow without limit.
+record_exit_ip() {
+  local ip="$1"
+  [ -n "$ip" ] || return 0
+  printf '%s\n' "$ip" >>"$IPS_FILE" 2>/dev/null || return 0
+  if [ "$(wc -l <"$IPS_FILE" 2>/dev/null || echo 0)" -gt 500 ]; then
+    tail -n 500 "$IPS_FILE" >"$IPS_FILE.tmp" 2>/dev/null && mv -f "$IPS_FILE.tmp" "$IPS_FILE"
+  fi
+  m_distinctIps="$(sort -u "$IPS_FILE" 2>/dev/null | grep -c . || echo 0)"
 }
 
 # ── exit-IP probe (source of truth that the public IP moved) ────────────────
@@ -115,7 +409,7 @@ probe_ip() {
   return 1
 }
 
-# Pull the server name out of `protonvpn-cli status` text (best effort).
+# Pull the server name out of `protonvpn status` text (best effort).
 current_server() {
   cli_status_raw | sed -n 's/.*[Ss]erver[[:space:]]*:\?[[:space:]]*\([A-Za-z0-9#._-]\+\).*/\1/p' | head -n1
 }
@@ -145,34 +439,135 @@ parse_cli_status() {
 }
 
 # ── actions ────────────────────────────────────────────────────────────────
+TRANSITION_KIND=""
+TRANSITION_ACTIVE=false
+
+transition_clear_state() {
+  local error="${1:-}"
+  write_state false idle "" "" "" "" "" 0 "$(state_get lastRotate)" "$error"
+}
+
+transition_cleanup() {
+  local error="${1:-operation interrupted}"
+  [ "$TRANSITION_ACTIVE" = true ] || return 0
+  # Disable traps before invoking the bounded cleanup command. This keeps a
+  # second signal from recursively entering cleanup and leaves no child
+  # process behind if the original CLI was interrupted.
+  TRANSITION_ACTIVE=false
+  trap - INT TERM HUP
+  cli_disconnect >/dev/null 2>&1 || true
+  transition_clear_state "$error"
+}
+
+transition_abort() {
+  local sig="${1:-TERM}"
+  transition_cleanup "operation interrupted ($sig)"
+  exit 130
+}
+
+transition_begin() {
+  TRANSITION_KIND="$1"
+  TRANSITION_ACTIVE=true
+  trap 'transition_abort INT' INT
+  trap 'transition_abort TERM' TERM
+  trap 'transition_abort HUP' HUP
+}
+
+transition_end() {
+  TRANSITION_ACTIVE=false
+  TRANSITION_KIND=""
+  trap - INT TERM HUP
+}
+
+connect_failed() {
+  local error="$1" rc="${2:-1}"
+  transition_cleanup "$error"
+  load_metrics
+  m_failures=$(( m_failures + 1 ))
+  save_metrics
+  echo "protonvpn-rotate: connect failed" >&2
+  [ -n "$error" ] && printf '%s\n' "$error" >&2
+  return "$rc"
+}
+
 do_connect() {
   local rotating="${1:-false}" now prev_ip out ip cc city org server since
+
+  # Auth gate. proton-vpn-cli refuses connect while signed out; the widget's
+  # keep-up watchdog must not spin against that (it is what pinned the shell at
+  # ~50% CPU). Fail fast with exit 3 and leave a status the widget can show.
+  if ! cli_signed_in; then
+    log "$([ "$rotating" = true ] && echo rotate || echo connect): refused — not signed in"
+    write_state false idle "" "" "" "" "" 0 "$(state_get lastRotate)" \
+      "Not signed in — run: protonvpn signin"
+    echo "protonvpn-rotate: not signed in — run 'protonvpn signin'" >&2
+    return 3
+  fi
+
+  # WiFi-only gate. A fresh connect over Ethernet would bring the tunnel up but
+  # leave the wired IP uncovered; refuse it here so IPC and bare-CLI callers
+  # get the same behaviour as the widget. A rotate (rotating=true) is exempt —
+  # it re-handshakes an already-live tunnel, there is nothing to gate.
+  if [ "$rotating" != "true" ]; then
+    local wst; wst="$(wifi_state_str)"
+    case "$wst" in
+      disconnected|unavailable)
+        log "connect refused: wifi state '$wst'"
+        echo "protonvpn-rotate: no WiFi link (wifi: $wst) — connect is disabled off WiFi" >&2
+        return 2
+        ;;
+    esac
+  fi
+
   now="$(date +%s)"
   prev_ip="$(state_get exitIp)"
   since="$(state_get since)"; [ "$rotating" = "true" ] && [ -n "$since" ] || since="$now"
-
-  set_action "$( [ "$rotating" = true ] && echo rotating || echo connecting )"
+  transition_begin connect
+  if ! set_action "$( [ "$rotating" = true ] && echo rotating || echo connecting )"; then
+    connect_failed "could not write connecting state"
+    return 1
+  fi
   log "$([ "$rotating" = true ] && echo rotate || echo connect): calling CLI"
 
-  # On free tier there's no server picker, so force a fresh pick by dropping
-  # the tunnel first when rotating. (Often still the same server if it's the
-  # least loaded — hence the exit-IP check below.)
-  if [ "$rotating" = "true" ]; then
-    cli_disconnect >/dev/null 2>&1
-    sleep 1
+  # Re-assert the kill switch while we're allowed to (proton-vpn-cli 1.0.3
+  # rejects a kill-switch change while connected). Safe here: a fresh connect
+  # starts disconnected, and even a rotate is about to re-handshake.
+  if ! is_connected_cli && [ "$(desired_killswitch)" = on ] && [ "$(cli_killswitch_current)" != standard ]; then
+    log "connect: asserting kill switch (was $(cli_killswitch_current))"
+    cli_killswitch on >/dev/null 2>&1
   fi
 
-  out="$(cli_connect_random)"; local rc=$?
+  # Rotate reconnects *on top* of the live tunnel — no disconnect-first. On
+  # proton FREE `connect` re-handshakes in place (~6s), so a failed rotate is
+  # cleaned up below rather than leaving a stale connected state behind.
+  out="$(cli_connect_retry)"; local rc=$?
   log "CLI connect rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
 
-  if [ $rc -ne 0 ] && ! is_connected_cli; then
-    write_state false error "" "" "" "" "" 0 "$(state_get lastRotate)" \
-      "$(printf '%s\n' "$out" | grep -i error | head -n1 | cut -c1-180)"
-    echo "protonvpn-rotate: connect failed" >&2
+  # Non-retryable (signed out mid-run, or a free-plan restriction): don't count
+  # it as a transient failure, leave a clear status, and tell the caller to
+  # stop auto-retrying (exit 3). Cleanup is unconditional because the CLI may
+  # have created a partial tunnel before returning its error.
+  if [ $rc -eq 3 ]; then
+    transition_cleanup "$(printf '%s\n' "$out" | grep -iE 'authentication|sign in|free plan|error' | head -n1 | cut -c1-180)"
+    echo "protonvpn-rotate: connect not possible right now" >&2
     printf '%s\n' "$out" >&2
+    return 3
+  fi
+
+  if [ $rc -ne 0 ]; then
+    local failmsg
+    failmsg="$(printf '%s\n' "$out" | grep -i error | head -n1 | cut -c1-180)"
+    [ -n "$failmsg" ] || failmsg="connect failed (exit $rc)"
+    connect_failed "$failmsg" 1
     return 1
   fi
 
+  # The CLI's zero exit status is not proof that a tunnel exists. Require both
+  # its connected status and a non-empty exit-IP probe before writing true.
+  if ! is_connected_cli; then
+    connect_failed "connect returned success but tunnel is disconnected"
+    return 1
+  fi
   server="$(current_server)"; [ -n "$server" ] || server="$(printf '%s' "$out" | sed -n 's/.*[Ss]erver[: ]\+\([A-Za-z0-9#._-]\+\).*/\1/p' | head -n1)"
 
   # Verify the exit IP. Retry briefly — WireGuard routing can lag the CLI's
@@ -183,9 +578,34 @@ do_connect() {
     tries=$((tries+1)); sleep 1
   done
   IFS=$'\t' read -r ip cc city org <<<"${probe:-}"
+  if [ -z "$ip" ] || ! is_connected_cli; then
+    connect_failed "connected tunnel failed exit-IP verification"
+    return 1
+  fi
 
-  write_state true idle "$server" "$ip" "$cc" "$city" "$org" "$since" "$now" ""
+  if ! write_state true idle "$server" "$ip" "$cc" "$city" "$org" "$since" "$now" ""; then
+    connect_failed "could not write connected state"
+    return 1
+  fi
 
+  # ── metrics: every successful connect feeds the distinct-IP set; a rotate
+  # also bumps the rotation counters and the "actually moved" tally. ──────────
+  load_metrics
+  record_exit_ip "$ip"
+  if [ "$rotating" = "true" ]; then
+    local today; today="$(date +%F)"
+    if [ "$m_todayDate" != "$today" ]; then m_todayDate="$today"; m_rotationsToday=0; fi
+    m_rotations=$(( m_rotations + 1 ))
+    m_rotationsToday=$(( m_rotationsToday + 1 ))
+    if [ -n "$ip" ] && [ -n "$prev_ip" ] && [ "$ip" != "$prev_ip" ]; then
+      m_ipChangedCount=$(( m_ipChangedCount + 1 ))
+    fi
+  fi
+  # refresh the volatile bits too so the panel isn't stale until the next tick
+  local rt; rt="$(iface_bytes)" && IFS=$'\t' read -r m_rxBytes m_txBytes <<<"$rt" && m_bytesAt="$now"
+  save_metrics
+
+  transition_end
   if [ -n "$ip" ] && [ -n "$prev_ip" ] && [ "$ip" = "$prev_ip" ]; then
     log "warning: exit IP unchanged after rotate ($ip)"
   fi
@@ -193,10 +613,22 @@ do_connect() {
 }
 
 do_disconnect() {
-  set_action disconnecting
-  local out; out="$(cli_disconnect)"
-  log "CLI disconnect :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
-  write_state false idle "" "" "" "" "" 0 "$(state_get lastRotate)" ""
+  transition_begin disconnect
+  if ! set_action disconnecting; then
+    transition_cleanup "could not write disconnecting state"
+    return 1
+  fi
+  local out rc
+  out="$(cli_disconnect)"; rc=$?
+  log "CLI disconnect rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+  if [ $rc -ne 0 ]; then
+    transition_cleanup "disconnect failed (exit $rc)"
+    echo "protonvpn-rotate: disconnect failed" >&2
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  transition_clear_state
+  transition_end
   echo "disconnected"
 }
 
@@ -214,10 +646,42 @@ do_status() {
   fi
 }
 
+# Refresh the volatile metrics (server load, protocol, exit latency, tunnel
+# byte counters). Counters (rotations, distinctIps, failures) are untouched
+# here — they only move on connect/rotate. The widget calls this on a short
+# timer while connected; it's a no-op-ish write while disconnected.
+do_metrics() {
+  load_metrics
+  if is_connected_cli; then
+    local txt; txt="$(cli_status_raw)"
+    local ld pr
+    ld="$(printf '%s\n' "$txt" | sed -n 's/.*[Ll]oad:[[:space:]]*\([0-9]\+\).*/\1/p' | head -n1)"
+    pr="$(printf '%s\n' "$txt" | sed -n 's/.*[Pp]rotocol:[[:space:]]*\([A-Za-z0-9_+-]\+\).*/\1/p' | head -n1)"
+    [ -n "$ld" ] && m_load="$ld"
+    [ -n "$pr" ] && m_protocol="$pr"
+    local now; now="$(date +%s)"
+    local rt; rt="$(iface_bytes)" && IFS=$'\t' read -r m_rxBytes m_txBytes <<<"$rt" && m_bytesAt="$now"
+    # Latency involves an actual probe (ping / TLS connect) — only re-measure
+    # every ~25s even if the widget polls faster.
+    if [ $(( now - m_latencyAt )) -ge 25 ]; then
+      local lat; lat="$(measure_latency "$(state_get exitIp)")" && [ -n "$lat" ] && { m_latencyMs="$lat"; m_latencyAt="$now"; }
+    fi
+  else
+    m_load=0; m_latencyMs=0
+  fi
+  save_metrics
+  echo "load=${m_load}% proto=${m_protocol:-?} rx=${m_rxBytes} tx=${m_txBytes} lat=${m_latencyMs}ms rotations=${m_rotations} ips=${m_distinctIps} fail=${m_failures}"
+}
+
 do_probe() {
   local probe ip cc city org
-  probe="$(probe_ip)" || { echo "probe failed" >&2; return 1; }
+  probe="$(probe_ip)" || probe=""
   IFS=$'\t' read -r ip cc city org <<<"$probe"
+  if [ -z "$ip" ]; then
+    transition_clear_state "exit-IP probe failed"
+    echo "probe failed" >&2
+    return 1
+  fi
   write_state "$( [ "$(state_get connected)" = true ] && echo true || echo false )" \
     "$(state_get action)" "$(state_get server)" "$ip" "$cc" "$city" "$org" \
     "$(state_get since)" "$(state_get lastRotate)" ""
@@ -245,13 +709,22 @@ do_refresh() {
   # Don't stomp a transition this script is in the middle of.
   case "$file_action" in
     connecting|rotating|disconnecting)
+      # connect now retries up to 3× with backoff, so a transition can legitimately
+      # run ~30s before the status file catches up — don't stomp it before then.
       local age; age=$(( $(date +%s) - $(state_get updated 2>/dev/null || echo 0) ))
-      [ "$age" -lt 25 ] && { echo "refresh: skipped (mid-$file_action)"; return 0; }
+      [ "$age" -lt 45 ] && { echo "refresh: skipped (mid-$file_action)"; return 0; }
       ;;
   esac
 
   if [ "$conn" != "true" ]; then
-    if [ "$file_conn" = "true" ] || [ "$file_action" = "error" ]; then
+    # Clear the file when the CLI is disconnected and the file disagrees — that
+    # includes a stale transient action (connecting/rotating/disconnecting) left
+    # behind by a verb that died mid-flight; past the 45s guard above it's no
+    # longer "in progress", it's just wrong, and it keeps the widget spinning.
+    case "$file_action" in
+      connecting|rotating|disconnecting) file_action="stale" ;;
+    esac
+    if [ "$file_conn" = "true" ] || [ "$file_action" = "error" ] || [ "$file_action" = "stale" ]; then
       write_state false idle "" "" "" "" "" 0 "${file_lr:-0}" ""
       echo "refresh: now disconnected"
     else
@@ -273,10 +746,16 @@ do_refresh() {
     return 0
   fi
 
-  # State was wrong or stale — adopt reality and verify the exit IP.
+  # State was wrong or stale — adopt reality only after the exit-IP probe
+  # succeeds. A connected CLI response alone is not proof of a usable tunnel.
   local probe ip cc pcity org
   probe="$(probe_ip)" || probe=""
   IFS=$'\t' read -r ip cc pcity org <<<"${probe:-}"
+  if [ -z "$ip" ]; then
+    write_state false idle "" "" "" "" "" 0 "${file_lr:-0}" "connected tunnel failed exit-IP verification"
+    echo "refresh: connected but exit-IP probe failed" >&2
+    return 1
+  fi
   [ -n "$pcity" ] || pcity="$city"
   [ -n "$cc" ] || cc="$country"
   write_state true idle "$server" "$ip" "$cc" "$pcity" "$org" "$since" "$lr" ""
@@ -284,14 +763,66 @@ do_refresh() {
   echo "refresh: synced to $server  exit ${ip:-?}"
 }
 
+# proton-vpn-cli 1.0.3 refuses `config set kill-switch` while a tunnel is up
+# ("Disconnect before changing Kill Switch"), so applying the setting means:
+# drop the tunnel → set → bring it back if it was up. `sync` reconciles the
+# CLI's actual setting to the widget's config flag and is a no-op when they
+# already match — the widget calls it on every shell start.
 do_killswitch() {
-  case "${1:-}" in
+  local want="${1:-}"
+
+  # `config set kill-switch` needs auth. Signed out: a user-driven on/off is a
+  # clear error (exit 3); a `sync` (fired on every shell start) is a quiet
+  # deferral so it never spams the CLI / daemon.
+  if ! cli_signed_in; then
+    if [ "$want" = sync ]; then
+      log "killswitch sync: deferred — not signed in"
+      echo "kill switch: deferred (not signed in)"
+      return 0
+    fi
+    echo "protonvpn-rotate: not signed in — run 'protonvpn signin'" >&2
+    return 3
+  fi
+
+  case "$want" in
     on|off) : ;;
-    *) echo "usage: protonvpn-rotate killswitch on|off" >&2; return 2 ;;
+    sync)
+      want="$(desired_killswitch)"
+      log "killswitch sync: desired=$want current=$(cli_killswitch_current)"
+      ;;
+    *) echo "usage: protonvpn-rotate killswitch on|off|sync" >&2; return 2 ;;
   esac
-  local out; out="$(cli_killswitch "$1")"; local rc=$?
-  log "CLI killswitch $1 rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
-  [ $rc -eq 0 ] && echo "kill switch $1" || { echo "kill switch $1 failed (CLI may not support it on this version)" >&2; return 1; }
+
+  local target cur
+  target="$( [ "$want" = on ] && echo standard || echo off )"
+  cur="$(cli_killswitch_current)"
+  if [ "$cur" = "$target" ]; then
+    echo "kill switch already $want"
+    return 0
+  fi
+
+  local was_connected=false
+  if is_connected_cli; then
+    was_connected=true
+    log "killswitch $want: disconnecting to change setting"
+    cli_disconnect >/dev/null 2>&1
+    sleep 1
+  fi
+
+  local out; out="$(cli_killswitch "$want")"; local rc=$?
+  log "CLI killswitch $want rc=$rc :: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+
+  if [ "$was_connected" = true ]; then
+    log "killswitch $want: reconnecting"
+    do_connect false >/dev/null 2>&1 || true
+  fi
+
+  if [ $rc -eq 0 ] && [ "$(cli_killswitch_current)" = "$target" ]; then
+    echo "kill switch $want"
+  else
+    echo "kill switch $want failed (CLI may not support it on this version)" >&2
+    return 1
+  fi
 }
 
 # ── dispatch ───────────────────────────────────────────────────────────────
@@ -299,18 +830,19 @@ do_killswitch() {
 # (parse_cli_status, do_refresh) with cli_status_raw / probe_ip stubbed out.
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   case "${1:-}" in
-    connect)               do_connect false ;;
-    rotate|next)           do_connect true ;;
-    disconnect|down)       do_disconnect ;;
-    refresh|reconcile)     do_refresh ;;
+    connect)               lock_or_skip; do_connect false ;;
+    rotate|next)           lock_or_skip; do_connect true ;;
+    disconnect|down)       lock_or_skip; do_disconnect ;;
+    refresh|reconcile)     lock_or_skip; do_refresh ;;
     status)                shift; do_status "${1:-}" ;;
     probe)                 do_probe ;;
-    killswitch)            shift; do_killswitch "${1:-}" ;;
+    metrics)               do_metrics ;;
+    killswitch)            lock_or_skip; shift; do_killswitch "${1:-}" ;;
     ""|-h|--help|help)
-      sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//' ;;
+      sed -n '2,31p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
       echo "protonvpn-rotate: unknown command '$1'" >&2
-      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | killswitch on|off" >&2
+      echo "try: connect | rotate | disconnect | refresh | status [--json] | probe | metrics | killswitch on|off|sync" >&2
       exit 2 ;;
   esac
 fi

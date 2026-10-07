@@ -28,8 +28,7 @@
 #   omarchy-voice --help
 #
 # Env:
-#   OMARCHY_VOICE_MODEL         Featherless model for the condense step
-#                              (default Qwen/Qwen3-30B-A3B-Instruct-2507)
+#   OMARCHY_VOICE_MODEL         model for the condense step (default sonnet)
 #   OMARCHY_VOICE_WHISPER_MODEL ggml model path (default ~/.cache/whisper/ggml-tiny.en.bin;
 #                              set to …/ggml-base.en.bin for more accuracy, ~1.7s slower)
 #   OMARCHY_VOICE_MAXREC        fixed recording length in seconds (default 8)
@@ -39,7 +38,7 @@
 #   OMARCHY_VOICE_RATE          piper length-scale, lower = faster speech (default 0.85)
 #   OMARCHY_VOICE_AGENT_DIR     working directory for the agent (default ~/.local/state/omarchy/voice)
 #   OMARCHY_VOICE_AGENT_MODEL   opencode model for the agent
-#                              (default featherless/Qwen/Qwen3-Coder-30B-A3B-Instruct; empty = opencode default)
+#                              (default anthropic/claude-sonnet-5; empty = opencode default)
 #   OMARCHY_VOICE_OPENCODE      opencode binary (default: opencode on PATH)
 #   OMARCHY_VOICE_TIMEOUT       max seconds for the agent run (default 240)
 #
@@ -47,12 +46,12 @@
 set -uo pipefail
 
 TAG="voice"
-MODEL_NAME="${OMARCHY_VOICE_MODEL:-Qwen/Qwen3-30B-A3B-Instruct-2507}"
+MODEL_NAME="${OMARCHY_VOICE_MODEL:-sonnet}"
 WHISPER_MODEL="${OMARCHY_VOICE_WHISPER_MODEL:-${WHISPER_MODEL:-$HOME/.cache/whisper/ggml-tiny.en.bin}}"
 SILENCE="${OMARCHY_VOICE_SILENCE:-1.0}"
 RATE="${OMARCHY_VOICE_RATE:-0.85}"
 AGENT_DIR="${OMARCHY_VOICE_AGENT_DIR:-$HOME/.local/state/omarchy/voice}"
-AGENT_MODEL="${OMARCHY_VOICE_AGENT_MODEL-featherless/Qwen/Qwen3-Coder-30B-A3B-Instruct}"
+AGENT_MODEL="${OMARCHY_VOICE_AGENT_MODEL-anthropic/claude-sonnet-5}"
 AGENT_TIMEOUT="${OMARCHY_VOICE_TIMEOUT:-240}"
 
 DRY_RUN=0

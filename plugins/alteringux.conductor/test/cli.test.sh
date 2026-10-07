@@ -111,12 +111,52 @@ cat > "$RIT/hardfail.json" <<'JSON'
   ]
 }
 JSON
+# A ritual id must stay inside RIT, even when it is supplied by a caller
+# rather than discovered by `list`.
+cat > "$WORK/escape.json" <<'JSON'
+{
+  "steps": [
+    { "when": "start", "cli": "omarchy-score", "args": ["escape"] }
+  ]
+}
+JSON
+
+# Two phase workers update different step indexes concurrently.  Repeat the
+# small transaction enough times to make an unlocked read-modify-write lose a
+# sibling update on the old implementation.
+cat > "$RIT/race.json" <<'JSON'
+{
+  "steps": [
+    { "when": "work",  "cli": "omarchy-conductor-race-step", "args": ["work"] },
+    { "when": "break", "cli": "omarchy-conductor-race-step", "args": ["break"] }
+  ]
+}
+JSON
+cat > "$BIN/omarchy-conductor-race-step" <<EOF
+#!/usr/bin/env bash
+sleep 0.03
+exit 0
+EOF
+chmod +x "$BIN/omarchy-conductor-race-step"
+
 
 # ── list ──────────────────────────────────────────────────────────────
 n_rituals="$("$CLI" list | jq 'length')"
-[ "$n_rituals" = "3" ] && ok "list enumerates every ritual file" || bad "list" "n=$n_rituals"
-[ "$("$CLI" list | jq -r '.[] | select(.id=="spec") | .steps')" = "10" ] \
-  && ok "list counts a ritual's steps" || bad "list steps"
+[ "$n_rituals" = "4" ] && ok "list enumerates every ritual file" || bad "list" "n=$n_rituals"
+# ── traversal and lifecycle ordering ─────────────────────────────────
+: > "$CALLS"
+if "$CLI" run ../escape >/dev/null 2>&1; then
+  bad "ritual id traversal is rejected"
+else
+  ok "ritual id traversal is rejected"
+fi
+[ ! -s "$CALLS" ] && ok "traversal cannot execute a file outside RIT" \
+  || bad "traversal escaped RIT" "$(cat "$CALLS")"
+[ "$("$CLI" list | jq -c '.[] | select(.id=="spec") | .phases')" = \
+  '["start","work","break","end"]' ] \
+  && ok "list reports phases in lifecycle order" \
+  || bad "phase order" "$("$CLI" list | jq -c '.[] | select(.id=="spec") | .phases')"
+
 
 # ── run: fires start steps in order, with token substitution ──────────
 "$CLI" run spec "Ship the thing" > /dev/null
@@ -172,6 +212,22 @@ step_count="$("$CLI" status | jq -r '.step')"
 [ "$(calls | grep -c .)" = "1" ] && ok "advance runs exactly one pending step" || bad "advance count" "$(calls|grep -c .)"
 "$CLI" abort > /dev/null
 [ "$(st '.active')" = "false" ] && ok "abort goes idle" || bad "abort"
+
+# ── concurrent state updates retain both phase results ─────────────────
+race_ok=1
+for _ in $(seq 1 8); do
+  "$CLI" run race >/dev/null
+  "$CLI" phase work >/dev/null 2>&1 & work_pid=$!
+  "$CLI" phase break >/dev/null 2>&1 & break_pid=$!
+  wait "$work_pid" || race_ok=0
+  wait "$break_pid" || race_ok=0
+  [ "$(st '.steps[0].status')" = "ok" ] || race_ok=0
+  [ "$(st '.steps[1].status')" = "ok" ] || race_ok=0
+  "$CLI" abort >/dev/null
+done
+[ "$race_ok" = 1 ] && ok "concurrent phase updates retain both changes" \
+  || bad "concurrent phase updates lost a state change"
+
 
 # ── nested rituals splice in ─────────────────────────────────────────
 : > "$CALLS"

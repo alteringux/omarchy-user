@@ -93,6 +93,29 @@ test("formatDelta returns empty string when there's no average to compare agains
   assert.strictEqual(Model.formatDelta(100, 0), "")
 })
 
+test("parseConfig returns {} for missing / empty / malformed input", () => {
+  assert.deepStrictEqual(Model.parseConfig(""), {})
+  assert.deepStrictEqual(Model.parseConfig(null), {})
+  assert.deepStrictEqual(Model.parseConfig("not json"), {})
+  assert.deepStrictEqual(Model.parseConfig("[1,2]"), {})
+})
+
+test("parseConfig round-trips a stored interval", () => {
+  assert.deepStrictEqual(Model.parseConfig(JSON.stringify({ interval_minutes: 12 })), { interval_minutes: 12 })
+})
+
+test("sanitizeInterval clamps to the panel's 1..60 range and falls back to 5", () => {
+  assert.strictEqual(Model.sanitizeInterval(12), 12)
+  assert.strictEqual(Model.sanitizeInterval("7"), 7)
+  assert.strictEqual(Model.sanitizeInterval(0), 5)
+  assert.strictEqual(Model.sanitizeInterval(-3), 5)
+  assert.strictEqual(Model.sanitizeInterval(61), 5)
+  assert.strictEqual(Model.sanitizeInterval(undefined), 5)
+  assert.strictEqual(Model.sanitizeInterval(null), 5)
+  assert.strictEqual(Model.sanitizeInterval(NaN), 5)
+  assert.strictEqual(Model.sanitizeInterval(3.6), 4)
+})
+
 test("parseVoiceMuted treats a missing / empty file as voice-on", () => {
   assert.strictEqual(Model.parseVoiceMuted(""), false)
   assert.strictEqual(Model.parseVoiceMuted(null), false)
@@ -107,4 +130,71 @@ test("parseVoiceMuted recognises the marker text, with trailing newline", () => 
 test("parseVoiceMuted ignores unrecognised file contents", () => {
   assert.strictEqual(Model.parseVoiceMuted("on"), false)
   assert.strictEqual(Model.parseVoiceMuted("{}"), false)
+})
+
+test("parseChimeMode treats a missing / empty file as speak-mode", () => {
+  assert.strictEqual(Model.parseChimeMode(""), false)
+  assert.strictEqual(Model.parseChimeMode(null), false)
+  assert.strictEqual(Model.parseChimeMode(undefined), false)
+})
+
+test("parseChimeMode recognises the marker text, with trailing newline", () => {
+  assert.strictEqual(Model.parseChimeMode("chime"), true)
+  assert.strictEqual(Model.parseChimeMode("chime\n"), true)
+})
+
+test("parseChimeMode ignores unrecognised file contents", () => {
+  assert.strictEqual(Model.parseChimeMode("bell"), false)
+  assert.strictEqual(Model.parseChimeMode("muted"), false)
+})
+
+test("pausedEpochOf returns 0 for a running / missing / malformed state", () => {
+  assert.strictEqual(Model.pausedEpochOf(null), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100 }), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 0 }), 0)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: "x" }), 0)
+})
+
+test("pausedEpochOf returns the floored positive paused epoch", () => {
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175 }), 175)
+  assert.strictEqual(Model.pausedEpochOf({ start_epoch: 100, paused_epoch: 175.9 }), 175)
+})
+
+test("historyToday returns null when nothing was logged today", () => {
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime()
+  assert.strictEqual(Model.historyToday({ version: 1, sessions: [] }, now), null)
+  const yesterday = new Date(2026, 8, 7, 23, 0, 0).toISOString()
+  assert.strictEqual(Model.historyToday({ version: 1, sessions: [{ ended_at: yesterday, elapsed_seconds: 60 }] }, now), null)
+})
+
+test("historyToday sums only sessions ending on the local calendar day", () => {
+  const now = new Date(2026, 8, 8, 12, 0, 0).getTime()
+  const today1 = new Date(2026, 8, 8, 9, 0, 0).toISOString()
+  const today2 = new Date(2026, 8, 8, 10, 0, 0).toISOString()
+  const yesterday = new Date(2026, 8, 7, 23, 0, 0).toISOString()
+  const history = {
+    version: 1,
+    sessions: [
+      { ended_at: today1, elapsed_seconds: 60 },
+      { ended_at: today2, elapsed_seconds: 90 },
+      { ended_at: yesterday, elapsed_seconds: 999 }
+    ]
+  }
+  assert.deepStrictEqual(Model.historyToday(history, now), { count: 2, totalSeconds: 150 })
+})
+
+test("historyToday ignores malformed rows without throwing", () => {
+  const now = Date.now()
+  const history = { version: 1, sessions: [null, {}, { ended_at: "not a date" }] }
+  assert.strictEqual(Model.historyToday(history, now), null)
+})
+
+test("formatTodaySummary pluralises the session count and formats the total", () => {
+  assert.strictEqual(Model.formatTodaySummary({ count: 1, totalSeconds: 65 }), "1 session today, 01:05 total")
+  assert.strictEqual(Model.formatTodaySummary({ count: 3, totalSeconds: 3661 }), "3 sessions today, 1:01:01 total")
+})
+
+test("formatTodaySummary returns empty string for null / zero-count input", () => {
+  assert.strictEqual(Model.formatTodaySummary(null), "")
+  assert.strictEqual(Model.formatTodaySummary({ count: 0, totalSeconds: 0 }), "")
 })

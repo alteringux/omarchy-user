@@ -218,6 +218,10 @@ function formatBadge(entries) {
   // Every timer paused -> parenthesise the count so the bar shows nothing
   // is actively ticking.
   if (running === 0) return "(" + list.length + ")"
+  // Some (not all) paused -> "running/total", so the badge distinguishes
+  // "3 timers, all ticking" from "3 timers, only 2 actually running"
+  // without opening the panel.
+  if (running < list.length) return "  " + running + "/" + list.length
   return "  " + list.length
 }
 

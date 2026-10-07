@@ -90,6 +90,36 @@ test("Edit step renders a -/+ diff and counts lines both ways", () => {
   assert.equal(s.linesAdded, 3)
 })
 
+test("MultiEdit step renders each edit and totals changed lines", () => {
+  const tx = jsonl([
+    {
+      type: "assistant",
+      timestamp: t(1),
+      message: {
+        role: "assistant",
+        content: [{
+          type: "tool_use",
+          id: "me1",
+          name: "MultiEdit",
+          input: {
+            file_path: "/p/Model.js",
+            edits: [
+              { old_string: "a", new_string: "A\nB" },
+              { old_string: "x\ny", new_string: "X", replace_all: true }
+            ]
+          }
+        }]
+      }
+    }
+  ])
+  const s = Model.parseTranscript(tx).steps[0]
+  assert.equal(s.lang, "diff")
+  assert.equal(s.body, "- a\n+ A\n+ B\n- x\n- y\n+ X")
+  assert.equal(s.linesRemoved, 3)
+  assert.equal(s.linesAdded, 3)
+  assert.equal(s.note, "replace all")
+})
+
 test("thinking blocks are excluded by default and included with the option", () => {
   const tx = jsonl([
     { type: "assistant", timestamp: t(1), message: { role: "assistant", content: [{ type: "thinking", thinking: "secret reasoning" }] } },

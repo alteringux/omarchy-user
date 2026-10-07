@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "_comment": "CANONICAL breathing-technique catalogue. Model.js embeds this verbatim as Model.TECHNIQUES; ~/.local/bin/omarchy-breathe embeds the same JSON. test/catalogue.test.sh asserts all three agree. Edit here first, then propagate.",
+  "phaseKinds": [
+    "INHALE",
+    "HOLD_IN",
+    "EXHALE",
+    "HOLD_OUT",
+    "INHALE_TOP",
+    "RETENTION",
+    "RECOVERY",
+    "SWITCH",
+    "POWER_BREATHS"
+  ],
+  "techniques": [
+    {
+      "id": "box",
+      "name": "Box",
+      "pattern": "4-4-4-4",
+      "family": "core",
+      "tone": "info",
+      "blurb": "Equal inhale, hold, exhale, hold. The steady one — settles a racing head without making you sleepy.",
+      "use": "Focus, pre-meeting nerves, resetting mid-task.",
+      "defaultCycles": 8,
+      "phases": [
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "HOLD_IN", "seconds": 4, "label": "Hold" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale" },
+        { "kind": "HOLD_OUT", "seconds": 4, "label": "Hold" }
+      ]
+    },
+    {
+      "id": "relaxing478",
+      "name": "4-7-8 Relaxing",
+      "pattern": "4-7-8",
+      "family": "core",
+      "tone": "positive",
+      "blurb": "A short inhale, a long hold, and a very long exhale. Weighted hard toward the parasympathetic side.",
+      "use": "Falling asleep, winding down, coming off adrenaline.",
+      "defaultCycles": 4,
+      "phases": [
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "HOLD_IN", "seconds": 7, "label": "Hold" },
+        { "kind": "EXHALE", "seconds": 8, "label": "Exhale" }
+      ]
+    },
+    {
+      "id": "coherent",
+      "name": "Coherent",
+      "pattern": "5-5",
+      "family": "core",
+      "tone": "info",
+      "blurb": "Six breaths a minute, no holds. Sits near the resonant frequency where heart-rate variability peaks.",
+      "use": "Long calm stretches, HRV training, background breathing while you work.",
+      "defaultCycles": 12,
+      "phases": [
+        { "kind": "INHALE", "seconds": 5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 5, "label": "Exhale" }
+      ]
+    },
+    {
+      "id": "physiological-sigh",
+      "name": "Physiological Sigh",
+      "pattern": "2+1-6",
+      "family": "core",
+      "tone": "positive",
+      "blurb": "A full inhale, a second sip on top of it, then a long slow release. Reinflates collapsed alveoli and dumps CO2 fast.",
+      "use": "Acute stress, the fastest way down from a spike. Two or three is often enough.",
+      "defaultCycles": 5,
+      "phases": [
+        { "kind": "INHALE", "seconds": 2, "label": "Inhale" },
+        { "kind": "INHALE_TOP", "seconds": 1, "label": "Sip more" },
+        { "kind": "EXHALE", "seconds": 6, "label": "Let it go" }
+      ]
+    },
+    {
+      "id": "extended-exhale",
+      "name": "Extended Exhale",
+      "pattern": "4-8",
+      "family": "core",
+      "tone": "positive",
+      "blurb": "Exhale twice as long as the inhale. The simplest lever on the vagus nerve there is.",
+      "use": "General downshift when you want no holds and nothing to count wrong.",
+      "defaultCycles": 10,
+      "phases": [
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 8, "label": "Exhale" }
+      ]
+    },
+    {
+      "id": "wim-hof",
+      "name": "Wim Hof",
+      "pattern": "30 breaths + hold",
+      "family": "energising",
+      "tone": "warning",
+      "blurb": "Thirty full power breaths, then empty the lungs and hold, then one recovery breath held at the top.",
+      "use": "Energy, cold exposure, deliberate stress. Never in water, never driving.",
+      "warning": "Sit or lie down. Lightheadedness is expected; blacking out is not. Never do this in or near water.",
+      "defaultCycles": 3,
+      "phases": [
+        { "kind": "POWER_BREATHS", "seconds": 60, "label": "Power breaths", "breaths": 30 },
+        { "kind": "RETENTION", "seconds": 90, "label": "Hold empty" },
+        { "kind": "INHALE", "seconds": 3, "label": "Recovery breath" },
+        { "kind": "RECOVERY", "seconds": 15, "label": "Hold full" },
+        { "kind": "EXHALE", "seconds": 2, "label": "Release" }
+      ]
+    },
+    {
+      "id": "bellows",
+      "name": "Bellows",
+      "pattern": "1-1 rapid",
+      "family": "energising",
+      "tone": "warning",
+      "blurb": "Fast, forceful, equal in and out through the nose. Bhastrika — a stimulant, not a sedative.",
+      "use": "Waking up, shaking off an afternoon slump.",
+      "warning": "Stop if you feel dizzy. Not for pregnancy, uncontrolled hypertension, or on a full stomach.",
+      "amplitude": 0.8,
+      "defaultCycles": 20,
+      "phases": [
+        { "kind": "INHALE", "seconds": 1, "label": "In" },
+        { "kind": "EXHALE", "seconds": 1, "label": "Out" }
+      ]
+    },
+    {
+      "id": "triangle",
+      "name": "Triangle",
+      "pattern": "4-4-4",
+      "family": "energising",
+      "tone": "info",
+      "blurb": "Box breathing minus the bottom hold. Keeps a light forward momentum instead of fully parking.",
+      "use": "Alert calm — steady but not sleepy.",
+      "defaultCycles": 10,
+      "phases": [
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "HOLD_IN", "seconds": 4, "label": "Hold" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale" }
+      ]
+    },
+    {
+      "id": "vortex",
+      "name": "Vortex",
+      "pattern": "13-8-5-3-2-1",
+      "family": "energising",
+      "tone": "info",
+      "blurb": "A descending run down the Fibonacci sequence — 13, 8, 5, 3, 2, 1 seconds a breath, each one lighter than the last. The shortening pace does the settling; you just follow it down.",
+      "use": "Morning practice, clearing a busy head, dropping into a rhythm without counting. Let the short breaths stay light — no need to force them.",
+      "defaultCycles": 4,
+      "phases": [
+        { "kind": "INHALE", "seconds": 6.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 6.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 2.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 2.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 1.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 1.5, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 1, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 1, "label": "Exhale" },
+        { "kind": "INHALE", "seconds": 0.5, "label": "Inhale" },
+        { "kind": "EXHALE", "seconds": 0.5, "label": "Exhale" }
+      ]
+    },
+    {
+      "id": "buteyko",
+      "name": "Buteyko",
+      "pattern": "3-4-5",
+      "family": "clinical",
+      "tone": "neutral",
+      "blurb": "Deliberately light, reduced breathing with a pause after each exhale. Builds tolerance to CO2 rather than chasing more air.",
+      "use": "Over-breathing, mouth breathing, air hunger. Breathe less than feels natural.",
+      "amplitude": 0.55,
+      "defaultCycles": 10,
+      "phases": [
+        { "kind": "INHALE", "seconds": 3, "label": "Light inhale" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Light exhale" },
+        { "kind": "HOLD_OUT", "seconds": 5, "label": "Pause" }
+      ]
+    },
+    {
+      "id": "nadi-shodhana",
+      "name": "Alternate Nostril",
+      "pattern": "4-4-4 both sides",
+      "family": "clinical",
+      "tone": "neutral",
+      "blurb": "Nadi Shodhana. Close one nostril, breathe, switch, repeat. One cycle covers both sides.",
+      "use": "Balancing, pre-meditation, when box breathing feels too mechanical.",
+      "defaultCycles": 6,
+      "phases": [
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale left" },
+        { "kind": "HOLD_IN", "seconds": 4, "label": "Hold" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale right" },
+        { "kind": "SWITCH", "seconds": 1, "label": "Switch" },
+        { "kind": "INHALE", "seconds": 4, "label": "Inhale right" },
+        { "kind": "HOLD_IN", "seconds": 4, "label": "Hold" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale left" },
+        { "kind": "SWITCH", "seconds": 1, "label": "Switch" }
+      ]
+    },
+    {
+      "id": "pursed-lip",
+      "name": "Pursed Lip",
+      "pattern": "2-4",
+      "family": "clinical",
+      "tone": "positive",
+      "blurb": "In through the nose, out slowly through pursed lips as if cooling soup. Keeps the airways open against back-pressure.",
+      "use": "Breathlessness, recovery after exertion, tight chest.",
+      "defaultCycles": 12,
+      "phases": [
+        { "kind": "INHALE", "seconds": 2, "label": "Inhale (nose)" },
+        { "kind": "EXHALE", "seconds": 4, "label": "Exhale (pursed)" }
+      ]
+    }
+  ]
+}

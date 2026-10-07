@@ -34,6 +34,7 @@ STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
 RITUAL_DIR="${OMARCHY_CONDUCTOR_RITUAL_DIR:-$HOME/.config/omarchy/conductor/rituals}"
 STATE_FILE="$STATE_DIR/conductor-state.json"
 SNAP_FILE="$STATE_DIR/conductor-snapshot.json"
+STATE_LOCK="$STATE_FILE.lock"
 UNIT="omarchy-conductor"
 POLL_SECONDS=3
 
@@ -58,11 +59,13 @@ write_json() {   # $1 = target ; stdin = JSON
   fi
 }
 
-put_state() { write_json "$STATE_FILE"; }  # stdin = full state JSON
 
 state_jq() {   # [jq args...] <program> — input = current state; writes it back
   local prog="${!#}" ; local args=("${@:1:$#-1}")
-  read_state | jq "${args[@]}" "$prog" | put_state
+  (
+    flock 9
+    read_state | jq "${args[@]}" "$prog" | write_json "$STATE_FILE"
+  ) 9>"$STATE_LOCK"
 }
 
 # ── resolve a plugin CLI by name across every place they hide ───────────
@@ -132,8 +135,17 @@ run_loop() {
   done
 }
 
+ritual_file() {
+  local id="${1:-}"
+  case "$id" in
+    ""|.|..|*/*|*\\*)
+      return 1
+      ;;
+  esac
+  printf '%s/%s.json' "$RITUAL_DIR" "$id"
+}
+
 # ── ritual loading ───────────────────────────────────────────────────
-ritual_file() { printf '%s/%s.json' "$RITUAL_DIR" "$1"; }
 
 # Normalise one ritual file's steps into a flat array with token substitution.
 # Nested `{ "ritual": "<id>" }` steps are spliced in (depth-guarded).
@@ -324,7 +336,17 @@ case "$cmd" in
         label: (.label // $id),
         description: (.description // ""),
         steps: ((.steps // []) | length),
-        phases: ((.steps // []) | map(.when // "start") | unique)
+        phases: ((.steps // [])
+          | map(.when // "start")
+          | unique
+          | sort_by(
+              if . == "start" then 0
+              elif . == "work" then 1
+              elif . == "break" then 2
+              elif . == "end" then 3
+              else 4
+              end
+            ))
       }' "$f"
     done | jq -s '.'
     ;;
@@ -355,13 +377,13 @@ case "$cmd" in
     steps="$(jq -c '[ .[] | . + {status:"pending", ms:0, error:null} ]' <<<"$steps")"
     ritual_label="$(jq -r '.label // $id' --arg id "$id" "$(ritual_file "$id")")"
 
-    read_state | jq \
+    state_jq \
       --arg id "$id" --arg label "$label" --arg rlabel "$ritual_label" \
       --argjson steps "$steps" --argjson now "$(now_ms)" '
       .active = true | .ritual = $id
       | .label = (if $label == "" then $rlabel else $label end)
       | .phase = "start" | .startedAt = $now | .lastStepAt = $now
-      | .pomodoroPhaseSeen = "IDLE" | .steps = $steps | .lastSummary = ""' | put_state
+      | .pomodoroPhaseSeen = "IDLE" | .steps = $steps | .lastSummary = ""'
 
     run_phase_steps start
 

@@ -66,6 +66,29 @@ function formatDelta(currentSeconds, avgSeconds) {
   return pct + "% " + (diff < 0 ? "shorter" : "longer") + " than your average"
 }
 
+// Parses the panel-config blob at ~/.local/state/omarchy/stopwatch-config.json,
+// e.g. {"interval_minutes":12}. This file only holds the last announce-interval
+// the user chose in the panel, kept so it survives a shell restart / reboot and
+// becomes the default for the next stopwatch. A running stopwatch's own interval
+// is restored separately by the CLI's `resume` from its persistent state file.
+// Total: any missing / empty / malformed input yields {}.
+function parseConfig(raw) {
+  if (!raw || raw.length === 0) return {}
+  try {
+    var parsed = JSON.parse(raw)
+    return (parsed && typeof parsed === "object" && !Array.isArray(parsed)) ? parsed : {}
+  } catch (e) {
+    return {}
+  }
+}
+
+// Clamp a raw interval (from disk or the panel) to the NumberField's 1..60
+// range, falling back to 5 for anything non-numeric or out of range.
+function sanitizeInterval(value) {
+  var n = Math.round(Number(value))
+  return (isFinite(n) && n >= 1 && n <= 60) ? n : 5
+}
+
 // The CLI's voice switch is a bare marker file ($XDG_RUNTIME_DIR/
 // omarchy-stopwatch/voice-muted) holding the text "muted": `omarchy-stopwatch
 // mute` writes it, `unmute` removes it, and speak() skips playback whenever it
@@ -76,6 +99,58 @@ function parseVoiceMuted(raw) {
   return !!raw && raw.trim() === "muted"
 }
 
+// Mirrors parseVoiceMuted for the CLI's bell switch: a bare marker file
+// ($XDG_RUNTIME_DIR/omarchy-stopwatch/chime) holding the text "chime".
+// Present => the stopwatch rings a bell at each interval instead of speaking
+// the elapsed time. The bar widget watches the path through Kit.Store, which
+// reports both "file absent" and "file empty" as "", so only the exact marker
+// text counts as chime-mode; everything else means speak.
+function parseChimeMode(raw) {
+  return !!raw && raw.trim() === "chime"
+}
+
+// Sessions logged today (local calendar day), for an at-a-glance "so far
+// today" summary on the idle panel. `ended_at` is stored UTC ISO-8601 by the
+// CLI's log_session; comparing via the Date object's local getters (not the
+// raw string) is what makes this a *local* day, consistent with every other
+// day boundary in this plugin's family. Returns null when nothing logged
+// today yet, so callers can hide the summary line entirely.
+function historyToday(history, nowMs) {
+  if (!history || !Array.isArray(history.sessions)) return null
+  var now = new Date(isFinite(nowMs) && nowMs > 0 ? nowMs : Date.now())
+  var y = now.getFullYear(), m = now.getMonth(), d = now.getDate()
+  var count = 0
+  var totalSeconds = 0
+  for (var i = 0; i < history.sessions.length; i++) {
+    var s = history.sessions[i]
+    if (!s) continue
+    var ended = new Date(s.ended_at)
+    if (isNaN(ended.getTime())) continue
+    if (ended.getFullYear() === y && ended.getMonth() === m && ended.getDate() === d) {
+      count += 1
+      totalSeconds += (typeof s.elapsed_seconds === "number" && s.elapsed_seconds > 0) ? s.elapsed_seconds : 0
+    }
+  }
+  return count > 0 ? { count: count, totalSeconds: totalSeconds } : null
+}
+
+// "3 sessions today, 42:10 total" — "" (hidden) when `today` is null.
+function formatTodaySummary(today) {
+  if (!today || today.count <= 0) return ""
+  var noun = today.count === 1 ? "session" : "sessions"
+  return today.count + " " + noun + " today, " + formatElapsed(today.totalSeconds) + " total"
+}
+
+// Reads the frozen-at epoch the CLI's `pause` stamps into the state file.
+// A positive number means the stopwatch is paused and its elapsed count
+// should be shown as (paused_epoch - start_epoch), not (now - start_epoch).
+// Anything missing / non-numeric / non-positive => not paused (0).
+function pausedEpochOf(state) {
+  if (!state) return 0
+  var n = Number(state.paused_epoch)
+  return (isFinite(n) && n > 0) ? Math.floor(n) : 0
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     formatElapsed: formatElapsed,
@@ -83,6 +158,12 @@ if (typeof module !== "undefined") {
     parseHistory: parseHistory,
     historyAverage: historyAverage,
     formatDelta: formatDelta,
-    parseVoiceMuted: parseVoiceMuted
+    parseConfig: parseConfig,
+    sanitizeInterval: sanitizeInterval,
+    parseVoiceMuted: parseVoiceMuted,
+    parseChimeMode: parseChimeMode,
+    pausedEpochOf: pausedEpochOf,
+    historyToday: historyToday,
+    formatTodaySummary: formatTodaySummary
   }
 }

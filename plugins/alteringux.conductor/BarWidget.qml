@@ -30,6 +30,10 @@ BarWidget {
     : ""
 
   readonly property var guard: Kit.BugGuard.create("alteringux.conductor", function (argv) { Quickshell.execDetached(argv) })
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.conductor"
+  }
   Kit.Usage { id: usage; pluginId: "alteringux.conductor" }
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-conductor"
@@ -39,7 +43,7 @@ BarWidget {
     id: stateStore
     fileName: "conductor-state.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -47,7 +51,7 @@ BarWidget {
     id: snapStore
     fileName: "conductor-snapshot.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseSnapshot(raw) }
   }
 
@@ -204,6 +208,14 @@ BarWidget {
       } else {
         root.togglePanel()
       }
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }

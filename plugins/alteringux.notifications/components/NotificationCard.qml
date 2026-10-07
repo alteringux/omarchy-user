@@ -74,6 +74,24 @@ BorderSurface {
 
   HoverHandler { id: hoverTracker }
 
+  // A glanceable severity stripe for the two urgencies that aren't "business
+  // as usual" -- accentColor was already computed (urgent red for critical,
+  // dimmed for low) but had no consumer, so every toast looked identical
+  // regardless of urgency until you read the text. Normal-urgency toasts
+  // (the common case) stay stripe-free rather than adding noise.
+  Rectangle {
+    id: urgencyStripe
+    visible: root.urgency !== 1
+    anchors.left: parent.left
+    anchors.top: parent.top
+    anchors.bottom: parent.bottom
+    anchors.leftMargin: root.borderLeft
+    anchors.topMargin: root.borderTop
+    anchors.bottomMargin: root.borderBottom
+    width: Style.space(3)
+    color: root.accentColor
+  }
+
   MouseArea {
     anchors.fill: parent
     cursorShape: Qt.PointingHandCursor
@@ -133,6 +151,7 @@ BorderSurface {
         // Glyph fallback (Nerd Font character) when no image icon is
         // available. Used by omarchy-notification-send's `-g` flag.
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           visible: root.hasGlyph && smallIconImage.status !== Image.Ready
           text: root.glyph
@@ -143,6 +162,7 @@ BorderSurface {
       }
 
       Text {
+        textFormat: Text.PlainText
         Layout.alignment: Qt.AlignVCenter
         visible: root.compactGlyph
         text: root.glyph
@@ -157,6 +177,14 @@ BorderSurface {
         spacing: Style.space(2)
 
         Text {
+          // The spec defines the summary as a single line of plain text, so
+          // AutoText (Text's default) could only ever promote a hostile
+          // string to rich text -- a sender could make its summary render
+          // bold/colored/linked instead of literal text, up to visually
+          // spoofing another app's toast. The body below is StyledText on
+          // purpose (see Service.qml's bodyMarkupSupported) and is sanitized
+          // in NotificationLogic; the summary never should be.
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           visible: root.summary.length > 0
           text: root.summary

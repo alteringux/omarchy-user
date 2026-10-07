@@ -10,11 +10,19 @@ LOCK_FILE="$STATE_DIR/dashboard.lock"
 # drift into subtly different shapes (they previously carried three
 # slightly different literals). Model.parseState tolerates older files
 # missing the engagement/digest keys, so seeding them here is harmless.
-DASHBOARD_SEED='{"version":1,"notes":{"items":[]},"news":{"updatedAt":null,"items":[]},"system":{"updatedAt":null,"items":[]},"engagement":{"news":{}},"digest":{"text":"","updatedAt":null}}'
+DASHBOARD_SEED='{"version":1,"notes":{"items":[]},"news":{"updatedAt":null,"items":[]},"system":{"updatedAt":null,"items":[]},"engagement":{"news":{}},"digest":{"text":"","updatedAt":null},"skills":{"generatedAt":null,"thresholdDays":30,"skills":[],"summary":{}}}'
 
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 
 ensure_state_file() {
-  mkdir -p "$STATE_DIR"
-  [[ -f "$STATE_FILE" ]] || printf '%s\n' "$DASHBOARD_SEED" >"$STATE_FILE"
+  mkdir -p "$STATE_DIR" || return 1
+  (
+    flock 9 || exit 1
+    [[ -f "$STATE_FILE" ]] && exit 0
+    local tmp
+    tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+    trap 'rm -f "$tmp"' EXIT
+    printf '%s\n' "$DASHBOARD_SEED" >"$tmp" || exit 1
+    mv "$tmp" "$STATE_FILE"
+  ) 9>"$LOCK_FILE"
 }

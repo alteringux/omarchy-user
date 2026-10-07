@@ -81,10 +81,35 @@ echo '<not json' > "$WORK/score-state.json"
 "$CLI" reset
 [ "$(score)" = "0" ] && ok "a malformed state file degrades to defaults" || bad "malformed" "score=$(score)"
 
+# ── tolerance: a garbled config step falls back to 1 ──────────────────────
+jq '.step = "oops"' "$WORK/score-config.json" > "$WORK/c" && mv "$WORK/c" "$WORK/score-config.json"
+echo '{"score":0,"history":[]}' > "$WORK/score-state.json"
+"$CLI" increment
+[ "$(score)" = "1" ] && ok "a garbled config step falls back to 1" || bad "garbled step" "score=$(score)"
+jq '.step = 1' "$WORK/score-config.json" > "$WORK/c" && mv "$WORK/c" "$WORK/score-config.json"
+
+# ── tolerance: a state file missing .history is treated as empty ──────────
+echo '{"score":0}' > "$WORK/score-state.json"
+"$CLI" increment
+[ "$(hlen)" = "1" ] && ok "a state file missing .history is treated as empty" || bad "missing history" "len=$(hlen)"
+# ── serialized concurrent increments ─────────────────────────────────────
+echo '{"score":0,"history":[]}' > "$WORK/score-state.json"
+for _ in $(seq 1 40); do "$CLI" increment & done
+wait
+[ "$(score)" = "40" ] && ok "concurrent increments retain every delta" || bad "concurrent increment score" "score=$(score)"
+[ "$(hlen)" = "40" ] && ok "concurrent increments retain every history entry" || bad "concurrent increment history" "len=$(hlen)"
+
+# ── valid JSON with malformed state fields normalizes safely ──────────────
+echo '{"score":{"bad":true},"history":{"bad":true}}' > "$WORK/score-state.json"
+"$CLI" increment
+[ "$(score)" = "1" ] && ok "malformed valid score fields degrade before increment" || bad "malformed valid state" "score=$(score)"
+[ "$(hlen)" = "1" ] && ok "malformed valid history degrades to an array" || bad "malformed valid history" "len=$(hlen)"
+
 # ── history cap ──────────────────────────────────────────────────────────
 echo '{"score":0,"history":[]}' > "$WORK/score-state.json"
 for _ in $(seq 1 60); do "$CLI" increment; done
 [ "$(hlen)" = "50" ] && ok "history is capped at 50 entries" || bad "history cap" "len=$(hlen)"
+
 
 # ── status ───────────────────────────────────────────────────────────────
 st="$("$CLI" status)"

@@ -20,6 +20,11 @@ Panel {
 
   readonly property var state: hostWidget ? hostWidget.state : Model.defaultState()
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
+  property bool productTeardownOnly: false
+  property string pendingRemoveId: ""
+  readonly property var visibleSkills: productTeardownOnly
+    ? root.state.skills.items.filter(function(skill) { return skill.id === "product-teardown" || (skill.name || "").toLowerCase().indexOf("product-teardown") >= 0 })
+    : root.state.skills.items
 
   readonly property color cardBackground: Util.alpha(root.barForeground, 0.05)
   readonly property color cardBorder: Util.alpha(root.barForeground, 0.14)
@@ -93,17 +98,133 @@ Panel {
         }
 
         // ---- Digest: a periodic one-line AI summary of the dashboard,
-        // generated locally via the `claude` CLI (see bin/omarchy-dashboard-refresh).
+        // generated via llm-blurb (hermes -> NanoGPT, see bin/omarchy-dashboard-refresh).
         Text {
           visible: !!root.state.digest.text
           width: parent.width
           text: "✨ " + root.state.digest.text
           wrapMode: Text.WordWrap
-          color: root.barForeground
-          opacity: 0.75
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           font.italic: true
+        }
+
+        Rectangle {
+          width: parent.width
+          height: skillsColumn.implicitHeight + Style.spacing.panelPadding * 2
+          radius: Style.cornerRadius
+          color: root.cardBackground
+          border.width: 1
+          border.color: root.cardBorder
+
+          Column {
+            id: skillsColumn
+            anchors.fill: parent
+            anchors.margins: Style.spacing.panelPadding
+            spacing: Style.spacing.md
+
+            RowLayout {
+              width: parent.width
+              Text {
+                text: "Skills"
+                color: root.barForeground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                Layout.fillWidth: true
+              }
+              Text {
+                text: (root.state.skills.summary.stale || 0) + " stale · " + (root.state.skills.summary.total || 0) + " total"
+                color: Kit.Palette.faint
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+              Button {
+                text: root.productTeardownOnly ? "All skills" : "Product teardown"
+                foreground: root.barForeground
+                bordered: true
+                onClicked: root.productTeardownOnly = !root.productTeardownOnly
+              }
+            }
+
+            Text {
+              visible: root.visibleSkills.length === 0
+              text: "No matching skills."
+              color: Kit.Palette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Repeater {
+              model: root.visibleSkills
+              delegate: RowLayout {
+                required property var modelData
+                width: skillsColumn.width
+                Text {
+                  text: modelData.name || modelData.id
+                  color: root.barForeground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  Layout.fillWidth: true
+                  elide: Text.ElideRight
+                }
+                Text {
+                  text: modelData.neverUsed ? "never used" : (modelData.uses || 0) + " uses"
+                  color: modelData.stale ? Color.urgent : Kit.Palette.faint
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+                Button {
+                  visible: modelData.owned && modelData.status !== "disabled"
+                  text: "Disable"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("disable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status === "disabled"
+                  text: "Enable"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status !== "deprecated"
+                  text: "Deprecate"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("deprecate", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status === "deprecated"
+                  text: "Restore"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && !modelData.acknowledgedAt
+                  text: "Acknowledge"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("acknowledge", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status !== "removed"
+                  text: root.pendingRemoveId === modelData.id ? "Confirm remove" : "Remove"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: {
+                    if (root.pendingRemoveId === modelData.id) {
+                      if (hostWidget) hostWidget.runSkillAction("remove", modelData)
+                      root.pendingRemoveId = ""
+                    } else root.pendingRemoveId = modelData.id
+                  }
+                }
+              }
+            }
+          }
         }
 
         // ---- News card (full width)
@@ -133,8 +254,7 @@ Panel {
               }
               Text {
                 text: Model.formatRelative(root.state.news.updatedAt)
-                color: root.barForeground
-                opacity: 0.5
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -143,8 +263,7 @@ Panel {
             Text {
               visible: root.state.news.items.length === 0
               text: root.refreshing ? "Fetching headlines…" : "No headlines yet — click Refresh."
-              color: root.barForeground
-              opacity: 0.55
+              color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -176,8 +295,7 @@ Panel {
                 Text {
                   visible: !!modelData.meta
                   text: modelData.meta || ""
-                  color: root.barForeground
-                  opacity: 0.5
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -217,8 +335,7 @@ Panel {
               Text {
                 visible: root.state.system.items.length === 0
                 text: root.state.system.updatedAt ? "Up to date" : "Checking…"
-                color: root.barForeground
-                opacity: 0.6
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -277,8 +394,7 @@ Panel {
                 visible: root.state.notes.items.length === 0
                 text: "Empty. Push a line via:\nomarchy-dashboard-note \"text\""
                 wrapMode: Text.WordWrap
-                color: root.barForeground
-                opacity: 0.55
+                color: Kit.Palette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -300,8 +416,7 @@ Panel {
                   }
                   Text {
                     text: Model.formatRelative(modelData.at)
-                    color: root.barForeground
-                    opacity: 0.5
+                    color: Kit.Palette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                   }
@@ -315,7 +430,7 @@ Panel {
 
         Text {
           text: "Enter: refresh  ·  X: clear notes  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

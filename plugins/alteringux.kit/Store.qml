@@ -96,7 +96,7 @@ Item {
 
   // Watch mode: keep re-reading a file written by someone else. See the header.
   property bool watch: false
-  property int pollMs: 0
+  property int pollMs: 60000
   property bool polling: true
 
   // ── observable state ─────────────────────────────────────────────────────
@@ -161,7 +161,12 @@ Item {
   function _adopt(raw) {
     var isChange = (raw !== _lastRaw)
     _lastRaw = raw
-    value = parse(raw)
+    // Only re-parse and hand `value` a new object when the text actually
+    // changed. In watch mode the poll re-reads every pollMs (1.5-4s across
+    // ~35 stores on the bar); without this guard each of those unchanged
+    // reads still ran JSON.parse and reassigned `value`, invalidating every
+    // binding on it for no reason.
+    if (isChange || !loaded) value = parse(raw)
     loaded = true
     if (isChange) store.externallyChanged(value)
   }

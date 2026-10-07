@@ -48,6 +48,7 @@ NW_DIR="${OMARCHY_NETWATCH_DIR:-$HOME/.config/omarchy/plugins/alteringux.netwatc
 STATE_FILE="$STATE_DIR/netwatch-state.json"
 SAMPLE_FILE="$STATE_DIR/netwatch-sample.json"
 CONFIG_FILE="$STATE_DIR/netwatch-config.json"
+SAMPLE_LOCK="$STATE_DIR/.netwatch-sample.lock"
 CLI="$NW_DIR/netwatch-cli.js"
 QUIET="${OMARCHY_NETWATCH_QUIET:-0}"
 
@@ -74,6 +75,13 @@ have node || die "needs node on PATH"
 have jq || die "needs jq on PATH"
 
 bridge() { node "$CLI" "$1"; }
+
+normalized_sample_interval() {
+  local raw="${1:-}"
+  jq -n --arg interval "$raw" \
+    '{config:{sampleIntervalSec:$interval}}' |
+    bridge config | jq -r '.sampleIntervalSec'
+}
 
 put_file() { # put_file <path> ; content on stdin, atomic
   local f="$1" tmp
@@ -178,6 +186,22 @@ post_webhook() { # post_webhook <url>  ; body from stdin
 }
 
 cmd_sample() {
+  # Two samplers run this concurrently: the bar widget's tick while the shell
+  # is up, and omarchy-netwatch-sample.timer as backfill. Each `sample` is a
+  # read-modify-write of netwatch-state.json (the accumulated hour/day/month
+  # byte buckets) with no atomicity across the read and the write, so an
+  # overlap loses one sampler's bucket delta and rates-ring/peak push to
+  # last-writer-wins, and a boundary-straddling delta can land in the wrong
+  # bucket. A sample that just ran makes an immediate re-run redundant, so
+  # skip on contention rather than queue behind it.
+  ensure_dir
+  (
+    flock -n 9 || exit 0
+    _do_sample "$@"
+  ) 9>"$SAMPLE_LOCK"
+}
+
+_do_sample() {
   local webhook_override=""
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -228,7 +252,9 @@ cmd_sample() {
     true) improve_insight iface-change low "active interface changed to $iface between samples (in-flight delta dropped)" ;;
   esac
   if printf '%s' "$result" | jq -e '.alerts[]? | select(.kind=="spike")' >/dev/null 2>&1; then
-    improve_insight spike-alert med "sustained-rate alert fired on $iface — check for false positive vs the fixed spikeMbps threshold"
+    local spike_data
+    spike_data="$(printf '%s' "$result" | jq -c '[.alerts[]? | select(.kind=="spike")] | last | .data // {}')"
+    improve_insight spike-alert med "sustained-rate alert fired on $iface — check for false positive vs the fixed spikeMbps threshold" "$spike_data"
   fi
 
   local webhook
@@ -359,10 +385,10 @@ cmd_top() {
 
 cmd_watch() {
   local interval
-  interval="$(read_config | jq -r '.sampleIntervalSec // 20')"
+  interval="$(normalized_sample_interval "$(read_config | jq -r 'if type == "object" then (.sampleIntervalSec // empty) else empty end')")"
   while [ $# -gt 0 ]; do
     case "$1" in
-      --interval) interval="${2:-20}"; shift 2 ;;
+      --interval) interval="$(normalized_sample_interval "${2:-}")"; shift 2 ;;
       *) die "watch: unexpected arg '$1'" ;;
     esac
   done

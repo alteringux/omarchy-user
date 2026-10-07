@@ -1,0 +1,1143 @@
+#!/usr/bin/env bash
+# omarchy-breathe — the guided-breathing engine + daemon.
+#
+# Sole writer of ~/.local/state/omarchy/breathe-session.json, -stats.json and
+# -history.json. A `systemd --user` transient unit (this script, `__run`) owns
+# the tick, the phase-boundary cues, session completion and the streak/stats
+# bookkeeping, so a session keeps running with the panel closed. The
+# alteringux.breathe bar widget is a thin view: it watches the files and calls
+# the verbs below, reconstructing the between-heartbeat frames itself.
+# It still owns breathe-config.json (defaults / sounds / nudge / custom
+# patterns), which this script reads and seeds but never mutates.
+# See ~/.config/omarchy/docs/adr/0006-cli-first-plugins.md.
+#
+#   omarchy-breathe get                 print breathe-session.json
+#   omarchy-breathe status              live { state, phaseKind, phaseRemainingMs, ... }
+#   omarchy-breathe start [id] [--cycles N] [--silent] [--loop]
+#   omarchy-breathe toggle              IDLE->start · RUNNING<->PAUSED · DONE->start again
+#   omarchy-breathe pause | resume      the explicit forms of toggle
+#   omarchy-breathe skip                during a breath-hold, jump to the next phase
+#   omarchy-breathe loop                flip looping on the running session
+#   omarchy-breathe stop                end now; credited if at least one cycle ran
+#   omarchy-breathe reset               back to IDLE, stop the daemon, credit nothing
+#   omarchy-breathe restore             reconcile a session persisted across a reboot
+#   omarchy-breathe techniques          the catalogue (built-ins + customs) as JSON
+#   omarchy-breathe stats | history     print those files
+#
+#   --loop keeps restarting the same technique when a pass finishes (each
+#   completed pass is credited); the config default is widget-owned.
+#
+# Env: OMARCHY_STATE_DIR overrides the state dir (tests).
+#      OMARCHY_BREATHE_NO_DAEMON=1 skips all systemd calls (tests).
+#      OMARCHY_BREATHE_QUIET=1 skips notify-send / sound (tests).
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+CONFIG_FILE="$STATE_DIR/breathe-config.json"
+SESSION_FILE="$STATE_DIR/breathe-session.json"
+STATS_FILE="$STATE_DIR/breathe-stats.json"
+HISTORY_FILE="$STATE_DIR/breathe-history.json"
+LOCK_FILE="$STATE_DIR/breathe.lock"
+DAEMON_LOCK_FILE="$STATE_DIR/breathe-daemon.lock"
+UNIT="omarchy-breathe"
+
+DAILY_HISTORY_DAYS=90
+SESSION_HISTORY_MAX=300
+DEFAULT_SOUND="/usr/share/sounds/freedesktop/stereo/message.oga"
+# Deliberately NOT complete.oga: omarchy-stopwatch rings that at every interval,
+# so sharing it made a finished breathing session sound like a stopwatch tick.
+DEFAULT_END_SOUND="/usr/share/sounds/freedesktop/stereo/service-login.oga"
+
+# Spoken phase cues (opt-in via config.cueVoice). Same Piper voice and cache
+# style as omarchy-stopwatch / omarchy-countdown.
+VOICE_MODEL="$HOME/.local/share/piper-voices/en_US-lessac-medium.onnx"
+PIPER_BIN="$HOME/.local/bin/piper"
+VOICE_CACHE_DIR="$STATE_DIR/breathe-voice"
+
+DEFAULT_CONFIG='{"version":1,"defaultTechniqueId":"box","defaultCycles":8,"silent":false,"loop":false,"cueVoice":false,"phaseSound":"","endSound":"","notifyOnEnd":true,"overlayOnStart":true,"overlayDim":0.82,"reduceMotion":false,"showBarCountdown":true,"nudge":{"enabled":false,"everyMinutes":90,"quietFrom":"22:00","quietTo":"08:00","techniqueId":"physiological-sigh"},"customTechniques":[]}'
+DEFAULT_SESSION='{"version":1,"state":"IDLE","techniqueId":"","cycles":0,"sessionId":"","startedAtMs":0,"savedAtMs":0,"elapsedMs":0,"silent":false,"loop":false,"skipMs":0}'
+DEFAULT_STATS='{"version":1,"streak":0,"bestStreak":0,"lastActiveDate":"","daily":{},"totals":{"sessions":0,"seconds":0,"cycles":0}}'
+DEFAULT_HISTORY='{"version":1,"sessions":[]}'
+
+# The built-in catalogue, a verbatim copy of
+# ~/.config/omarchy/plugins/alteringux.breathe/techniques.json. It lives here
+# too so the CLI runs standalone with no plugin directory; test/catalogue.test.sh
+# is what stops the two copies drifting.
+read -r -d '' BUILTIN_TECHNIQUES <<'CATALOGUE_JSON' || true
+[
+  {
+    "id": "box",
+    "name": "Box",
+    "pattern": "4-4-4-4",
+    "family": "core",
+    "tone": "info",
+    "blurb": "Equal inhale, hold, exhale, hold. The steady one — settles a racing head without making you sleepy.",
+    "use": "Focus, pre-meeting nerves, resetting mid-task.",
+    "defaultCycles": 8,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale"
+      },
+      {
+        "kind": "HOLD_IN",
+        "seconds": 4,
+        "label": "Hold"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Exhale"
+      },
+      {
+        "kind": "HOLD_OUT",
+        "seconds": 4,
+        "label": "Hold"
+      }
+    ]
+  },
+  {
+    "id": "relaxing478",
+    "name": "4-7-8 Relaxing",
+    "pattern": "4-7-8",
+    "family": "core",
+    "tone": "positive",
+    "blurb": "A short inhale, a long hold, and a very long exhale. Weighted hard toward the parasympathetic side.",
+    "use": "Falling asleep, winding down, coming off adrenaline.",
+    "defaultCycles": 4,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale"
+      },
+      {
+        "kind": "HOLD_IN",
+        "seconds": 7,
+        "label": "Hold"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 8,
+        "label": "Exhale"
+      }
+    ]
+  },
+  {
+    "id": "coherent",
+    "name": "Coherent",
+    "pattern": "5-5",
+    "family": "core",
+    "tone": "info",
+    "blurb": "Six breaths a minute, no holds. Sits near the resonant frequency where heart-rate variability peaks.",
+    "use": "Long calm stretches, HRV training, background breathing while you work.",
+    "defaultCycles": 12,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 5,
+        "label": "Inhale"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 5,
+        "label": "Exhale"
+      }
+    ]
+  },
+  {
+    "id": "physiological-sigh",
+    "name": "Physiological Sigh",
+    "pattern": "2+1-6",
+    "family": "core",
+    "tone": "positive",
+    "blurb": "A full inhale, a second sip on top of it, then a long slow release. Reinflates collapsed alveoli and dumps CO2 fast.",
+    "use": "Acute stress, the fastest way down from a spike. Two or three is often enough.",
+    "defaultCycles": 5,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 2,
+        "label": "Inhale"
+      },
+      {
+        "kind": "INHALE_TOP",
+        "seconds": 1,
+        "label": "Sip more"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 6,
+        "label": "Let it go"
+      }
+    ]
+  },
+  {
+    "id": "extended-exhale",
+    "name": "Extended Exhale",
+    "pattern": "4-8",
+    "family": "core",
+    "tone": "positive",
+    "blurb": "Exhale twice as long as the inhale. The simplest lever on the vagus nerve there is.",
+    "use": "General downshift when you want no holds and nothing to count wrong.",
+    "defaultCycles": 10,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 8,
+        "label": "Exhale"
+      }
+    ]
+  },
+  {
+    "id": "wim-hof",
+    "name": "Wim Hof",
+    "pattern": "30 breaths + hold",
+    "family": "energising",
+    "tone": "warning",
+    "blurb": "Thirty full power breaths, then empty the lungs and hold, then one recovery breath held at the top.",
+    "use": "Energy, cold exposure, deliberate stress. Never in water, never driving.",
+    "warning": "Sit or lie down. Lightheadedness is expected; blacking out is not. Never do this in or near water.",
+    "defaultCycles": 3,
+    "phases": [
+      {
+        "kind": "POWER_BREATHS",
+        "seconds": 60,
+        "label": "Power breaths",
+        "breaths": 30
+      },
+      {
+        "kind": "RETENTION",
+        "seconds": 90,
+        "label": "Hold empty"
+      },
+      {
+        "kind": "INHALE",
+        "seconds": 3,
+        "label": "Recovery breath"
+      },
+      {
+        "kind": "RECOVERY",
+        "seconds": 15,
+        "label": "Hold full"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 2,
+        "label": "Release"
+      }
+    ]
+  },
+  {
+    "id": "bellows",
+    "name": "Bellows",
+    "pattern": "1-1 rapid",
+    "family": "energising",
+    "tone": "warning",
+    "blurb": "Fast, forceful, equal in and out through the nose. Bhastrika — a stimulant, not a sedative.",
+    "use": "Waking up, shaking off an afternoon slump.",
+    "warning": "Stop if you feel dizzy. Not for pregnancy, uncontrolled hypertension, or on a full stomach.",
+    "amplitude": 0.8,
+    "defaultCycles": 20,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 1,
+        "label": "In"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 1,
+        "label": "Out"
+      }
+    ]
+  },
+  {
+    "id": "triangle",
+    "name": "Triangle",
+    "pattern": "4-4-4",
+    "family": "energising",
+    "tone": "info",
+    "blurb": "Box breathing minus the bottom hold. Keeps a light forward momentum instead of fully parking.",
+    "use": "Alert calm — steady but not sleepy.",
+    "defaultCycles": 10,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale"
+      },
+      {
+        "kind": "HOLD_IN",
+        "seconds": 4,
+        "label": "Hold"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Exhale"
+      }
+    ]
+  },
+  {
+    "id": "vortex",
+    "name": "Vortex",
+    "pattern": "13-8-5-3-2-1",
+    "family": "energising",
+    "tone": "info",
+    "blurb": "A descending run down the Fibonacci sequence — 13, 8, 5, 3, 2, 1 seconds a breath, each one lighter than the last. The shortening pace does the settling; you just follow it down.",
+    "use": "Morning practice, clearing a busy head, dropping into a rhythm without counting. Let the short breaths stay light — no need to force them.",
+    "defaultCycles": 4,
+    "phases": [
+      { "kind": "INHALE", "seconds": 6.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 6.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 4, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 4, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 2.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 2.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 1.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 1.5, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 1, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 1, "label": "Exhale" },
+      { "kind": "INHALE", "seconds": 0.5, "label": "Inhale" },
+      { "kind": "EXHALE", "seconds": 0.5, "label": "Exhale" }
+    ]
+  },
+  {
+    "id": "buteyko",
+    "name": "Buteyko",
+    "pattern": "3-4-5",
+    "family": "clinical",
+    "tone": "neutral",
+    "blurb": "Deliberately light, reduced breathing with a pause after each exhale. Builds tolerance to CO2 rather than chasing more air.",
+    "use": "Over-breathing, mouth breathing, air hunger. Breathe less than feels natural.",
+    "amplitude": 0.55,
+    "defaultCycles": 10,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 3,
+        "label": "Light inhale"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Light exhale"
+      },
+      {
+        "kind": "HOLD_OUT",
+        "seconds": 5,
+        "label": "Pause"
+      }
+    ]
+  },
+  {
+    "id": "nadi-shodhana",
+    "name": "Alternate Nostril",
+    "pattern": "4-4-4 both sides",
+    "family": "clinical",
+    "tone": "neutral",
+    "blurb": "Nadi Shodhana. Close one nostril, breathe, switch, repeat. One cycle covers both sides.",
+    "use": "Balancing, pre-meditation, when box breathing feels too mechanical.",
+    "defaultCycles": 6,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale left"
+      },
+      {
+        "kind": "HOLD_IN",
+        "seconds": 4,
+        "label": "Hold"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Exhale right"
+      },
+      {
+        "kind": "SWITCH",
+        "seconds": 1,
+        "label": "Switch"
+      },
+      {
+        "kind": "INHALE",
+        "seconds": 4,
+        "label": "Inhale right"
+      },
+      {
+        "kind": "HOLD_IN",
+        "seconds": 4,
+        "label": "Hold"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Exhale left"
+      },
+      {
+        "kind": "SWITCH",
+        "seconds": 1,
+        "label": "Switch"
+      }
+    ]
+  },
+  {
+    "id": "pursed-lip",
+    "name": "Pursed Lip",
+    "pattern": "2-4",
+    "family": "clinical",
+    "tone": "positive",
+    "blurb": "In through the nose, out slowly through pursed lips as if cooling soup. Keeps the airways open against back-pressure.",
+    "use": "Breathlessness, recovery after exertion, tight chest.",
+    "defaultCycles": 12,
+    "phases": [
+      {
+        "kind": "INHALE",
+        "seconds": 2,
+        "label": "Inhale (nose)"
+      },
+      {
+        "kind": "EXHALE",
+        "seconds": 4,
+        "label": "Exhale (pursed)"
+      }
+    ]
+  }
+]
+CATALOGUE_JSON
+
+
+# A command may be launched by both the bar and a keybind at once. Keep the
+# whole read/modify/write transaction under one lock; locking only the final
+# rename still lets a stale reader erase fields written by its sibling.
+run_locked() {
+  (
+    flock 9
+    "$@"
+  ) 9>"$LOCK_FILE"
+}
+
+seed_config() {
+  [ -f "$CONFIG_FILE" ] && jq -e . "$CONFIG_FILE" >/dev/null 2>&1 && return 0
+  local tmp="$CONFIG_FILE.tmp.$$"
+  if printf '%s' "$DEFAULT_CONFIG" | jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$CONFIG_FILE"
+  else
+    rm -f "$tmp"
+    return 1
+  fi
+}
+mkdir -p "$STATE_DIR"
+
+now_ms()       { date +%s%3N; }
+today()        { date +%F; }
+yesterday()    { date -d "yesterday" +%F; }
+new_id()       { printf '%s-%s' "$(date +%s)" "$RANDOM"; }
+
+# ── jq helpers ────────────────────────────────────────────────────────
+# Phase resolution, mirroring Model.js's resolve(): map an elapsed-ms position
+# onto the repeating phase list. Only the parts the daemon needs — the widget
+# does the frame-accurate version in QML.
+# The $-names below are jq's own variables, bound by --argjson at each call
+# site; the shell must NOT expand them, so the quoting is deliberate.
+# shellcheck disable=SC2016
+PLIB='
+def cycle_ms: ([.phases[].seconds] | add) * 1000;
+def resolve($elapsed; $cycles):
+  . as $t
+  | (cycle_ms) as $cycleMs
+  | ($cycleMs * $cycles) as $total
+  | (if $elapsed >= $total then (if $total > 0 then $total - 1 else 0 end) else $elapsed end) as $pos
+  | (if $cycleMs > 0 then (($pos / $cycleMs) | floor) else 0 end) as $ci
+  | ($pos - ($ci * $cycleMs)) as $into
+  | (reduce range(0; ($t.phases | length)) as $i ({idx: 0, acc: 0, found: false};
+      if .found then .
+      else ($t.phases[$i].seconds * 1000) as $span
+        | if $into < (.acc + $span) then {idx: $i, acc: .acc, found: true}
+          else {idx: $i, acc: (.acc + $span), found: false} end
+      end)) as $r
+  | {cycleIndex: $ci, phaseIndex: $r.idx, cycleMs: $cycleMs, totalMs: $total,
+     phaseKind: $t.phases[$r.idx].kind,
+     phaseLabel: ($t.phases[$r.idx].label // $t.phases[$r.idx].kind),
+     phaseDurationMs: ($t.phases[$r.idx].seconds * 1000),
+     phaseElapsedMs: ($into - $r.acc),
+     done: ($elapsed >= $total)};
+'
+
+# ── readers ───────────────────────────────────────────────────────────
+read_config()  { jq -e . "$CONFIG_FILE" 2>/dev/null || printf '%s' "$DEFAULT_CONFIG"; }
+read_session() { { [ -f "$SESSION_FILE" ] && jq -e . "$SESSION_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_SESSION"; }
+read_stats()   { { [ -f "$STATS_FILE" ]   && jq -e . "$STATS_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATS"; }
+read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
+
+# Built-ins plus whatever the widget has stored as custom patterns. Customs
+# override a built-in of the same id so a hand-edited copy wins, which is what
+# a user editing their own config would expect.
+read_techniques() {
+  jq -n --argjson builtin "$BUILTIN_TECHNIQUES" --argjson cfg "$(read_config)" '
+    ($cfg.customTechniques // []) as $custom
+    | ($custom | map(select(.id != null and .id != "")))  as $valid
+    | ($builtin | map(select(.id as $i | ($valid | map(.id) | index($i)) | not))) + $valid
+  '
+}
+
+technique_by_id() {   # $1 = id; prints the technique object, or empty on miss
+  read_techniques | jq -e --arg id "$1" '.[] | select(.id == $id)' 2>/dev/null || true
+}
+
+write_json() {   # $1 = file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-breathe: refusing to write empty/invalid JSON to $target" >&2
+    return 1
+  fi
+}
+put_session() { write_json "$SESSION_FILE"; }
+
+# ── side effects (skipped when QUIET or the session is silent) ────────
+session_is_silent() {
+  local sess; sess="$(read_session)"
+  [ "$(jq -r '.silent // false' <<<"$sess")" = "true" ] && return 0
+  [ "$(jq -r '.silent // false' <<<"$(read_config)")" = "true" ] && return 0
+  return 1
+}
+
+play_file() {   # $1 = path
+  local path="$1"
+  [ -n "$path" ] || return 0
+  [ -f "$path" ] || return 0
+  # Everything here runs in the background: an earlier version did the shared
+  # mute helper's three-fork pactl probe AND a fresh mpv spawn synchronously on
+  # every phase boundary. That jittered the daemon tick and let heavyweight mpv
+  # processes stack up fighting over the sink, so cues doubled or dropped. Thin
+  # PipeWire/Pulse clients are tried first; mpv is only a last resort. The mute
+  # helper still fails open (a broken sound stack still plays).
+  (
+    if [ -r "$HOME/.local/bin/omarchy-audio-lib" ]; then
+      # shellcheck disable=SC1091
+      source "$HOME/.local/bin/omarchy-audio-lib"
+      omarchy_output_muted && exit 0
+    fi
+    command -v pw-play          >/dev/null 2>&1 && exec pw-play "$path"
+    command -v paplay           >/dev/null 2>&1 && exec paplay "$path"
+    command -v canberra-gtk-play >/dev/null 2>&1 && exec canberra-gtk-play -f "$path"
+    exec mpv --no-video --really-quiet "$path"
+  ) >/dev/null 2>&1 &
+}
+
+play_phase_cue() {
+  [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ] && return 0
+  session_is_silent && return 0
+  local configured; configured="$(jq -r '.phaseSound // ""' <<<"$(read_config)")"
+  play_file "${configured:-$DEFAULT_SOUND}"
+}
+
+# ── spoken phase cues ────────────────────────────────────────────────
+# The word to say when a phase begins, or "" for a phase that gets no voice.
+phase_word() {   # $1 = phase kind
+  case "$1" in
+    INHALE)                              echo "In" ;;
+    EXHALE)                              echo "Out" ;;
+    HOLD_IN|HOLD_OUT|RETENTION|RECOVERY) echo "Hold" ;;
+    INHALE_TOP)                          echo "Sip" ;;
+    SWITCH)                              echo "Switch" ;;
+    POWER_BREATHS)                       echo "Breathe" ;;
+    *)                                   echo "" ;;
+  esac
+}
+
+# Path to the cached Piper clip for a word, rendering it once if missing. Prints
+# nothing when the voice or the binary is unavailable, so callers fall back to
+# the chime. Same voice/cache approach as omarchy-stopwatch.
+voice_wav() {   # $1 = word
+  local word="$1" wav
+  [ -n "$word" ] || return 0
+  [ -x "$PIPER_BIN" ] && [ -f "$VOICE_MODEL" ] || return 0
+  wav="$VOICE_CACHE_DIR/$word.wav"
+  if [ ! -s "$wav" ]; then
+    mkdir -p "$VOICE_CACHE_DIR"
+    "$PIPER_BIN" --model "$VOICE_MODEL" --output_file "$wav" --quiet <<<"$word" >/dev/null 2>&1 || true
+  fi
+  [ -s "$wav" ] && printf '%s' "$wav"
+}
+
+play_end_cue() {
+  [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ] && return 0
+  session_is_silent && return 0
+  local configured; configured="$(jq -r '.endSound // ""' <<<"$(read_config)")"
+  play_file "${configured:-$DEFAULT_END_SOUND}"
+}
+
+notify_end() {   # $1 = technique name, $2 = seconds, $3 = cycles
+  [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ] && return 0
+  [ "$(jq -r '.notifyOnEnd // true' <<<"$(read_config)")" = "true" ] || return 0
+  local mins=$(( ($2 + 30) / 60 ))
+  notify-send -a "Breathe" "󰗑 $1 complete" \
+    "$3 cycles · ${mins} min. Streak: $(jq -r '.streak // 0' <<<"$(read_stats)") days." 2>/dev/null || true
+}
+
+# ── daemon lifecycle (stubbed by NO_DAEMON) ──────────────────────────
+daemon_active() {
+  [ "${OMARCHY_BREATHE_NO_DAEMON:-0}" = 1 ] && return 1
+  systemctl --user is-active --quiet "${UNIT}.service" 2>/dev/null
+}
+ensure_daemon() {
+  [ "${OMARCHY_BREATHE_NO_DAEMON:-0}" = 1 ] && return 0
+  daemon_active && return 0
+  systemctl --user reset-failed "${UNIT}.service" 2>/dev/null || true
+  systemd-run --user --unit="$UNIT" --collect \
+    --description="Omarchy breathing session" -- "$0" __run >/dev/null 2>&1 || true
+}
+stop_daemon() {
+  [ "${OMARCHY_BREATHE_NO_DAEMON:-0}" = 1 ] && return 0
+  systemctl --user stop "${UNIT}.service" 2>/dev/null || true
+}
+
+# ── crediting ─────────────────────────────────────────────────────────
+# A session counts only once at least one whole cycle has run: half an inhale
+# is not a breathing session, and crediting it would make the streak lie.
+credit_session() {   # $1 = session JSON, $2 = elapsedMs, $3 = completed(true|false)
+  local sess="$1" elapsed="$2" completed="$3"
+  local tid technique cycleMs cycles seconds doneCycles name skipMs breathedMs
+  tid="$(jq -r '.techniqueId' <<<"$sess")"
+  technique="$(technique_by_id "$tid")"
+  [ -n "$technique" ] || return 0
+
+  cycleMs="$(jq -r "$PLIB cycle_ms" <<<"$technique")"
+  cycles="$(jq -r '.cycles' <<<"$sess")"
+  [ "$cycleMs" -gt 0 ] 2>/dev/null || return 0
+
+  # Clamp HERE, at the one place that writes the record, rather than trusting
+  # every caller to have done it. A session can legitimately overrun its
+  # planned length — the daemon sleeps between ticks, the machine suspends, a
+  # long pause shifts the arithmetic — and a stat that says you breathed for
+  # longer than the exercise lasts is simply wrong. Belt and braces: the stop
+  # and restore paths clamp too, but this is the invariant that matters.
+  local plannedMs=$(( cycleMs * cycles ))
+  (( plannedMs > 0 && elapsed > plannedMs )) && elapsed=$plannedMs
+
+  doneCycles=$(( elapsed / cycleMs ))
+  (( doneCycles < 1 )) && return 0
+  (( doneCycles > cycles )) && doneCycles=$cycles
+
+  # Time skipped past during a hold was progressed through but not breathed, so
+  # it counts toward cycles completed but not toward the seconds credited.
+  skipMs="$(jq -r '.skipMs // 0' <<<"$sess")"
+  case "$skipMs" in (*[!0-9]*|"") skipMs=0 ;; esac
+  breathedMs=$(( elapsed - skipMs ))
+  (( breathedMs < 0 )) && breathedMs=0
+  seconds=$(( (breathedMs + 500) / 1000 ))
+  name="$(jq -r '.name' <<<"$technique")"
+
+  read_history | jq \
+    --arg id "$(jq -r '.sessionId' <<<"$sess")" \
+    --arg tid "$tid" \
+    --argjson started "$(jq -r '.startedAtMs' <<<"$sess")" \
+    --argjson seconds "$seconds" \
+    --argjson cycles "$doneCycles" \
+    --argjson planned "$cycles" \
+    --argjson completed "$completed" \
+    --argjson cap "$SESSION_HISTORY_MAX" '
+      .sessions = ((.sessions // []) + [{
+        id: $id, techniqueId: $tid, startedAtMs: $started,
+        seconds: $seconds, cycles: $cycles, plannedCycles: $planned, completed: $completed
+      }])
+      | (if (.sessions | length) > $cap then .sessions |= .[-$cap:] else . end)
+      | .version = 1
+    ' | write_json "$HISTORY_FILE"
+
+  read_stats | jq \
+    --arg today "$(today)" \
+    --arg yesterday "$(yesterday)" \
+    --argjson seconds "$seconds" \
+    --argjson cycles "$doneCycles" \
+    --argjson days "$DAILY_HISTORY_DAYS" '
+      .daily[$today] = {
+        sessions: (((.daily[$today].sessions) // 0) + 1),
+        seconds:  (((.daily[$today].seconds)  // 0) + $seconds),
+        cycles:   (((.daily[$today].cycles)   // 0) + $cycles)
+      }
+      | .totals = {
+          sessions: (((.totals.sessions) // 0) + 1),
+          seconds:  (((.totals.seconds)  // 0) + $seconds),
+          cycles:   (((.totals.cycles)   // 0) + $cycles)
+        }
+      # Same day is idempotent, a consecutive day extends, any gap restarts.
+      | .streak = (if (.lastActiveDate // "") == $today then (.streak // 0)
+                   elif (.lastActiveDate // "") == $yesterday then ((.streak // 0) + 1)
+                   else 1 end)
+      | .bestStreak = ([(.bestStreak // 0), .streak] | max)
+      | .lastActiveDate = $today
+      | .daily |= (to_entries | sort_by(.key) | .[-$days:] | from_entries)
+      | .version = 1
+    ' | write_json "$STATS_FILE"
+
+  printf '%s\t%s\t%s' "$name" "$seconds" "$doneCycles"
+}
+
+# ── verbs ─────────────────────────────────────────────────────────────
+cmd_start() {
+  local tid="" cycles="" silent="false" loop=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --cycles) cycles="${2:-}"; shift 2 ;;
+      --silent) silent="true"; shift ;;
+      --loop) loop="true"; shift ;;
+      --*) echo "omarchy-breathe: unknown option '$1'" >&2; exit 2 ;;
+      *) tid="$1"; shift ;;
+    esac
+  done
+
+  local cfg; cfg="$(read_config)"
+  [ -n "$tid" ] || tid="$(jq -r '.defaultTechniqueId // "box"' <<<"$cfg")"
+
+  local technique; technique="$(technique_by_id "$tid")"
+  if [ -z "$technique" ]; then
+    echo "omarchy-breathe: unknown technique '$tid' (try: omarchy-breathe techniques)" >&2
+    exit 2
+  fi
+
+  if [ -z "$cycles" ]; then
+    cycles="$(jq -r '.defaultCycles // empty' <<<"$technique")"
+    [ -n "$cycles" ] || cycles="$(jq -r '.defaultCycles // 8' <<<"$cfg")"
+  fi
+  case "$cycles" in (*[!0-9]*|"") echo "omarchy-breathe: --cycles needs a positive integer" >&2; exit 2 ;; esac
+  [ "$cycles" -ge 1 ] || { echo "omarchy-breathe: --cycles needs a positive integer" >&2; exit 2; }
+
+  [ "$silent" = "true" ] || silent="$(jq -r '.silent // false' <<<"$cfg")"
+  # Loop is per-session from --loop, else the widget-owned config default.
+  [ -n "$loop" ] || loop="$(jq -r 'if (.loop // false) then "true" else "false" end' <<<"$cfg")"
+
+  local now; now="$(now_ms)"
+  jq -n --arg tid "$tid" --argjson cycles "$cycles" --arg sid "$(new_id)" \
+        --argjson now "$now" --argjson silent "$silent" --argjson loop "$loop" '
+    {version:1, state:"RUNNING", techniqueId:$tid, cycles:$cycles, sessionId:$sid,
+     startedAtMs:$now, savedAtMs:$now, elapsedMs:0, silent:$silent, loop:$loop, skipMs:0}
+  ' | put_session
+  ensure_daemon
+  cmd_status
+}
+
+cmd_pause() {
+  local sess; sess="$(read_session)"
+  [ "$(jq -r '.state' <<<"$sess")" = "RUNNING" ] || { cmd_status; return 0; }
+  local now elapsed
+  now="$(now_ms)"
+  elapsed=$(( $(jq -r '.elapsedMs' <<<"$sess") + (now - $(jq -r '.savedAtMs' <<<"$sess")) ))
+  (( elapsed < 0 )) && elapsed=0
+  jq --argjson e "$elapsed" --argjson n "$now" '.state="PAUSED" | .elapsedMs=$e | .savedAtMs=$n' \
+    <<<"$sess" | put_session
+  cmd_status
+}
+
+cmd_resume() {
+  local sess; sess="$(read_session)"
+  [ "$(jq -r '.state' <<<"$sess")" = "PAUSED" ] || { cmd_status; return 0; }
+  jq --argjson n "$(now_ms)" '.state="RUNNING" | .savedAtMs=$n' <<<"$sess" | put_session
+  ensure_daemon
+  cmd_status
+}
+
+cmd_toggle() {
+  case "$(jq -r '.state' <<<"$(read_session)")" in
+    RUNNING) cmd_pause ;;
+    PAUSED)  cmd_resume ;;
+    *)       cmd_start ;;
+  esac
+}
+
+# End the session now. Credited when at least one cycle ran; `completed` is
+# true only if it actually reached its planned length.
+finish_session() {   # $1 = credit(true|false)
+  local sess state elapsed technique totalMs completed credited
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  if [ "$state" = "IDLE" ]; then cmd_status; return 0; fi
+
+  elapsed="$(jq -r '.elapsedMs' <<<"$sess")"
+  if [ "$state" = "RUNNING" ]; then
+    elapsed=$(( elapsed + ($(now_ms) - $(jq -r '.savedAtMs' <<<"$sess")) ))
+  fi
+  (( elapsed < 0 )) && elapsed=0
+
+  completed=false
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  if [ -n "$technique" ]; then
+    totalMs=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * $(jq -r '.cycles' <<<"$sess") ))
+    (( elapsed >= totalMs )) && { completed=true; elapsed=$totalMs; }
+  fi
+
+  credited=""
+  if [ "$1" = "true" ]; then
+    credited="$(credit_session "$sess" "$elapsed" "$completed")"
+  fi
+
+  jq --argjson e "$elapsed" --argjson n "$(now_ms)" '.state="DONE" | .elapsedMs=$e | .savedAtMs=$n' \
+    <<<"$sess" | put_session
+  stop_daemon
+
+  if [ -n "$credited" ]; then
+    play_end_cue
+    IFS=$'\t' read -r name seconds cycles <<<"$credited"
+    notify_end "$name" "$seconds" "$cycles"
+  fi
+}
+
+# A --loop pass reached its planned length: credit it exactly like a completed
+# session, then drop the clock back to the start and keep the session RUNNING.
+# No end cue and no notification — a chime every couple of minutes is not what
+# looping is for. `stop` still ends a looped session the normal way.
+roll_session() {
+  local sess technique totalMs
+  sess="$(read_session)"
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  if [ -z "$technique" ]; then finish_session true; return 0; fi
+
+  totalMs=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * $(jq -r '.cycles' <<<"$sess") ))
+  credit_session "$sess" "$totalMs" true >/dev/null
+
+  jq --arg sid "$(new_id)" --argjson n "$(now_ms)" '
+    .state = "RUNNING" | .sessionId = $sid
+    | .startedAtMs = $n | .savedAtMs = $n | .elapsedMs = 0 | .skipMs = 0
+  ' <<<"$sess" | put_session
+}
+
+# "I cannot hold this any longer." During a breath-hold, jump straight to the
+# start of the next phase. The skipped milliseconds are banked in .skipMs so
+# crediting counts them toward cycle progress but not toward seconds breathed.
+# A no-op outside a hold, and it never ends the session (bar the rare case of a
+# hold that is literally the last phase of the last cycle, which legitimately
+# completes it).
+cmd_skip() {
+  local sess state technique now base saved cycles elapsed
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  case "$state" in
+    RUNNING|PAUSED) ;;
+    *) cmd_status; return 0 ;;
+  esac
+
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  [ -n "$technique" ] || { cmd_status; return 0; }
+
+  now="$(now_ms)"
+  base="$(jq -r '.elapsedMs' <<<"$sess")"
+  saved="$(jq -r '.savedAtMs' <<<"$sess")"
+  cycles="$(jq -r '.cycles' <<<"$sess")"
+  elapsed=$base
+  [ "$state" = "RUNNING" ] && elapsed=$(( base + now - saved ))
+  (( elapsed < 0 )) && elapsed=0
+
+  local r kind pElapsed pDur remaining skipMs total
+  r="$(jq -c --argjson e "$elapsed" --argjson c "$cycles" "$PLIB"'resolve($e; $c)' <<<"$technique")"
+  kind="$(jq -r '.phaseKind' <<<"$r")"
+  pElapsed="$(jq -r '.phaseElapsedMs' <<<"$r")"
+  pDur="$(jq -r '.phaseDurationMs' <<<"$r")"
+
+  case "$kind" in
+    HOLD_IN|HOLD_OUT|RETENTION|RECOVERY) ;;
+    *) echo "omarchy-breathe: skip only works during a breath-hold (now: ${kind:-none})" >&2
+       cmd_status; return 0 ;;
+  esac
+
+  remaining=$(( pDur - pElapsed ))
+  (( remaining <= 0 )) && { cmd_status; return 0; }
+
+  elapsed=$(( elapsed + remaining ))
+  skipMs=$(( $(jq -r '.skipMs // 0' <<<"$sess") + remaining ))
+
+  jq --argjson e "$elapsed" --argjson s "$skipMs" --argjson n "$now" \
+    '.elapsedMs = $e | .skipMs = $s | .savedAtMs = $n' <<<"$sess" | put_session
+
+  # If the jump landed at or past the end, finish now (or roll, when looping)
+  # rather than leaving a past-the-end position for the daemon to trip over.
+  total=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * cycles ))
+  if (( total > 0 && elapsed >= total )); then
+    if [ "$(jq -r '.loop // false' <<<"$sess")" = "true" ]; then roll_session; else finish_session true; fi
+  fi
+  cmd_status
+}
+
+# Flip looping on the CURRENT session. The config default that new sessions
+# inherit is widget-owned (set from the panel); this only touches the session
+# in flight, and is a no-op when nothing is running.
+cmd_loop() {
+  local sess state
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  case "$state" in
+    RUNNING|PAUSED) ;;
+    *) cmd_status; return 0 ;;
+  esac
+  jq 'if (.loop // false) then .loop = false else .loop = true end' <<<"$sess" | put_session
+  cmd_status
+}
+
+cmd_reset() {
+  printf '%s' "$DEFAULT_SESSION" | put_session
+  stop_daemon
+  cmd_status
+}
+
+# Reconcile a session persisted across a restart. A RUNNING session whose
+# planned length ran out while the machine was off is credited and parked in
+# DONE rather than resumed as a phantom timer; one still legitimately mid-flight
+# gets its daemon back.
+do_restore() {
+  local sess state technique totalMs elapsed
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  [ "$state" = "RUNNING" ] || return 0
+
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  if [ -z "$technique" ]; then
+    # The technique was deleted under a live session; nothing sane to resume to.
+    printf '%s' "$DEFAULT_SESSION" | put_session
+    return 0
+  fi
+
+  totalMs=$(( $(jq -r "$PLIB cycle_ms" <<<"$technique") * $(jq -r '.cycles' <<<"$sess") ))
+  elapsed=$(( $(jq -r '.elapsedMs' <<<"$sess") + ($(now_ms) - $(jq -r '.savedAtMs' <<<"$sess")) ))
+  (( elapsed < 0 )) && elapsed=0
+
+  if (( elapsed >= totalMs )); then
+    credit_session "$sess" "$totalMs" true >/dev/null
+    jq --argjson e "$totalMs" --argjson n "$(now_ms)" '.state="DONE" | .elapsedMs=$e | .savedAtMs=$n' \
+      <<<"$sess" | put_session
+  fi
+}
+
+restore_and_ensure() {
+  do_restore
+  [ "$(jq -r '.state' <<<"$(read_session)")" = "RUNNING" ] && ensure_daemon
+  cmd_status
+}
+
+cmd_status() {
+  local sess technique state elapsed
+  sess="$(read_session)"
+  state="$(jq -r '.state' <<<"$sess")"
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  [ -n "$technique" ] || technique='null'
+
+  elapsed="$(jq -r '.elapsedMs' <<<"$sess")"
+  if [ "$state" = "RUNNING" ]; then
+    elapsed=$(( elapsed + ($(now_ms) - $(jq -r '.savedAtMs' <<<"$sess")) ))
+    (( elapsed < 0 )) && elapsed=0
+  fi
+
+  jq -n \
+    --argjson session "$sess" \
+    --argjson technique "$technique" \
+    --argjson stats "$(read_stats)" \
+    --argjson elapsed "$elapsed" \
+    --arg today "$(today)" "$PLIB"'
+      ($session.cycles // 0) as $cycles
+      | (if $technique == null then null else ($technique | resolve($elapsed; $cycles)) end) as $r
+      | {state: $session.state,
+         techniqueId: $session.techniqueId,
+         techniqueName: (($technique.name) // ""),
+         cycles: $cycles,
+         silent: ($session.silent // false),
+         loop: ($session.loop // false),
+         elapsedMs: $elapsed,
+         phaseKind: (($r.phaseKind) // ""),
+         phaseLabel: (($r.phaseLabel) // ""),
+         phaseRemainingMs: (if $r == null then 0 else (($r.phaseDurationMs - $r.phaseElapsedMs) | if . < 0 then 0 else . end) end),
+         cycleIndex: (($r.cycleIndex) // 0),
+         cycleCount: $cycles,
+         sessionDurationMs: (($r.totalMs) // 0),
+         sessionFraction: (if ($r.totalMs // 0) > 0 then ([$elapsed / $r.totalMs, 1] | min) else 0 end),
+         done: (($r.done) // false),
+         streak: ($stats.streak // 0),
+         bestStreak: ($stats.bestStreak // 0),
+         todaySeconds: (($stats.daily[$today].seconds) // 0),
+         todaySessions: (($stats.daily[$today].sessions) // 0)}
+    '
+}
+
+# ── the daemon ────────────────────────────────────────────────────────
+# Owns the tick, the phase-boundary cues and completion. It deliberately does
+# NOT write a frame per phase: the widget reconstructs those locally from
+# savedAtMs, so this only heartbeats every few seconds.
+#
+# Everything invariant for the session — the phase durations, the cue path,
+# whether it is silent — is resolved ONCE up front into shell variables, and
+# the per-tick work is then pure bash arithmetic plus a single jq read of the
+# session file. An earlier version resolved the phase through jq on every
+# 0.25s tick and cost ~22% of a core for the length of a session; a breathing
+# timer that heats the laptop rather rather defeats the point.
+#
+# The wait is until the next phase boundary, capped at 500ms so an external
+# pause or stop is still noticed promptly. Bellows' one-second phases are why
+# the cap is sub-second rather than pomodoro's flat 1s poll.
+run_loop() {
+  # A restore, keybind, or systemd retry can launch more than one daemon.
+  # Keep one owner for the lifetime of the loop; per-tick state locking alone
+  # still lets duplicate owners emit the same cue.
+  exec 8>"$DAEMON_LOCK_FILE"
+  flock -n 8 || return 0
+  exec 9>"$LOCK_FILE"
+  flock 9
+  do_restore
+  flock -u 9
+
+  local sess technique state cycles
+  sess="$(read_session)"
+  technique="$(technique_by_id "$(jq -r '.techniqueId' <<<"$sess")")"
+  [ -n "$technique" ] || return 0
+
+  local -a phase_ms=()
+  mapfile -t phase_ms < <(jq -r '.phases[] | (.seconds * 1000 | floor)' <<<"$technique")
+  local phase_count=${#phase_ms[@]}
+  (( phase_count > 0 )) || return 0
+
+  local cycle_ms=0 p
+  for p in "${phase_ms[@]}"; do cycle_ms=$(( cycle_ms + p )); done
+  (( cycle_ms > 0 )) || return 0
+
+  # Cue policy is config, which is widget-owned and effectively static for the
+  # length of one session, so resolve it here instead of per boundary.
+  local cue_path silent cfg voice
+  cfg="$(read_config)"
+  silent="$(jq -r '.silent // false' <<<"$cfg")"
+  [ "$(jq -r '.silent // false' <<<"$sess")" = "true" ] && silent=true
+  cue_path="$(jq -r '.phaseSound // ""' <<<"$cfg")"
+  [ -n "$cue_path" ] || cue_path="$DEFAULT_SOUND"
+  voice="$(jq -r 'if (.cueVoice // false) then "true" else "false" end' <<<"$cfg")"
+
+  # Per-phase cue target: the spoken clip for that phase when cueVoice is on and
+  # the voice renders, otherwise the chime. Resolved (and the clips pre-rendered)
+  # once here so the tick just plays cue_wav[idx] through the same path.
+  local -a phase_kind=() cue_wav=()
+  mapfile -t phase_kind < <(jq -r '.phases[].kind' <<<"$technique")
+  local k w wav
+  for k in "${phase_kind[@]}"; do
+    wav=""
+    [ "$voice" = "true" ] && { w="$(phase_word "$k")"; wav="$(voice_wav "$w")"; }
+    [ -n "$wav" ] || wav="$cue_path"
+    cue_wav+=("$wav")
+  done
+
+  local hb=0 last_index=-1 now elapsed base saved total_ms into acc idx i index wait_ms loopf cue_pid=""
+
+  while :; do
+    flock 9
+    # One jq call per tick, reading every field at once.
+    IFS=$'\t' read -r state base saved cycles loopf < <(
+      jq -r '[(.state // "IDLE"), (.elapsedMs // 0 | floor), (.savedAtMs // 0 | floor), (.cycles // 0 | floor), (if (.loop // false) then "loop" else "once" end)] | @tsv' \
+        "$SESSION_FILE" 2>/dev/null
+    ) || { flock -u 9; break; }
+    [ -n "$state" ] || { flock -u 9; break; }
+
+    case "$state" in
+      IDLE|DONE) flock -u 9; break ;;
+      PAUSED) flock -u 9; sleep 0.4; continue ;;
+    esac
+
+    now="$(now_ms)"
+    elapsed=$(( base + now - saved ))
+    (( elapsed < 0 )) && elapsed=0
+    total_ms=$(( cycle_ms * cycles ))
+
+    if (( total_ms > 0 && elapsed >= total_ms )); then
+      if [ "$loopf" = "loop" ]; then
+        # Credit the finished pass and drop the clock back to zero, then keep
+        # ticking. -1 so the first phase of the new pass is not heard as a
+        # spurious boundary cue.
+        roll_session
+        last_index=-1
+        hb=0
+        flock -u 9
+        continue
+      fi
+      finish_session true
+      flock -u 9
+      break
+    fi
+
+    # Phase lookup in pure bash — this is the part that used to be a jq fork.
+    into=$(( elapsed % cycle_ms ))
+    acc=0; idx=$(( phase_count - 1 ))
+    for i in "${!phase_ms[@]}"; do
+      if (( into < acc + phase_ms[i] )); then idx=$i; break; fi
+      acc=$(( acc + phase_ms[i] ))
+    done
+
+    # A monotonically increasing index, so a boundary is simply a change and
+    # each cue fires exactly once even across a cycle wrap.
+    index=$(( (elapsed / cycle_ms) * phase_count + idx ))
+    if (( index != last_index )) && [ "$silent" != "true" ] \
+       && [ "${OMARCHY_BREATHE_QUIET:-0}" != 1 ]; then
+      # One blip at a time: stop any still-running previous cue before the next
+      # so a slow player or a short phase can never stack them into a stutter.
+      [ -n "$cue_pid" ] && kill "$cue_pid" 2>/dev/null || true
+      play_file "${cue_wav[idx]:-$cue_path}"
+      cue_pid=$!
+    fi
+    last_index=$index
+
+    if (( now - hb >= 5000 )); then
+      hb="$now"
+      jq --argjson e "$elapsed" --argjson n "$now" '.elapsedMs=$e | .savedAtMs=$n' \
+        "$SESSION_FILE" 2>/dev/null | put_session || true
+    fi
+
+    wait_ms=$(( acc + phase_ms[idx] - into ))
+    (( wait_ms > 500 )) && wait_ms=500
+    (( wait_ms < 40 )) && wait_ms=40
+    flock -u 9
+    sleep "$(printf '%d.%03d' $(( wait_ms / 1000 )) $(( wait_ms % 1000 )))"
+  done
+}
+
+if [ "${OMARCHY_BREATHE_LOCKED:-0}" != 1 ]; then
+  case "${1:-get}" in
+    start|toggle|pause|resume|skip|loop|stop|reset|restore)
+      exec env OMARCHY_BREATHE_LOCKED=1 flock -x "$LOCK_FILE" "$0" "$@"
+      ;;
+  esac
+fi
+
+if [ "${OMARCHY_BREATHE_LOCKED:-0}" = 1 ]; then
+  seed_config
+else
+  run_locked seed_config
+fi
+
+cmd_stop() {
+  finish_session true
+  cmd_status
+}
+
+case "${1:-get}" in
+  __run)           run_loop ;;
+  get)             read_session | jq . ;;
+  status)          cmd_status ;;
+  start)           shift; cmd_start "$@" ;;
+  toggle)          cmd_toggle ;;
+  pause)           cmd_pause ;;
+  resume)          cmd_resume ;;
+  skip)            cmd_skip ;;
+  loop)            cmd_loop ;;
+  stop)            cmd_stop ;;
+  reset)           cmd_reset ;;
+  restore)         restore_and_ensure ;;
+  techniques)      read_techniques ;;
+  stats)           read_stats | jq . ;;
+  history)         read_history | jq . ;;
+  -h|--help|help)  sed -n '2,34p' "$0" ;;
+  *) echo "omarchy-breathe: unknown command '${1}' (try --help)" >&2; exit 2 ;;
+esac

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# omarchy-breathe-nudge — the quiet "you have not breathed in a while" nudge.
+#
+# Safe to run every minute: the interval decision lives HERE, keyed off the
+# last real session in breathe-history.json, not in the systemd timer. That
+# way a missed timer tick, a suspend, or a manually-run session all resolve
+# correctly instead of drifting, and the timer stays a dumb heartbeat.
+#
+# It never nudges while a session is already live, inside the configured quiet
+# hours, or when nudging is switched off. Policy comes from the widget-owned
+# breathe-config.json, which this script only ever reads (ADR-0006 rule 4).
+#
+#   omarchy-breathe-nudge            decide, and notify if it is time
+#   omarchy-breathe-nudge check      print the decision and why, change nothing
+#   omarchy-breathe-nudge install    install + start the systemd --user timer
+#   omarchy-breathe-nudge uninstall  stop + remove it
+#   omarchy-breathe-nudge sync       install or uninstall to match the config
+#
+# Env: OMARCHY_STATE_DIR overrides the state dir (tests).
+#      OMARCHY_BREATHE_QUIET=1 makes it a dry run — decide and print, never notify.
+set -euo pipefail
+
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+CONFIG_FILE="$STATE_DIR/breathe-config.json"
+SESSION_FILE="$STATE_DIR/breathe-session.json"
+HISTORY_FILE="$STATE_DIR/breathe-history.json"
+NUDGED_FILE="$STATE_DIR/.breathe-nudged"
+UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+UNIT="omarchy-breathe-nudge"
+
+mkdir -p "$STATE_DIR"
+
+now_ms() { date +%s%3N; }
+
+read_config()  { jq -e . "$CONFIG_FILE"  2>/dev/null || printf '%s' '{}'; }
+read_session() { jq -e . "$SESSION_FILE" 2>/dev/null || printf '%s' '{"state":"IDLE"}'; }
+read_history() { jq -e . "$HISTORY_FILE" 2>/dev/null || printf '%s' '{"sessions":[]}'; }
+
+cfg_get() { jq -r "$1" <<<"$(read_config)" 2>/dev/null; }
+
+# "HH:MM" -> minutes since midnight; anything unparseable returns empty so the
+# caller can fall back rather than silently treating it as 00:00.
+hhmm_to_minutes() {
+  local raw="$1" h m
+  [[ "$raw" =~ ^([0-9]{1,2}):([0-9]{2})$ ]] || return 1
+  h="${BASH_REMATCH[1]}"; m="${BASH_REMATCH[2]}"
+  (( 10#$h < 24 && 10#$m < 60 )) || return 1
+  echo $(( 10#$h * 60 + 10#$m ))
+}
+
+# Quiet hours normally wrap midnight (22:00 -> 08:00), so "inside" is the
+# union of two spans, not a simple between.
+in_quiet_hours() {
+  local from to nowmin
+  from="$(hhmm_to_minutes "$(cfg_get '.nudge.quietFrom // "22:00"')" 2>/dev/null)" || from=1320
+  to="$(hhmm_to_minutes "$(cfg_get '.nudge.quietTo // "08:00"')" 2>/dev/null)" || to=480
+  nowmin=$(( 10#$(date +%H) * 60 + 10#$(date +%M) ))
+  if (( from == to )); then return 1; fi
+  if (( from < to )); then
+    (( nowmin >= from && nowmin < to ))
+  else
+    (( nowmin >= from || nowmin < to ))
+  fi
+}
+
+# The most recent moment breathing actually happened: the end of the newest
+# history record, or the last nudge, whichever is later.
+last_activity_ms() {
+  local last nudged
+  last="$(read_history | jq -r '
+    (.sessions // []) | map(select(.startedAtMs != null))
+    | if length == 0 then 0
+      else (map(.startedAtMs + ((.seconds // 0) * 1000)) | max)
+      end')"
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  nudged=0
+  [ -f "$NUDGED_FILE" ] && nudged="$(cat "$NUDGED_FILE" 2>/dev/null || echo 0)"
+  [[ "$nudged" =~ ^[0-9]+$ ]] || nudged=0
+  if (( nudged > last )); then echo "$nudged"; else echo "$last"; fi
+}
+
+# Prints "<decision>\t<reason>". decision is nudge | skip.
+decide() {
+  if [ "$(cfg_get '.nudge.enabled // false')" != "true" ]; then
+    printf 'skip\tnudging is switched off\n'; return
+  fi
+
+  local state
+  state="$(jq -r '.state // "IDLE"' <<<"$(read_session)")"
+  if [ "$state" = "RUNNING" ] || [ "$state" = "PAUSED" ]; then
+    printf 'skip\ta session is already under way\n'; return
+  fi
+
+  if in_quiet_hours; then
+    printf 'skip\tinside quiet hours (%s-%s)\n' \
+      "$(cfg_get '.nudge.quietFrom // "22:00"')" "$(cfg_get '.nudge.quietTo // "08:00"')"; return
+  fi
+
+  local every last now elapsed
+  every="$(cfg_get '.nudge.everyMinutes // 90')"
+  [[ "$every" =~ ^[0-9]+$ ]] && (( every > 0 )) || every=90
+  last="$(last_activity_ms)"
+  now="$(now_ms)"
+
+  # No history at all: wait out one full interval from now rather than nudging
+  # a brand-new install the moment the timer first fires.
+  if (( last == 0 )); then
+    echo "$now" > "$NUDGED_FILE"
+    printf 'skip\tno sessions yet; interval starts now\n'; return
+  fi
+
+  elapsed=$(( (now - last) / 60000 ))
+  if (( elapsed < every )); then
+    printf 'skip\tlast breathed %s min ago, interval is %s min\n' "$elapsed" "$every"; return
+  fi
+
+  printf 'nudge\t%s min since the last session\n' "$elapsed"
+}
+
+do_nudge() {
+  local decision reason line
+  line="$(decide)"
+  decision="${line%%$'\t'*}"
+  reason="${line#*$'\t'}"
+
+  if [ "$decision" != "nudge" ]; then
+    [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ] && echo "skip: $reason"
+    return 0
+  fi
+
+  local tid name
+  tid="$(cfg_get '.nudge.techniqueId // "physiological-sigh"')"
+  name="$(OMARCHY_STATE_DIR="$STATE_DIR" "$HOME/.local/bin/omarchy-breathe" techniques 2>/dev/null \
+    | jq -r --arg id "$tid" '.[] | select(.id == $id) | .name' 2>/dev/null)"
+  [ -n "$name" ] || name="a breathing exercise"
+
+  if [ "${OMARCHY_BREATHE_QUIET:-0}" = 1 ]; then
+    echo "nudge: $reason (would offer $name)"
+    now_ms > "$NUDGED_FILE"
+    return 0
+  fi
+
+  notify-send -a "Breathe" -u low \
+    "󰡾 Time to breathe" \
+    "$reason. $name takes about a minute." 2>/dev/null || true
+
+  # Stamp regardless of whether the notification was seen: a desktop that
+  # swallowed it must not produce a nudge every single tick afterwards.
+  now_ms > "$NUDGED_FILE"
+}
+
+write_units() {
+  mkdir -p "$UNIT_DIR"
+  cat > "$UNIT_DIR/$UNIT.service" <<EOF
+[Unit]
+Description=Omarchy breathing reminder
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/omarchy-breathe-nudge
+EOF
+  cat > "$UNIT_DIR/$UNIT.timer" <<EOF
+[Unit]
+Description=Omarchy breathing reminder heartbeat
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=5min
+AccuracySec=1min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+cmd_install() {
+  write_units
+  systemctl --user daemon-reload 2>/dev/null || true
+  systemctl --user enable --now "$UNIT.timer" 2>/dev/null || true
+  echo "breathing reminder timer installed"
+}
+
+cmd_uninstall() {
+  systemctl --user disable --now "$UNIT.timer" 2>/dev/null || true
+  rm -f "$UNIT_DIR/$UNIT.timer" "$UNIT_DIR/$UNIT.service"
+  systemctl --user daemon-reload 2>/dev/null || true
+  echo "breathing reminder timer removed"
+}
+
+# Make the installed state match the config, so toggling the setting in the
+# panel never leaves an orphan timer running against a disabled feature.
+cmd_sync() {
+  if [ "$(cfg_get '.nudge.enabled // false')" = "true" ]; then cmd_install; else cmd_uninstall; fi
+}
+
+case "${1:-run}" in
+  run)             do_nudge ;;
+  check)           decide ;;
+  install)         cmd_install ;;
+  uninstall)       cmd_uninstall ;;
+  sync)            cmd_sync ;;
+  -h|--help|help)  sed -n '2,19p' "$0" ;;
+  *) echo "omarchy-breathe-nudge: unknown command '${1}' (try --help)" >&2; exit 2 ;;
+esac

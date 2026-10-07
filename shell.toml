@@ -1,2 +1,8 @@
 [font]
 base-size = 20
+
+[bar]
+# Slight opacity on every bar (top + alteringux.bottombar), independent of
+# theme — this file survives theme switches, unlike the generated per-theme
+# shell.toml.
+background-alpha = 0.85

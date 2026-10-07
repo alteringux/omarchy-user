@@ -35,6 +35,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.cliamp", function (argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.cliamp"
+  }
+
   readonly property string playGlyph: root.playing ? "" : ""   // nf-fa-pause / play
   readonly property string headGlyph: ""                              // nf-fa-music
 
@@ -50,7 +55,7 @@ BarWidget {
 
   function applyStatus(raw) {
     guard.run("applyStatus", function () {
-      root.status = Model.parseStatus(raw)
+      root.status = Model.parseStatus(raw, root.status)
     })
   }
 
@@ -76,15 +81,33 @@ BarWidget {
   // ── live spectrum: `cliamp visstream` while playing ──────────────────
   Process {
     id: visProc
-    command: [root.cliampBin, "visstream", "--fps", "24"]
+    // 12fps is smooth enough for a 10-bar, bar-height spectrum and halves the
+    // top-bar repaints this widget forces while music plays.
+    command: [root.cliampBin, "visstream", "--fps", "12"]
     running: root.playing && !root.visCooldown
     stdout: SplitParser {
       onRead: function (line) {
-        var frame = Model.parseBands(line)
-        if (frame) root.bands = frame
+        var frame = Model.parseVisFrame(line)
+        if (!frame) return
+        root.bands = frame.bands
+        // The frame's mode is the ground truth for the dropdown; keep it in
+        // status so the 2 s poll can't wipe it out.
+        if (frame.visualizer && root.status && frame.visualizer !== root.status.visualizer) {
+          var s = Object.assign({}, root.status)
+          s.visualizer = frame.visualizer
+          root.status = s
+        }
       }
     }
-    onExited: root.visCooldown = true   // don't respawn in a tight loop if cliamp just quit
+    // Only throttle a respawn when visstream itself died while we still
+    // expect it to be running (root.playing still true) — a genuine
+    // crash-loop guard. An ordinary stop/pause already flips `running` to
+    // false via the `playing` term above, so it doesn't need this cooldown;
+    // unconditionally setting visCooldown here on every exit (the previous
+    // behaviour) froze the spectrum on idle bands for up to 1.5s after any
+    // stop/pause immediately followed by resume, even though cliamp itself
+    // was already back to playing.
+    onExited: if (root.playing) root.visCooldown = true
   }
 
   Timer {
@@ -96,12 +119,14 @@ BarWidget {
   }
 
   // ── synthesised idle drift when nothing is streaming ─────────────────
+  // ~7fps with a proportionally bigger phase step keeps the ambient shimmer
+  // looking the same while cutting its always-on top-bar repaints by half.
   Timer {
-    interval: 66
+    interval: 140
     repeat: true
     running: root.visible && !root.playing
     onTriggered: {
-      root.idlePhase += 0.16
+      root.idlePhase += 0.34
       root.bands = Model.idleBands(root.idlePhase, root.running ? 0.16 : 0.10)
     }
   }
@@ -123,8 +148,10 @@ BarWidget {
 
   // ── actions ─────────────────────────────────────────────────────────
   function runVerb(args) {
-    guard.run("verb:" + args.join(" "), function () {
-      Quickshell.execDetached([root.cliampBin].concat(args))
+    var safeArgs = Model.safeVerbArgs(args)
+    if (!safeArgs) return
+    guard.run("verb:" + safeArgs.join(" "), function () {
+      Quickshell.execDetached([root.cliampBin].concat(safeArgs))
     })
   }
 
@@ -145,7 +172,22 @@ BarWidget {
   function nudgeVolume(db) { if (root.running) root.runVerb(["volume", String(db)]) }
   function toggleShuffle() { if (root.running) { root.runVerb(["shuffle"]); root.pollSoon() } }
   function cycleRepeat() { if (root.running) { root.runVerb(["repeat"]); root.pollSoon() } }
-  function setVis(name) { if (root.running && name) { root.runVerb(["vis", name]); root.pollSoon() } }
+  // Optimistically record the picked mode: the status JSON carries no
+  // visualizer field, and visstream (the only other source) is stopped while
+  // paused, so without this the next poll's parseStatus carries the *old*
+  // mode forward and the dropdown snaps back. Mirrors visProc's frame handler.
+  function setVis(name) {
+    if (!root.running) return
+    var args = Model.safeVerbArgs(["vis", name])
+    if (!args) return
+    if (root.status && root.status.visualizer !== name) {
+      var s = Object.assign({}, root.status)
+      s.visualizer = name
+      root.status = s
+    }
+    root.runVerb(args)
+    root.pollSoon()
+  }
 
   // ── IPC ─────────────────────────────────────────────────────────────
   IpcHandler {
@@ -303,6 +345,21 @@ BarWidget {
           if (mouse.button === Qt.MiddleButton) root.next()
           else root.togglePanel()
         }
+        // Scroll the bar strip to nudge volume up/down without opening the
+        // panel — mirrors the panel's own +/-2 dB buttons.
+        onWheel: function (wheel) {
+          if (!root.running) return
+          root.nudgeVolume(wheel.angleDelta.y > 0 ? 2 : -2)
+          wheel.accepted = true
+        }
+      }
+
+      Kit.AttentionDot {
+        anchors.top: parent.top
+        anchors.right: parent.right
+        anchors.margins: 2
+        active: pulseTint.active
+        level: pulseTint.level
       }
     }
   }

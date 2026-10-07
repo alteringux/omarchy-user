@@ -31,6 +31,17 @@ BarWidget {
   readonly property bool quotaWarn: !!(stat && stat.quota && stat.quota.enabled && stat.quota.pct >= 80)
   readonly property bool quotaCrit: !!(stat && stat.quota && stat.quota.enabled && stat.quota.pct >= 100)
 
+  // Model.status already computes staleness (the "— " prefix on the compact
+  // label), but nothing surfaced it beyond that one glyph. The sysmon-family
+  // widgets dim + tooltip on stale; mirror that here instead of leaving
+  // netwatch as the one widget with no visible "this reading is old" state.
+  readonly property string tooltipText: stat
+    ? "NET " + stat.iface + (stat.up ? "" : " (down)")
+      + "  ·  ↓" + Model.formatRate(stat.rxRate) + " ↑" + Model.formatRate(stat.txRate)
+      + (stat.quota.enabled ? "  ·  quota " + Math.round(stat.quota.pct) + "%" : "")
+      + (stat.stale ? "  ·  stale" : "")
+    : "Loading…"
+
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-netwatch"
 
   // ---- persistence: both files are written only by omarchy-netwatch
@@ -40,7 +51,7 @@ BarWidget {
     id: configStore
     fileName: "netwatch-config.json"
     watch: true
-    pollMs: 5000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
@@ -48,13 +59,13 @@ BarWidget {
     id: stateStore
     fileName: "netwatch-state.json"
     watch: true
-    pollMs: 3000
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
   // ---- the sampler. The shipped systemd timer keeps buckets accruing when the
   //      shell isn't running; this keeps the live rate fresh while it is.
-  readonly property int sampleIntervalMs: Math.max(5, (root.config && root.config.sampleIntervalSec) || 20) * 1000
+  readonly property int sampleIntervalMs: Model.sampleIntervalMs(root.config || {})
 
   Process { id: sampleProc; running: false; onExited: stateStore.reload() }
 
@@ -125,6 +136,10 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: root.displayText
+    tooltipText: root.tooltipText
+    dimmed: !!(stat && stat.stale)
+    active: root.quotaWarn
+    activeColor: root.quotaCrit ? Kit.Palette.negative : Kit.Palette.warning
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

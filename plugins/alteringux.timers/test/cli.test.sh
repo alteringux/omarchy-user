@@ -80,6 +80,22 @@ echo '{"version":1,"completed":[]}' > "$H"
 [ "$(n)" = "0" ] && ok "clear empties the active list" || bad "clear" "count=$(n)"
 [ "$(hn)" = "3" ] && ok "clear records a completion per entry" || bad "clear history" "hn=$(hn)"
 
+# ── forget drops matching history entries ────────────────────────────────
+echo '{"version":1,"entries":[]}' > "$S"
+jq -n '{version:1, completed:[
+  {label:"Kit",         startedAt:1, endedAt:2, durationMs:1},
+  {label:"kit-selftest",startedAt:1, endedAt:2, durationMs:1},
+  {label:"review PR",   startedAt:1, endedAt:2, durationMs:1}
+]}' > "$H"
+"$CLI" forget "  Kit "
+[ "$(hn)" = "2" ] && ok "forget drops every matching entry (case- and space-insensitive)" || bad "forget" "$(cat "$H")"
+[ "$(jq -r '[.completed[].label] | sort | join(",")' "$H")" = "kit-selftest,review PR" ] \
+  && ok "forget keeps the non-matching entries" || bad "forget keeps" "$(cat "$H")"
+"$CLI" forget "   "
+[ "$(hn)" = "2" ] && ok "forget of a blank label is a no-op" || bad "forget blank" "$(cat "$H")"
+"$CLI" forget "missing"
+[ "$(hn)" = "2" ] && ok "forget of an unmatched label is a no-op" || bad "forget unmatched" "$(cat "$H")"
+
 # ── history cap 200 ──────────────────────────────────────────────────────
 jq -n '{version:1, completed:[range(0;205) | {label:"x", startedAt:1, endedAt:2, durationMs:1}]}' > "$H"
 echo '{"version":1,"entries":[]}' > "$S"
@@ -91,6 +107,34 @@ echo '{"version":1,"entries":[]}' > "$S"
 echo 'not json' > "$S"
 "$CLI" add "recovered"
 [ "$(n)" = "1" ] && ok "a malformed timers.json degrades to empty before add" || bad "malformed" "$(cat "$S")"
+
+# ── valid JSON with malformed entry arrays sanitizes safely ───────────────
+jq -n --argjson t "$now" '{version:1, entries:[
+  null, "bad", {label:"valid", createdAt:$t},
+  {label:"", createdAt:$t}, {label:"missing timestamp"}
+]}' > "$S"
+[ "$("$CLI" status | jq -r '.count')" = "1" ] \
+  && ok "malformed entry array members are dropped" || bad "malformed entries" "$("$CLI" status)"
+"$CLI" add "after malformed entries"
+[ "$(n)" = "2" ] && ok "add survives a malformed-but-valid entry list" || bad "malformed add" "$(cat "$S")"
+
+# ── same-ID removes serialize and record one completion ──────────────────
+echo '{"version":1,"entries":[{"id":"same-id","label":"once","createdAt":1,"accumulatedMs":0,"runningSince":0}]}' > "$S"
+echo '{"version":1,"completed":[]}' > "$H"
+for _ in $(seq 1 8); do "$CLI" remove same-id & done
+wait
+[ "$(n)" = "0" ] && ok "concurrent same-ID removes leave no live timer" || bad "same-ID remove state" "$(cat "$S")"
+[ "$(hn)" = "1" ] && ok "concurrent same-ID removes record once" || bad "same-ID remove history" "$(cat "$H")"
+
+# ── clear/add share one transaction and preserve both effects ─────────────
+echo '{"version":1,"entries":[{"id":"a","label":"a","createdAt":1},{"id":"b","label":"b","createdAt":1}]}' > "$S"
+echo '{"version":1,"completed":[]}' > "$H"
+"$CLI" clear & clear_pid=$!
+"$CLI" add raced & add_pid=$!
+wait "$clear_pid"
+wait "$add_pid"
+total=$(( $(n) + $(hn) ))
+[ "$total" = "3" ] && ok "clear/add transaction preserves every timer effect" || bad "clear/add race" "active=$(n) history=$(hn)"
 
 # ── get on a missing file ────────────────────────────────────────────────
 rm -f "$S"

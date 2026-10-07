@@ -38,6 +38,16 @@ BarWidget {
   // shows a suggestion, it never changes workMinutes on its own.
   readonly property var workSuggestion: root.historyLoaded ? Model.suggestedWorkMinutes(root.history, root.config.workMinutes) : null
 
+  // Today's completed count + current streak, from the same stats bucket the
+  // panel's STATISTICS section already reads — exposed on the widget too so
+  // IPC status() can report them (a keybinding or another plugin querying
+  // `alteringux.pomodoro status` shouldn't have to shell out to the CLI
+  // separately just for the numbers the panel already shows).
+  readonly property var todayBucket: root.statsLoaded && root.stats.daily && root.stats.daily[Model.todayDateString()]
+    ? root.stats.daily[Model.todayDateString()] : { completed: 0, focusedMs: 0 }
+  readonly property int completedToday: root.todayBucket.completed || 0
+  readonly property int streak: root.statsLoaded ? (root.stats.streak || 0) : 0
+
   // ---- Timer state: derived from the watched pomodoro-session.json, which is
   // written only by ~/.local/bin/omarchy-pomodoro — its `__run` systemd --user
   // daemon owns the 1s countdown, phase transitions, transition sounds,
@@ -59,6 +69,18 @@ BarWidget {
     ? session.elapsedReadyMs + Math.max(0, displayNowMs - session.savedAtMs)
     : session.elapsedReadyMs
   readonly property int completedPomodorosThisSession: session.completedPomodorosThisSession || 0
+  // Focus accounting only includes the live WORK segment. The CLI banks
+  // completed segments into today's stats; this live value keeps the bar and
+  // panel accurate between heartbeat writes.
+  readonly property real liveWorkMs: phase === Model.PHASE_WORK
+    ? (session.focusedMs || 0) + (running ? Math.max(0, displayNowMs - session.savedAtMs) : 0)
+    : 0
+  readonly property real focusedTodayMs: (root.todayBucket.focusedMs || 0) + root.liveWorkMs
+  readonly property real dailyGoalMs: Math.max(0, (root.config.dailyGoalMinutes || 0) * 60000)
+  readonly property real goalRemainingMs: Model.goalRemainingMs(root.todayBucket.focusedMs || 0, root.config, root.liveWorkMs)
+  readonly property real goalProgress: Model.goalProgress(root.todayBucket.focusedMs || 0, root.config, root.liveWorkMs)
+
+  readonly property string goalText: Model.formatGoalRemaining(root.goalRemainingMs)
 
   readonly property string displayText: {
     if (phase === Model.PHASE_IDLE) return "  Pomodoro"
@@ -78,6 +100,11 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.pomodoro", function(argv) { Quickshell.execDetached(argv) })
 
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.pomodoro"
+  }
+
   // ---- persistence -----------------------------------------------------
   // config stays widget-owned (durations / sounds, edited from the panel AND
   // by hand). session / stats / history are written only by omarchy-pomodoro,
@@ -93,7 +120,7 @@ BarWidget {
     id: sessionStore
     fileName: "pomodoro-session.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseSession(raw) }
     onExternallyChanged: root.displayNowMs = Date.now()
   }
@@ -102,7 +129,7 @@ BarWidget {
     id: statsStore
     fileName: "pomodoro-stats.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseStats(raw) }
   }
 
@@ -110,7 +137,7 @@ BarWidget {
     id: historyStore
     fileName: "pomodoro-history.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseHistory(raw) }
   }
 
@@ -156,7 +183,7 @@ BarWidget {
   Timer {
     interval: 1000
     repeat: true
-    running: root.phase !== Model.PHASE_IDLE
+    running: root.phase !== Model.PHASE_IDLE && (root.running || root.ready)
     onTriggered: root.displayNowMs = Date.now()
   }
 
@@ -185,7 +212,19 @@ BarWidget {
     function toggle(): void { root.togglePanel() }
     function status(): string {
       return guard.call("ipc.status", function() {
-        return JSON.stringify({ phase: root.phase, remainingMs: root.remainingMs, running: root.running, ready: root.ready, elapsedReadyMs: root.elapsedReadyMs })
+        return JSON.stringify({
+          phase: root.phase,
+          remainingMs: root.remainingMs,
+          running: root.running,
+          ready: root.ready,
+          elapsedReadyMs: root.elapsedReadyMs,
+          focusedTodayMs: root.focusedTodayMs,
+          dailyGoalMs: root.dailyGoalMs,
+          goalRemainingMs: root.goalRemainingMs,
+          goalReached: root.goalRemainingMs <= 0,
+          completedToday: root.completedToday,
+          streak: root.streak
+        })
       }, "{}")
     }
   }
@@ -241,6 +280,14 @@ BarWidget {
 
     onPressed: function(b) {
       root.togglePanel()
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
 
     // ---- phase progress bar ---------------------------------------

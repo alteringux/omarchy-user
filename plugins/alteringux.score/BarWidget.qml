@@ -24,6 +24,12 @@ BarWidget {
   // Per-plugin usage analytics — records every counter action so status()
   // can report habits and the panel can de-emphasise an unused control.
   Kit.Usage { id: usage; pluginId: "alteringux.score" }
+
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.score"
+  }
+
   readonly property bool canUndo: stateLoaded && Model.canUndo(root.state)
 
   // ---- persistence: two JSON files under ~/.local/state/omarchy/, both now
@@ -35,7 +41,7 @@ BarWidget {
     id: configStore
     fileName: "score-config.json"
     watch: true
-    pollMs: 2000
+    pollMs: 60000
     parse: function (raw) { return Model.parseConfig(raw) }
   }
 
@@ -43,7 +49,7 @@ BarWidget {
     id: stateStore
     fileName: "score-state.json"
     watch: true
-    pollMs: 1500
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -153,6 +159,14 @@ BarWidget {
       if (b === Qt.RightButton) root.decrement()
       else if (b === Qt.MiddleButton) root.resetScore()
       else root.togglePanel()
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }

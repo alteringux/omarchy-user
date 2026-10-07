@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# deskpet-look -- one-shot screen glance + in-character comment, via NanoGPT API.
+#
+# Used by alteringux.deskpet's floating pet when the (opt-in, default-off) "let
+# it look at your screen" setting is on: grabs a screenshot, downscales it,
+# sends it to the NanoGPT adapter (port 4142) with a system prompt describing
+# the pet's personality, and prints back one short line.
+#
+# On ANY failure (no grim/magick, capture failure, empty reply) prints one
+# reason line to stderr and exits non-zero *quietly* -- the caller just skips
+# this ambient beat and falls back to its own canned lines.
+#
+# Exit codes: 0 ok | 2 bad args | 4 capture/model failure | 5 empty reply
+set -uo pipefail
+
+timeout=45
+system=""
+max_tokens=80
+model="qwen/qwen3-coder-plus"
+
+while (($#)); do
+  case "$1" in
+    --system)     system="${2:-}"; shift 2 ;;
+    --model)      model="${2:-}"; shift 2 ;;
+    --max-tokens) max_tokens="${2:-}"; shift 2 ;;
+    --timeout)    timeout="${2:-}"; shift 2 ;;
+    --)           shift; break ;;
+    -*)           echo "deskpet-look: unknown option $1" >&2; exit 2 ;;
+    *)            break ;;
+  esac
+done
+
+for bin in grim magick base64 curl file; do
+  command -v "$bin" >/dev/null || { echo "deskpet-look: $bin not found" >&2; exit 4; }
+done
+
+work="$(mktemp -d /tmp/deskpet-look.XXXXXX 2>/dev/null)" || { echo "deskpet-look: mktemp failed" >&2; exit 4; }
+cleanup() { rm -rf "$work"; }
+trap cleanup EXIT
+
+# Capture and downscale
+grim -t jpeg -q 75 "$work/screen.jpg" 2>/dev/null || { echo "deskpet-look: grim screenshot failed" >&2; exit 4; }
+magick "$work/screen.jpg" -resize 800x600\> -quality 70 "$work/small.jpg" 2>/dev/null || { echo "deskpet-look: magick resize failed" >&2; exit 4; }
+
+# Resolve NanoGPT key
+nano_key="${NANOGPT_API_KEY:-}"
+if [[ -z "$nano_key" && -f "$HOME/.config/nanogpt/key" ]]; then
+  nano_key="$(head -1 "$HOME/.config/nanogpt/key" | tr -d '[:space:]')"
+fi
+if [[ -z "$nano_key" ]]; then
+  echo "deskpet-look: no NANOGPT_API_KEY" >&2
+  exit 4
+fi
+
+system_text="${system:-You are a witty desktop pet who reacts to what's on screen in one short line. Keep it concise.}"
+b64="$(base64 -w0 < "$work/small.jpg")"
+
+payload=$(python3 -c "
+import json
+body = {
+  'model': '${model}',
+  'messages': [{
+    'role': 'user',
+    'content': [
+      {'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,${b64}'}},
+      {'type': 'text', 'text': 'React in character in one short line. Keep it to roughly ${max_tokens} tokens. Plain text, one line.'}
+    ]
+  }],
+  'max_tokens': ${max_tokens},
+  'system': '''${system_text}'''
+}
+print(json.dumps(body))
+")
+
+raw="$(timeout -k 5 "$timeout" curl -s \
+  -H "Authorization: Bearer ${nano_key}" \
+  -H "Content-Type: application/json" \
+  -d "${payload}" \
+  "https://nano-gpt.com/api/v1/chat/completions" 2>/dev/null)" || {
+  echo "deskpet-look: API call failed" >&2; exit 4
+}
+
+text="$(printf '%s' "$raw" | python3 -c '
+import json, sys, re
+try:
+    data = json.load(sys.stdin)
+    content = data["choices"][0]["message"]["content"]
+    # Strip trailing "Next steps:" / "Sources:" trailers
+    content = re.sub(r"\n+[*_#>\s]*(?:Next steps?|Follow-?ups?|Related|Sources?|Notes?)\b[^\n]*:?\s*\n.*\Z", "", content, flags=re.S | re.I)
+    print(content.strip())
+except (KeyError, IndexError, json.JSONDecodeError) as e:
+    sys.exit(1)
+')" || { echo "deskpet-look: empty reply" >&2; exit 5; }
+
+[[ -z "${text// }" ]] && { echo "deskpet-look: empty reply" >&2; exit 5; }
+printf '%s\n' "$text"

@@ -34,8 +34,8 @@ DAILY_HISTORY_DAYS=90
 SESSION_HISTORY_MAX=200
 DEFAULT_SOUND="/usr/share/sounds/freedesktop/stereo/dialog-warning.oga"
 
-DEFAULT_CONFIG='{"version":1,"workMinutes":25,"shortBreakMinutes":5,"longBreakMinutes":15,"longBreakCycle":4,"reminderMinutes":5,"sounds":{"workStart":"","breakStart":"","longBreakStart":""}}'
-DEFAULT_SESSION='{"version":1,"phase":"IDLE","running":false,"ready":false,"remainingMs":0,"elapsedReadyMs":0,"completedPomodorosThisSession":0,"savedAtMs":0}'
+DEFAULT_CONFIG='{"version":1,"workMinutes":25,"dailyGoalMinutes":480,"shortBreakMinutes":5,"longBreakMinutes":15,"longBreakCycle":4,"reminderMinutes":5,"sounds":{"workStart":"","breakStart":"","longBreakStart":""}}'
+DEFAULT_SESSION='{"version":1,"phase":"IDLE","running":false,"ready":false,"remainingMs":0,"elapsedReadyMs":0,"completedPomodorosThisSession":0,"focusedMs":0,"savedAtMs":0}'
 DEFAULT_STATS='{"version":1,"streak":0,"lastActiveDate":"","daily":{}}'
 DEFAULT_HISTORY='{"version":1,"sessions":[]}'
 
@@ -66,9 +66,10 @@ def parse_session:
       remainingMs: ([($s.remainingMs // 0 | if type=="number" then . else 0 end), 0] | max),
       elapsedReadyMs: ([($s.elapsedReadyMs // 0 | if type=="number" then . else 0 end), 0] | max),
       completedPomodorosThisSession: ([(($s.completedPomodorosThisSession // 0 | if type=="number" then floor else 0 end)), 0] | max),
+      focusedMs: ([($s.focusedMs // 0 | if type=="number" then . else 0 end), 0] | max),
       savedAtMs: ([($s.savedAtMs // 0 | if type=="number" then . else 0 end), 0] | max)
     }
-  | if .phase == "IDLE" then .running = false | .ready = false | .remainingMs = 0 | .elapsedReadyMs = 0 else . end;
+  | if .phase == "IDLE" then .running = false | .ready = false | .remainingMs = 0 | .elapsedReadyMs = 0 | .focusedMs = 0 else . end;
 
 def phase_dur($cfg; $phase):
   (if   $phase == "WORK"        then $cfg.workMinutes
@@ -136,11 +137,86 @@ transition_key() {
     LONG_BREAK) echo longBreakStart ;; *) echo "" ;;
   esac
 }
+format_duration() {
+  local ms="${1:-0}" total_seconds hours minutes seconds
+  (( ms < 0 )) && ms=0
+  total_seconds=$(( (ms + 999) / 1000 ))
+  hours=$(( total_seconds / 3600 ))
+  minutes=$(( (total_seconds % 3600) / 60 ))
+  seconds=$(( total_seconds % 60 ))
+  if (( hours > 0 )); then
+    if (( minutes > 0 )); then printf '%sh %sm' "$hours" "$minutes"; else printf '%sh' "$hours"; fi
+  elif (( minutes > 0 )); then
+    if (( seconds > 0 && minutes < 5 )); then printf '%sm %ss' "$minutes" "$seconds"; else printf '%sm' "$minutes"; fi
+  else
+    printf '%ss' "$seconds"
+  fi
+}
+
+goal_remaining_ms() {
+  local cfg stats sess now goal focused
+  cfg="$(read_config)"; stats="$(read_stats)"; sess="$(read_session)"; now="$(now_ms)"
+  goal="$(jq -r '(.dailyGoalMinutes // 480 | if type == "number" and . > 0 then . else 480 end) * 60000' <<<"$cfg")"
+  focused="$(jq -r --arg today "$(today)" '((.daily[$today].focusedMs // 0) | if type == "number" then . else 0 end)' <<<"$stats")"
+  if [ "$(jq -r '.phase' <<<"$sess")" = "WORK" ] && [ "$(jq -r '.running' <<<"$sess")" = "true" ]; then
+    focused=$(( focused + $(work_focus_ms "$sess" "$now") ))
+  fi
+  (( focused < 0 )) && focused=0
+  local remaining=$(( goal - focused ))
+  (( remaining < 0 )) && remaining=0
+  printf '%s' "$remaining"
+}
+
 send_reminder() {   # $1 = ready phase
   [ "${OMARCHY_POMODORO_QUIET:-0}" = 1 ] && return 0
+  local remaining; remaining="$(goal_remaining_ms)"
   notify-send -a "Pomodoro" \
     "$(phase_glyph "$1") $(phase_label "$1") ready" \
-    "Press Super+Alt+P (or click the bar timer) to start it." 2>/dev/null || true
+    "Press Super+Alt+P (or click the bar timer) to start it. Focus remaining today: $(format_duration "$remaining")." 2>/dev/null || true
+}
+
+send_work_started() {
+  [ "${OMARCHY_POMODORO_QUIET:-0}" = 1 ] && return 0
+  local remaining; remaining="$(goal_remaining_ms)"
+  notify-send -a "Pomodoro" \
+    "$(phase_glyph WORK) Work started" \
+    "Focus remaining today: $(format_duration "$remaining")." 2>/dev/null || true
+}
+
+work_focus_ms() {   # $1 = session JSON, $2 = now
+  local sess="$1" now="$2" focus saved
+  focus="$(jq -r '.focusedMs // 0' <<<"$sess")"
+  if [ "$(jq -r '.phase' <<<"$sess")" = "WORK" ] && [ "$(jq -r '.running' <<<"$sess")" = "true" ]; then
+    saved="$(jq -r '.savedAtMs // 0' <<<"$sess")"
+    if (( saved > 0 && now > saved )); then focus=$(( focus + now - saved )); fi
+  fi
+  (( focus < 0 )) && focus=0
+  printf '%s' "$focus"
+}
+
+credit_work_stats() {   # $1 = focused milliseconds, $2 = completed(true|false)
+  read_stats | jq \
+    --arg today "$(today)" \
+    --arg yesterday "$(yesterday_of "$(today)")" \
+    --argjson focusedMs "$1" \
+    --argjson completed "$2" \
+    --argjson keep "$DAILY_HISTORY_DAYS" '
+      .daily = (.daily // {})
+      | (if .daily[$today] == null then .daily[$today] = {completed: 0, focusedMs: 0} else . end)
+      | .daily[$today].focusedMs = ((.daily[$today].focusedMs // 0) + $focusedMs)
+      | if $completed then
+          .daily[$today].completed = ((.daily[$today].completed // 0) + 1)
+          | .streak = (
+              if   .lastActiveDate == $today     then (.streak // 0)
+              elif .lastActiveDate == $yesterday then ((.streak // 0) + 1)
+              else 1 end)
+          | .lastActiveDate = $today
+        else . end
+      | (.daily | keys | sort) as $ks
+      | (if ($ks | length) > $keep
+         then reduce ($ks[0:(($ks | length) - $keep)][]) as $k (.; del(.daily[$k]))
+         else . end)
+    ' | write_json "$STATS_FILE"
 }
 
 # ── daemon lifecycle (stubbed by NO_DAEMON) ──────────────────────────
@@ -160,58 +236,34 @@ stop_daemon() {
 }
 
 # ── history + stats writers ──────────────────────────────────────────
-record_work_session() {   # $1 = minutes, $2 = completed(true|false)
+record_work_session() {   # $1 = minutes, $2 = completed(true|false), $3 = focusedMs
   read_history | jq \
     --argjson minutes "$1" \
     --argjson completed "$2" \
+    --argjson focusedMs "$3" \
     --arg date "$(today)" \
     --argjson cap "$SESSION_HISTORY_MAX" '
-      .sessions = ((.sessions // []) + [{minutes: $minutes, completed: $completed, date: $date}])
+      .sessions = ((.sessions // []) + [{minutes: $minutes, completed: $completed, focusedMs: $focusedMs, date: $date}])
       | (if (.sessions | length) > $cap then .sessions |= .[-$cap:] else . end)
     ' | write_json "$HISTORY_FILE"
-}
-
-credit_completed_work() {   # $1 = workDurationMs
-  read_stats | jq \
-    --arg today "$(today)" \
-    --arg yesterday "$(yesterday_of "$(today)")" \
-    --argjson focusedMs "$1" \
-    --argjson keep "$DAILY_HISTORY_DAYS" '
-      .daily = (.daily // {})
-      | (if .daily[$today] == null then .daily[$today] = {completed: 0, focusedMs: 0} else . end)
-      | .daily[$today].completed += 1
-      | .daily[$today].focusedMs  += $focusedMs
-      | .streak = (
-          if   .lastActiveDate == $today     then (.streak // 0)
-          elif .lastActiveDate == $yesterday then ((.streak // 0) + 1)
-          else 1 end)
-      | .lastActiveDate = $today
-      | (.daily | keys | sort) as $ks
-      | (if ($ks | length) > $keep
-         then reduce ($ks[0:(($ks | length) - $keep)][]) as $k (.; del(.daily[$k]))
-         else . end)
-    ' | write_json "$STATS_FILE"
 }
 
 # ── the core transition ──────────────────────────────────────────────
 # $1 = skipped (true|false). Ends the current phase and lands "ready" in the
 # next one. Mirrors Model.completePhase.
 complete_phase() {
-  local skipped="$1" cfg sess phase pre upcoming workMs
+  local skipped="$1" cfg sess phase pre upcoming focusMs now
   cfg="$(read_config)"
   sess="$(read_session)"
   phase="$(jq -r '.phase' <<<"$sess")"
   [ "$phase" = "IDLE" ] && return 0
   pre="$(jq -r '.completedPomodorosThisSession' <<<"$sess")"
-  workMs="$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)"
+  now="$(now_ms)"
 
   if [ "$phase" = "WORK" ]; then
-    if [ "$skipped" = "true" ]; then
-      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" false
-    else
-      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" true
-      credit_completed_work "$workMs"
-    fi
+    focusMs="$(work_focus_ms "$sess" "$now")"
+    record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" "$([ "$skipped" != "true" ] && echo true || echo false)" "$focusMs"
+    credit_work_stats "$focusMs" "$([ "$skipped" != "true" ] && echo true || echo false)"
   fi
 
   upcoming="$(jq -r \
@@ -227,19 +279,35 @@ complete_phase() {
     --argjson dur "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "'"$upcoming"'")' <<<null)" \
     --argjson pre "$pre" \
     --argjson credited "$credited" \
-    --argjson now "$(now_ms)" '
+    --argjson now "$now" '
       {version:1, phase:$phase, running:false, ready:true,
-       remainingMs:$dur, elapsedReadyMs:0,
+       remainingMs:$dur, elapsedReadyMs:0, focusedMs:0,
        completedPomodorosThisSession:($pre + $credited), savedAtMs:$now}
     ' | put_session
 
   play_sound "$(transition_key "$upcoming")"
   send_reminder "$upcoming"
+  pulse_log "$phase" "$upcoming"
+}
+
+# Drop a line in the shared alteringux.pulse activity feed with the obvious
+# next action. Best-effort — never let it break a transition.
+pulse_log() {   # $1 = finished phase, $2 = upcoming phase
+  command -v omarchy-pulse >/dev/null 2>&1 || return 0
+  local msg
+  if [ "$1" = "WORK" ]; then
+    msg="Work block done — $(phase_label "$2") ready"
+  else
+    msg="$(phase_label "$1") done — back to work"
+  fi
+  omarchy-pulse log alteringux.pomodoro "$msg" \
+    --action "omarchy-pomodoro toggle" --action-label "Start $(phase_label "$2")" \
+    --level info >/dev/null 2>&1 || true
 }
 
 # ── restore: reconcile a persisted session against wall clock ─────────
 do_restore() {
-  local cfg sess phase running ready savedAt rem downtime now
+  local cfg sess phase running ready savedAt rem downtime now focusMs
   cfg="$(read_config)"
   sess="$(read_session)"
   phase="$(jq -r '.phase' <<<"$sess")"
@@ -255,29 +323,43 @@ do_restore() {
     rem="$(jq -r '.remainingMs' <<<"$sess")"
     local newrem=$(( rem - downtime ))
     if (( newrem > 0 )); then
-      jq --argjson r "$newrem" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+      if [ "$phase" = "WORK" ] && (( downtime > 0 )); then
+        focusMs="$(jq -r '.focusedMs // 0' <<<"$sess")"
+        focusMs=$(( focusMs + downtime ))
+        credit_work_stats "$focusMs" false
+        jq --argjson r "$newrem" --argjson n "$now" \
+          '.remainingMs = $r | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
+      else
+        jq --argjson r "$newrem" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+      fi
       return 0
     fi
-    # ran out while away -> land ready in the next phase, crediting a WORK block
-    local leftover=$(( -newrem )) pre cycle upcoming updur
+    # Ran out while away -> land ready in the next phase and credit actual WORK time.
+    local leftover=$(( -newrem )) pre cycle upcoming updur focusMs completed
     pre="$(jq -r '.completedPomodorosThisSession' <<<"$sess")"
     cycle="$(jq '.longBreakCycle // 4' <<<"$cfg")"
     upcoming="$(jq -r --argjson pre "$pre" --argjson cycle "$cycle" "$PLIB"'next_phase("'"$phase"'"; $pre; $cycle)' <<<null)"
     updur="$(jq -r "$PLIB"'phase_dur('"$cfg"'; "'"$upcoming"'")' <<<null)"
-    local credited=0
+    completed=false
     if [ "$phase" = "WORK" ]; then
-      credited=1
-      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" true
-      credit_completed_work "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)"
+      focusMs="$(jq -r '.focusedMs // 0' <<<"$sess")"
+      local activeMs="$rem"
+      (( activeMs < 0 )) && activeMs=0
+      focusMs=$(( focusMs + activeMs ))
+      record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" true "$focusMs"
+      credit_work_stats "$focusMs" true
+      completed=true
     fi
     local ready_ms=$leftover
     (( updur > 0 && leftover > updur )) && ready_ms=$updur
     jq -n --arg phase "$upcoming" --argjson dur "$updur" --argjson pre "$pre" \
-          --argjson credited "$credited" --argjson er "$ready_ms" --argjson now "$now" '
+          --argjson credited "$([ "$completed" = true ] && echo 1 || echo 0)" \
+          --argjson er "$ready_ms" --argjson now "$now" '
       {version:1, phase:$phase, running:false, ready:true, remainingMs:$dur,
-       elapsedReadyMs:$er, completedPomodorosThisSession:($pre + $credited), savedAtMs:$now}
+       elapsedReadyMs:$er, focusedMs:0,
+       completedPomodorosThisSession:($pre + $credited), savedAtMs:$now}
     ' | put_session
-    if [ "$credited" = 1 ]; then
+    if [ "$completed" = true ]; then
       play_sound "$(transition_key "$upcoming")"
       send_reminder "$upcoming"
     fi
@@ -289,7 +371,7 @@ do_restore() {
     return 0
   fi
 
-  # paused mid-phase: frozen, just re-stamp
+  # Paused mid-phase: frozen, just re-stamp.
   jq --argjson n "$now" '.savedAtMs = $n' <<<"$sess" | put_session
 }
 
@@ -304,7 +386,7 @@ restore_and_ensure() {
 
 # ── verbs ────────────────────────────────────────────────────────────
 cmd_toggle() {
-  local cfg sess phase running ready now
+  local cfg sess phase running ready now focusMs rem saved live
   cfg="$(read_config)"
   sess="$(read_session)"
   phase="$(jq -r '.phase' <<<"$sess")"
@@ -315,77 +397,100 @@ cmd_toggle() {
   if [ "$phase" = "IDLE" ]; then
     jq -n --argjson dur "$(jq -r "$PLIB"'phase_dur('"$cfg"'; "WORK")' <<<null)" --argjson now "$now" '
       {version:1, phase:"WORK", running:true, ready:false, remainingMs:$dur,
-       elapsedReadyMs:0, completedPomodorosThisSession:0, savedAtMs:$now}
+       elapsedReadyMs:0, completedPomodorosThisSession:0, focusedMs:0, savedAtMs:$now}
     ' | put_session
     play_sound workStart
+    send_work_started
     ensure_daemon
     return 0
   fi
   if [ "$ready" = "true" ]; then
-    jq --argjson n "$now" '.running = true | .ready = false | .savedAtMs = $n' <<<"$sess" | put_session
+    jq --argjson n "$now" '.running = true | .ready = false | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
+    [ "$phase" = "WORK" ] && send_work_started
     ensure_daemon
     return 0
   fi
   if [ "$running" = "true" ]; then
-    # pause: freeze the live remaining
-    local rem saved live
+    # Pause: freeze the live remaining and bank the active WORK segment.
+    focusMs="$(work_focus_ms "$sess" "$now")"
     rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
-    live=$(( rem - (now - saved) )); (( live < 0 )) && live=0
-    jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+    live="$rem"; if (( saved > 0 && now > saved )); then live=$(( rem - (now - saved) )); fi
+    (( live < 0 )) && live=0
+    [ "$phase" = "WORK" ] && [ "$focusMs" -gt 0 ] && credit_work_stats "$focusMs" false
+    jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
     return 0
   fi
-  # paused -> resume
-  jq --argjson n "$now" '.running = true | .savedAtMs = $n' <<<"$sess" | put_session
+  # Paused -> resume.
+  jq --argjson n "$now" '.running = true | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
+  [ "$phase" = "WORK" ] && send_work_started
   ensure_daemon
 }
 
 cmd_pause() {
-  local sess now rem saved live
+  local sess now rem saved live focusMs
   sess="$(read_session)"; now="$(now_ms)"
   [ "$(jq -r '.running' <<<"$sess")" = "true" ] || { printf '%s' "$sess" | put_session; return 0; }
+  focusMs="$(work_focus_ms "$sess" "$now")"
   rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
-  live=$(( rem - (now - saved) )); (( live < 0 )) && live=0
-  jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+  live="$rem"; if (( saved > 0 && now > saved )); then live=$(( rem - (now - saved) )); fi
+  (( live < 0 )) && live=0
+  [ "$(jq -r '.phase' <<<"$sess")" = "WORK" ] && [ "$focusMs" -gt 0 ] && credit_work_stats "$focusMs" false
+  jq --argjson r "$live" --argjson n "$now" '.running = false | .remainingMs = $r | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
 }
 
 cmd_resume() {
-  local sess
+  local sess phase running now
   sess="$(read_session)"
-  [ "$(jq -r '.phase' <<<"$sess")" = "IDLE" ] && { cmd_toggle; return; }
-  jq --argjson n "$(now_ms)" '.running = true | .ready = false | .savedAtMs = $n' <<<"$sess" | put_session
+  phase="$(jq -r '.phase' <<<"$sess")"
+  [ "$phase" = "IDLE" ] && { cmd_toggle; return; }
+  running="$(jq -r '.running' <<<"$sess")"
+  [ "$running" = "true" ] && return 0
+  now="$(now_ms)"
+  jq --argjson n "$now" '.running = true | .ready = false | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
+  [ "$phase" = "WORK" ] && send_work_started
   ensure_daemon
 }
 
 cmd_reset() {
-  local sess phase cfg
+  local sess phase cfg focusMs
   sess="$(read_session)"; cfg="$(read_config)"
   phase="$(jq -r '.phase' <<<"$sess")"
-  # resetting out of a live (not ready) WORK phase is itself an interruption
+  # Resetting out of a live WORK phase records the actual focused time.
   if [ "$phase" = "WORK" ] && [ "$(jq -r '.ready' <<<"$sess")" != "true" ]; then
-    record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" false
+    focusMs="$(work_focus_ms "$sess" "$(now_ms)")"
+    record_work_session "$(jq -r '.workMinutes' <<<"$cfg")" false "$focusMs"
+    [ "$focusMs" -gt 0 ] && credit_work_stats "$focusMs" false
   fi
   printf '%s' "$DEFAULT_SESSION" | put_session
   stop_daemon
 }
 
 cmd_status() {
-  local sess cfg now phase running ready rem saved er remLive erLive
-  sess="$(read_session)"; cfg="$(read_config)"; now="$(now_ms)"
+  local sess cfg stats now phase running ready rem saved er remLive erLive focusedToday goalMs goalRemaining
+  sess="$(read_session)"; cfg="$(read_config)"; stats="$(read_stats)"; now="$(now_ms)"
   phase="$(jq -r '.phase' <<<"$sess")"
   running="$(jq -r '.running' <<<"$sess")"
   ready="$(jq -r '.ready' <<<"$sess")"
   rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
   er="$(jq -r '.elapsedReadyMs' <<<"$sess")"
-  remLive="$rem"; [ "$running" = "true" ] && { remLive=$(( rem - (now - saved) )); (( remLive < 0 )) && remLive=0; }
-  erLive="$er";  [ "$ready" = "true" ]   && erLive=$(( er + (now - saved) ))
+  remLive="$rem"
+  if [ "$running" = "true" ] && (( saved > 0 && now > saved )); then remLive=$(( rem - (now - saved) )); fi
+  (( remLive < 0 )) && remLive=0
+  erLive="$er";  [ "$ready" = "true" ] && erLive=$(( er + now - saved ))
+  focusedToday="$(jq -r --arg today "$(today)" '((.daily[$today].focusedMs // 0) | if type == "number" then . else 0 end)' <<<"$stats")"
+  if [ "$phase" = "WORK" ]; then focusedToday=$(( focusedToday + $(work_focus_ms "$sess" "$now") )); fi
+  goalMs="$(jq -r '(.dailyGoalMinutes // 480 | if type == "number" and . > 0 then . else 480 end) * 60000' <<<"$cfg")"
+  goalRemaining=$(( goalMs - focusedToday )); (( goalRemaining < 0 )) && goalRemaining=0
   jq -n \
     --arg phase "$phase" --argjson running "${running}" --argjson ready "${ready}" \
     --argjson remainingMs "$remLive" --argjson elapsedReadyMs "$erLive" \
-    --argjson session "$sess" \
-    --argjson stats "$(read_stats)" \
-    --arg today "$(today)" '
+    --argjson focusedTodayMs "$focusedToday" --argjson dailyGoalMs "$goalMs" \
+    --argjson goalRemainingMs "$goalRemaining" \
+    --argjson session "$sess" --argjson stats "$stats" --arg today "$(today)" '
       {phase:$phase, running:$running, ready:$ready,
        remainingMs:$remainingMs, elapsedReadyMs:$elapsedReadyMs,
+       focusedTodayMs:$focusedTodayMs, dailyGoalMs:$dailyGoalMs,
+       goalRemainingMs:$goalRemainingMs, goalReached:($focusedTodayMs >= $dailyGoalMs),
        completedPomodorosThisSession:$session.completedPomodorosThisSession,
        completedToday: (($stats.daily[$today].completed) // 0),
        streak: ($stats.streak // 0)}
@@ -405,14 +510,25 @@ run_loop() {
     now="$(now_ms)"
 
     if [ "$running" = "true" ]; then
-      local rem saved live
+      local rem saved live segment storedFocus
       rem="$(jq -r '.remainingMs' <<<"$sess")"; saved="$(jq -r '.savedAtMs' <<<"$sess")"
-      live=$(( rem - (now - saved) ))
+      live="$rem"; segment=0
+      if (( saved > 0 && now > saved )); then
+        live=$(( rem - (now - saved) ))
+        segment=$(( now - saved ))
+      fi
       if (( live <= 0 )); then
         complete_phase false
       elif (( now - hb >= 5000 )); then
         hb="$now"
-        jq --argjson r "$live" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+        if [ "$phase" = "WORK" ] && (( segment > 0 )); then
+          storedFocus="$(jq -r '.focusedMs // 0' <<<"$sess")"
+          credit_work_stats "$(( storedFocus + segment ))" false
+          jq --argjson r "$live" --argjson n "$now" \
+            '.remainingMs = $r | .focusedMs = 0 | .savedAtMs = $n' <<<"$sess" | put_session
+        else
+          jq --argjson r "$live" --argjson n "$now" '.remainingMs = $r | .savedAtMs = $n' <<<"$sess" | put_session
+        fi
       fi
     elif [ "$ready" = "true" ]; then
       local er saved reminderMs lastRe
@@ -421,7 +537,7 @@ run_loop() {
       lastRe="$(jq -r '.lastReminderMs // .savedAtMs' <<<"$sess")"
       if (( now - lastRe >= reminderMs )); then
         send_reminder "$phase"
-        jq --argjson e "$(( er + (now - saved) ))" --argjson n "$now" \
+        jq --argjson e "$(( er + now - saved ))" --argjson n "$now" \
            '.elapsedReadyMs = $e | .savedAtMs = $n | .lastReminderMs = $n' <<<"$sess" | put_session
       fi
     fi

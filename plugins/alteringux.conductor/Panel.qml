@@ -28,6 +28,17 @@ Panel {
 
   property bool inputFocused: false
 
+  // Ticks while a ritual is running so the "Running Xm" readout stays live
+  // without a per-frame binding; cheap since it only runs while active.
+  property double nowMs: Date.now()
+  Timer {
+    interval: 30000
+    repeat: true
+    running: root.active
+    triggeredOnStart: true
+    onTriggered: root.nowMs = Date.now()
+  }
+
   function runRitual(id) {
     guard.run("runRitual", function () {
       if (!hostWidget) return
@@ -44,7 +55,7 @@ Panel {
   }
 
   Timer {
-    interval: 8000
+    interval: 60000
     repeat: true
     running: root.opened
     onTriggered: if (hostWidget) hostWidget.refreshSnapshot()
@@ -92,7 +103,10 @@ Panel {
             foreground: root.barForeground
             onActiveFocusChanged: root.inputFocused = activeFocus
             onAccepted: {
-              if (root.rituals.length > 0 && !root.active) root.runRitual(root.rituals[0].id)
+              // Only auto-launch when there's exactly one ritual to mean —
+              // with two or more, Enter used to fire rituals[0] regardless
+              // of which card the label was meant for.
+              if (root.rituals.length === 1 && !root.active) root.runRitual(root.rituals[0].id)
             }
           }
 
@@ -114,26 +128,21 @@ Panel {
 
           Repeater {
             model: root.rituals
-            delegate: Rectangle {
+            delegate: Kit.Card {
               id: rcard
               required property var modelData
 
               width: content.width
-              height: rcol.implicitHeight + Style.space(20)
-              radius: Style.cornerRadius
               color: rmouse.containsMouse && !root.active
                 ? Util.alpha(root.barForeground, 0.10)
-                : Util.alpha(root.barForeground, 0.05)
-              border.width: 1
-              border.color: Util.alpha(root.barForeground, 0.14)
+                : Kit.Palette.cardBg
               opacity: root.active ? 0.5 : 1.0
+              foreground: root.barForeground
+              body: rcol
 
               Column {
                 id: rcol
-                anchors.left: parent.left
-                anchors.right: parent.right
-                anchors.verticalCenter: parent.verticalCenter
-                anchors.margins: Style.space(12)
+                width: rcard.bodyWidth
                 spacing: Style.space(3)
 
                 Text {
@@ -155,7 +164,10 @@ Panel {
                   width: rcol.width
                   wrapMode: Text.WordWrap
                   text: rcard.modelData.description
-                  color: Qt.darker(root.barForeground, 1.3)
+                  // Explanatory sentence, not a status tag: hint role per
+                  // docs/adr/0005-panel-text-hierarchy.md, not a darkened
+                  // foreground.
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
@@ -190,6 +202,15 @@ Panel {
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.bold: true
+          }
+
+          Text {
+            visible: root.active && root.state.startedAt > 0
+            width: content.width
+            text: "Running " + Model.fmtMs(Math.max(0, root.nowMs - root.state.startedAt))
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
           }
 
           Column {

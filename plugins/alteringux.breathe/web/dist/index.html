@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Breathe: guided breathing techniques with local-only session history.">
+  <title>Breathe — alteringux</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar"><a class="brand" href="#top"><span aria-hidden="true">◉</span> Breathe</a><nav><a href="#practice">Practice</a><a href="#metrics">Metrics</a><a href="#settings">Settings</a></nav></header>
+  <main id="top" class="shell">
+    <section id="practice" class="hero grid">
+      <div class="session-card panel">
+        <div class="eyebrow" id="session-status">READY</div><h1 id="phase-label">Choose a technique</h1><p id="phase-detail">Your sessions stay on this device.</p>
+        <div class="orb-wrap" aria-live="polite"><div id="orb" class="orb"><span id="orb-time">—</span></div></div>
+        <div class="progress"><div id="session-progress"></div></div><div class="session-meta"><span id="cycle-progress">Ready</span><span id="session-time">0:00</span></div>
+        <div class="actions"><button id="start-btn" class="primary">Start</button><button id="pause-btn">Pause</button><button id="skip-btn">Skip hold</button><button id="finish-btn">Finish</button><button id="guide-btn">Guide</button></div>
+        <p id="limitation" class="notice">This timer runs only while this page is open. Closing the page cannot continue a session.</p><div id="warning" class="warning hidden"></div>
+      </div>
+      <div class="catalogue panel"><div class="section-head"><div><div class="eyebrow">TECHNIQUES</div><h2>Find your rhythm</h2></div><button id="new-technique">+ Custom</button></div><div id="catalogue-list"></div></div>
+    </section>
+    <section id="metrics" class="panel section"><div class="section-head"><div><div class="eyebrow">LOCAL HISTORY</div><h2>Metrics</h2></div><button id="reset-data" class="danger">Reset local data</button></div><div id="metrics-content"></div></section>
+    <section id="settings" class="panel section"><div class="eyebrow">PREFERENCES</div><h2>Settings</h2><div id="settings-form" class="settings-grid"></div></section>
+    <section id="editor" class="panel section hidden"><div class="section-head"><div><div class="eyebrow">YOUR PATTERN</div><h2 id="editor-title">Custom technique</h2></div><button id="close-editor">Close</button></div><div id="editor-form"></div></section>
+  </main>
+  <dialog id="guide"><div class="guide-inner"><button id="guide-close" class="guide-close" aria-label="Close guide">×</button><div class="eyebrow">GUIDE · <span id="guide-technique"></span></div><div id="guide-orb" class="guide-orb"><span id="guide-time">—</span></div><h2 id="guide-phase">Ready</h2><p id="guide-help">Space pauses · Right Arrow skips a hold · L toggles loop · Escape closes</p><div class="actions"><button id="guide-pause">Pause</button><button id="guide-skip">Skip hold</button><button id="guide-loop">Loop</button></div></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="model.js"></script><script src="model-bridge.js"></script><script src="app.js"></script>
+</body>
+</html>

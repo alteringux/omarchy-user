@@ -98,28 +98,87 @@ Panel {
             foreground: root.barForeground
           }
 
-          // One-tap chips for the labels you start most often (freq + recency
-          // ranked, from the rolling completion log). Hidden until there's
-          // history to rank.
-          Flow {
-            width: content.width
-            spacing: Style.space(6)
-            visible: root.chips.length > 0
+// One bordered pill per remembered label (freq + recency ranked, from
+  // the rolling completion log): tap the label to start a timer, tap its
+  // × to forget just that label. The label text tail-elides with '…' so a
+  // long one can't overflow the panel edge. Hidden until there's history
+  // to rank.
+  Flow {
+    width: content.width
+    spacing: Style.space(6)
+    visible: root.chips.length > 0
 
-            Repeater {
-              model: root.chips
-              delegate: Button {
-                required property var modelData
-                text: modelData
-                foreground: root.barForeground
-                bordered: true
-                onClicked: if (hostWidget) {
-                  hostWidget.addEntry(modelData)
-                  hostWidget.recordChipUse()
-                }
-              }
+    Repeater {
+      model: root.chips
+      delegate: Rectangle {
+        id: chip
+        required property var modelData
+        readonly property string fullText: modelData
+
+        width: chipRow.implicitWidth + Style.space(16)
+        height: chipRow.implicitHeight + Style.space(8)
+        radius: Style.cornerRadius
+        color: chipMouse.containsMouse ? Util.alpha(root.barForeground, 0.10) : "transparent"
+        border.width: 1
+        border.color: Util.alpha(root.barForeground, 0.25)
+
+        // Start a timer from the label. Sits below the × handler in the
+        // stack, so clicks on the × don't reach this.
+        MouseArea {
+          id: chipMouse
+          anchors.fill: parent
+          hoverEnabled: true
+          cursorShape: Qt.PointingHandCursor
+          onClicked: if (hostWidget) {
+            hostWidget.addEntry(modelData)
+            hostWidget.recordChipUse()
+          }
+        }
+
+        Row {
+          id: chipRow
+          anchors.centerIn: parent
+          spacing: Style.space(6)
+
+          Text {
+            text: chipMetrics.elidedText
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            anchors.verticalCenter: parent.verticalCenter
+
+            TextMetrics {
+              id: chipMetrics
+              text: chip.fullText
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              elide: Qt.ElideRight
+              // panel width minus this pill's padding, the × and its gap
+              elideWidth: content.width - Style.space(48)
             }
           }
+
+          Text {
+            text: "×"
+            color: root.barForeground
+            opacity: forgetMouse.containsMouse ? 1 : 0.45
+            font.family: Style.font.family
+            font.pixelSize: Style.font.body
+            anchors.verticalCenter: parent.verticalCenter
+
+            MouseArea {
+              id: forgetMouse
+              anchors.fill: parent
+              anchors.margins: -4
+              hoverEnabled: true
+              cursorShape: Qt.PointingHandCursor
+              onClicked: if (hostWidget) hostWidget.forgetLabel(modelData)
+            }
+          }
+        }
+      }
+    }
+  }
 
           Row {
             width: content.width
@@ -215,13 +274,17 @@ Panel {
                     onClicked: card.showCreatedAt = !card.showCreatedAt
                   }
                 }
+                // Hint line — Kit.Palette.faint per docs/adr/0005 in the
+                // neutral case, instead of hand-rolled opacity-on-barForeground;
+                // the running-long case keeps the full-opacity warning tint
+                // since that's a state colour, not the dim hint role.
                 Text {
                   visible: !!card.labelBaseline
                   text: card.labelBaseline
                     ? ((card.runningLong ? "over its usual ~" : "usually ~") + Model.formatElapsed(card.labelBaseline.median))
                     : ""
-                  color: card.runningLong ? root.longColor : root.barForeground
-                  opacity: card.runningLong ? 0.9 : 0.5
+                  color: card.runningLong ? root.longColor : Kit.Palette.faint
+                  opacity: card.runningLong ? 0.9 : 1.0
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -280,9 +343,9 @@ Panel {
 
           Text {
             text: "Enter: add  ·  ⏸ pause/resume  ·  click a time for its start date  ·  Esc: close"
-            color: Qt.darker(root.barForeground, 1.4)
+            color: Kit.Palette.faint
             font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+            font.pixelSize: Style.font.caption
           }
         }
       }

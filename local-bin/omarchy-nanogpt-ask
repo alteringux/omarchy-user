@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Ask NanoGPT one question, print the answer for the Omarchy overlay, and
+# optionally speak the same answer through the user's Piper TTS queue.
+set -uo pipefail
+
+voiceEnabled=false
+case "${1:-}" in
+  --voice) voiceEnabled=true; shift ;;
+  --no-voice) shift ;;
+esac
+
+question="${1:-}"
+question="$(printf '%s' "$question" | tr '\n' ' ' | sed -e 's/[[:space:]]\+/ /g' -e 's/^ //' -e 's/ $//')"
+[[ -n "${question// }" ]] || {
+  printf '%s\n' "Ask NanoGPT: enter a question first." >&2
+  exit 2
+}
+
+LLM_AGENT="$(command -v llm-agent 2>/dev/null || printf '%s' "$HOME/.local/bin/llm-agent")"
+[[ -x "$LLM_AGENT" ]] || {
+  printf '%s\n' "Ask NanoGPT: llm-agent is not available." >&2
+  exit 127
+}
+
+SYSTEM_PROMPT='You answer one desktop user question clearly and directly. Use web search whenever the question depends on current, recent, or future information, and cross-check time-sensitive facts with authoritative sources. Interpret an explicit calendar year literally: for example, a question about 2027 means the event in calendar year 2027, not the 2026-27 season unless the user says season. If the requested future date is not officially announced, say so rather than substituting an earlier year. Use plain text only: no markdown, no bullet lists, no preamble, no follow-up question, no URLs, and no claims about actions you did not perform. Keep the answer concise but complete.'
+TIMEOUT="${ASK_NANOGPT_TIMEOUT:-120}"
+MAX_TOKENS="${ASK_NANOGPT_MAX_TOKENS:-500}"
+MAX_ITERS="${ASK_NANOGPT_MAX_ITERS:-6}"
+MODEL_ARGS=()
+[[ -n "${ASK_NANOGPT_MODEL:-}" ]] && MODEL_ARGS=(--model "$ASK_NANOGPT_MODEL")
+
+PIPER_TTS="$(command -v piper-tts 2>/dev/null || printf '%s' "$HOME/.local/bin/piper-tts")"
+VOICE="${OMARCHY_ASK_VOICE:-en_GB-cori-high}"
+RATE="${OMARCHY_ASK_RATE:-0.9}"
+if [[ "$voiceEnabled" == true && -x "$PIPER_TTS" ]]; then
+  # A follow-up replaces the previous answer; clear its tagged queue before
+  # doing model work so stale speech cannot continue into the new turn.
+  "$PIPER_TTS" --stop --tag nanogpt-ask >/dev/null 2>&1 || true
+fi
+
+answer="$("$LLM_AGENT" --max-iters "$MAX_ITERS" --max-tokens "$MAX_TOKENS" \
+  --timeout "$TIMEOUT" --system "$SYSTEM_PROMPT" "${MODEL_ARGS[@]}" -- "$question" 2>&1)"
+rc=$?
+if (( rc != 0 )); then
+  printf '%s\n' "Ask NanoGPT: ${answer##*$'\n'}" >&2
+  exit "$rc"
+fi
+
+answer="$(printf '%s' "$answer" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+[[ -n "${answer// }" ]] || {
+  printf '%s\n' "Ask NanoGPT: NanoGPT returned an empty answer." >&2
+  exit 5
+}
+printf '%s\n' "$answer"
+
+if [[ "$voiceEnabled" == true && -x "$PIPER_TTS" ]]; then
+  printf '%s' "$answer" | "$PIPER_TTS" --tag nanogpt-ask --voice "$VOICE" \
+    --length-scale "$RATE" >/dev/null 2>&1 &
+fi

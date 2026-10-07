@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# omarchy-sports-ai -- one-shot sports analyst question through llm-blurb
+# (hermes -> NanoGPT), the same route the dictionary/briefing helpers use.
+#
+# The caller supplies the question; this wrapper adds a compact context block
+# (sport, live scores, next fixtures) read from the plugin's state file so the
+# model answers about real data instead of guessing.
+#
+# Usage:
+#   omarchy-sports-ai [--sport Soccer] [--state PATH] "QUESTION"
+#   echo "QUESTION" | omarchy-sports-ai --sport Rugby
+#
+# Exit codes: 0 ok | 2 bad args | 3 no llm backend | 4 backend failed
+
+set -uo pipefail
+
+SPORT=""
+STATE="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}/sports.json"
+while (($#)); do
+  case "$1" in
+    --sport)  SPORT="${2:-}"; shift 2 ;;
+    --state)  STATE="${2:-}"; shift 2 ;;
+    --)       shift; break ;;
+    -*)       echo "omarchy-sports-ai: unknown option $1" >&2; exit 2 ;;
+    *)        break ;;
+  esac
+done
+question="${*:-}"
+[[ -z "$question" ]] && question="$(cat)"
+[[ -z "${question// }" ]] && { echo "omarchy-sports-ai: empty question" >&2; exit 2; }
+
+# ---- compact context from the state file (tolerant: missing file = no block)
+context=""
+if [[ -r "$STATE" ]] && command -v jq >/dev/null 2>&1; then
+  context="$(jq -r '
+    def fmt($m): "\($m.homeTeam) \($m.homeScore // "-") – \($m.awayScore // "-") \($m.awayTeam)";
+    "Context (cached, may be minutes old):"
+    + (if ($SPORT // "") != "" then "\nSport: \($SPORT)" else "" end)
+    + "\nLive now: " +
+      ((.live // []) | if length == 0 then "none" else map(fmt(.)) | join("; ") end)
+    + "\nNext up: " +
+      ((.upcoming // []) | map("\(.homeTeam) vs \(.awayTeam) (\(.dateEvent))") | .[:5] | join("; "))
+    + "\nRecent: " +
+      ((.results // []) | map(fmt(.)) | .[:5] | join("; "))
+  ' --arg SPORT "$SPORT" "$STATE" 2>/dev/null)"
+fi
+
+system="You are a concise sports analyst. Use the provided cached match context
+when it is relevant; say so when you lack data rather than inventing scores.
+Plain text, no markdown, under 120 words."
+
+if [[ -n "$context" ]]; then
+  prompt="${context}
+Question: ${question}"
+else
+  prompt="Question: ${question}"
+fi
+
+exec llm-blurb --system "$system" --max-tokens 300 --timeout 45 "$prompt"

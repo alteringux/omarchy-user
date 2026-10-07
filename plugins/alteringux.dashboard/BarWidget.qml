@@ -20,6 +20,7 @@ BarWidget {
   readonly property string home: Quickshell.env("HOME")
   readonly property string pluginDir: home + "/.config/omarchy/plugins/alteringux.dashboard"
   readonly property string refreshScript: pluginDir + "/bin/omarchy-dashboard-refresh"
+  readonly property string skillActionScript: home + "/.config/omarchy/local-bin/omarchy-skill-action"
 
   // dashboard.json lives under ~/.local/state/omarchy/ (NOT in the plugin's own
   // source tree — the shell's plugin-file watcher would reload the widget on
@@ -27,6 +28,7 @@ BarWidget {
   // so the Store watches it for outside changes rather than owning it.
   property alias state: stateStore.value
   property bool refreshing: false
+  property bool refreshPending: false
 
   readonly property bool hasUpdates: state.system.items.length > 0
 
@@ -34,6 +36,12 @@ BarWidget {
     id: stateStore
     fileName: "dashboard.json"
     watch: true
+    // Every bin/ writer (refresh/note/track) replaces the file via
+    // mktemp+mv, which swaps the inode FileView's watchChanges is holding —
+    // so after the very first external write, the watch goes dead and
+    // onFileChanged never fires again without this idle poll. Same
+    // watch-on-create blind spot Kit.Store's own header documents.
+    pollMs: 60000
     parse: function (raw) { return Model.parseState(raw) }
   }
 
@@ -42,15 +50,36 @@ BarWidget {
     command: ["bash", root.refreshScript]
     running: false
     onRunningChanged: root.refreshing = running
-    onExited: stateStore.reload()
+    onExited: {
+      stateStore.reload()
+      if (root.refreshPending) {
+        root.refreshPending = false
+        Qt.callLater(function() {
+          if (!refreshProc.running) root.runRefresh()
+        })
+      }
+    }
   }
 
   function runRefresh() {
     guard.run("runRefresh", function() {
-      if (refreshProc.running) return
+      if (refreshProc.running) {
+        root.refreshPending = true
+        return
+      }
       refreshProc.running = true
     })
   }
+
+  function runSkillAction(action, skill) {
+    guard.run("runSkillAction", function() {
+      if (!skill || !skill.id || !skill.owned) return
+      skillActionProc.command = [skillActionScript, action, skill.id, "--path", skill.path]
+      skillActionProc.running = true
+    })
+  }
+
+  Process { id: skillActionProc; running: false; onExited: { stateStore.reload(); root.runRefresh() } }
 
   Timer {
     id: refreshTimer
@@ -61,6 +90,11 @@ BarWidget {
   }
 
   readonly property var guard: Kit.BugGuard.create("alteringux.dashboard", function(argv) { Quickshell.execDetached(argv) })
+
+  Kit.PulseTint {
+    id: pulseTint
+    pluginId: "alteringux.dashboard"
+  }
 
   Component.onCompleted: root.runRefresh()
 
@@ -104,6 +138,31 @@ BarWidget {
     }
   }
 
+  // The one alteringux.* bar-widget plugin with no IPC surface at all — every
+  // sibling (stocks, score, conductor, ...) exposes at least open/close/status
+  // for scripting + the other plugins' bottombar host. Mirrors stocks' shape.
+  IpcHandler {
+    target: "alteringux.dashboard"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function toggle(): void { root.togglePanel() }
+    function refresh(): void { root.runRefresh() }
+    function status(): string {
+      return guard.call("ipc.status", function() {
+        return JSON.stringify({
+          refreshing: root.refreshing,
+          hasUpdates: root.hasUpdates,
+          news: root.state.news.items.length,
+          system: root.state.system.items.length,
+          notes: root.state.notes.items.length,
+          newsUpdatedAt: root.state.news.updatedAt,
+          systemUpdatedAt: root.state.system.updatedAt
+        })
+      }, "{}")
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
@@ -126,6 +185,14 @@ BarWidget {
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)
       anchors.rightMargin: Style.space(3)
+    }
+
+    Kit.AttentionDot {
+      anchors.top: parent.top
+      anchors.right: parent.right
+      anchors.margins: 2
+      active: pulseTint.active
+      level: pulseTint.level
     }
   }
 }

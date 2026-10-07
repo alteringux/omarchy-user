@@ -4,7 +4,7 @@
   "name": "Stocks",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "Personal stock watchlist with live price/change, 52-week range, and market-wide trending/movers",
+  "description": "Global top-10 gainers/losers across major world markets, live price/change, 52-week range, and trending searches",
   "kinds": [
     "bar-widget"
   ],
@@ -13,7 +13,7 @@
   },
   "barWidget": {
     "displayName": "Stocks",
-    "description": "Watchlist overview with top/worst movers, trending, and a 52-week filter",
+    "description": "Worldwide top gainers/losers, trending searches, and a 52-week filter",
     "category": "Finance",
     "allowMultiple": false
   }

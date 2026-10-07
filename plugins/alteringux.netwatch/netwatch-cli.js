@@ -35,6 +35,9 @@ try {
       out = Model.ingest(state, prev, p.cur || {}, cfg, nowIn(p))
       break
     }
+    case "config":
+      out = Model.parseConfig(p.config || {})
+      break
 
     case "status":
       out = Model.status(p.stateRaw, p.config || {}, nowIn(p))

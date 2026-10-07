@@ -19,10 +19,10 @@ Item {
 
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
   readonly property string home: Quickshell.env("HOME")
-  // History + DND live under XDG_STATE_HOME: they're persistent user state
-  // (the notifications received, the last-set DND preference), not
-  // regeneratable cache that a `rm -rf ~/.cache` should wipe.
-  readonly property string stateDir: home + "/.local/state/omarchy/"
+  // Keep state with the user's configured XDG state directory. Omarchy's
+  // historical default remains ~/.local/state when the variable is unset.
+  readonly property string xdgStateHome: Quickshell.env("XDG_STATE_HOME")
+  readonly property string stateDir: (xdgStateHome || (home + "/.local/state")).replace(/\/+$/, "") + "/omarchy/"
   readonly property string settingsPath: stateDir + "notifications.json"
   // One file per on-screen popup, so live toasts survive shell restarts.
   // A file exists exactly as long as its popup is showing: written when the
@@ -192,7 +192,15 @@ Item {
     // Qt.callLater avoids "QV4::Object::insertMember" crashes when a
     // Repeater is mid-incubation while we mutate its model.
     Qt.callLater(function() {
-      removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
+      // Unqualified, this silently threw "removePopupsByOriginalId is not
+      // defined" inside the deferred callback -- a plain JS function
+      // expression passed to Qt.callLater doesn't carry the enclosing Item's
+      // function-property scope the way a QML id does, so it needs the
+      // explicit `service.` qualifier that `popupModel` below doesn't. The
+      // dedup this call does (dropping the superseded popup for a
+      // replaces_id update) silently never ran, leaving a stale duplicate
+      // toast on screen next to the new one.
+      service.removePopupsByOriginalId(snapshot.originalId, NotificationLogic.popupFileName(snapshot))
       popupModel.insert(0, snapshot)
       // An update that arrived while the insert was deferred found no row to
       // write to, and a property that already changed will not change again.
@@ -390,7 +398,7 @@ Item {
       }
     } catch (e) {
       // Notification already torn down by the server — fall through to focus.
-      console.warn("invoke default failed:", e)
+      console.warn("notifications: invoke default failed:", e)
     }
     // Chat apps (Slack, Discord, Vesktop, etc.) rarely register a "default"
     // libnotify action — they just expect clicking the notification to
@@ -677,6 +685,40 @@ Item {
     }
     return rows
   }
+  function ensureEmptyHistoryPlaceholder() {
+    var existing = []
+    for (var i = 0; i < popupModel.count; i++) existing.push(popupModel.get(i))
+
+    var unique = NotificationLogic.dedupeHistoryPlaceholders(existing)
+    var hasPlaceholder = false
+    for (var j = 0; j < unique.length; j++) {
+      if (NotificationLogic.isHistoryPlaceholder(unique[j])) {
+        hasPlaceholder = true
+        break
+      }
+    }
+    if (unique.length === existing.length && hasPlaceholder) return
+
+    for (var k = popupModel.count - 1; k >= 0; k--) {
+      if (NotificationLogic.isHistoryPlaceholder(popupModel.get(k)))
+        popupModel.remove(k)
+    }
+    popupModel.insert(0, {
+      id: -1,
+      originalId: -1,
+      app: "omarchy-action",
+      appIcon: "",
+      summary: "No recent notifications",
+      body: "",
+      image: "",
+      glyph: "󰂚",
+      execArgv: "",
+      urgency: NotificationUrgency.Low,
+      expireTimeout: 0,
+      timestamp: Date.now()
+    })
+  }
+
 
   function replayHistory(raw) {
     var rows = NotificationLogic.historyRows(
@@ -684,21 +726,9 @@ Item {
     service.replayCarryOver = []
 
     // Replaying nothing at all looks like a dead keybinding, so say so.
+    // The helper is idempotent: repeated empty replays keep one placeholder.
     if (rows.length === 0) {
-      popupModel.insert(0, {
-        id: -1,
-        originalId: -1,
-        app: "omarchy-action",
-        appIcon: "",
-        summary: "No recent notifications",
-        body: "",
-        image: "",
-        glyph: "󰂚",
-        execArgv: "",
-        urgency: NotificationUrgency.Low,
-        expireTimeout: 0,
-        timestamp: Date.now()
-      })
+      service.ensureEmptyHistoryPlaceholder()
       return
     }
 

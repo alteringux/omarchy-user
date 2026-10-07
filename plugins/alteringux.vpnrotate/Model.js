@@ -39,6 +39,82 @@ function parseState(raw) {
 function str(v) { return typeof v === "string" ? v : ""; }
 function num(v) { return typeof v === "number" && isFinite(v) ? v : 0; }
 
+// ── wifi link state ─────────────────────────────────────────────────────
+// Parses `nmcli -t -f TYPE,STATE dev` (colon-separated rows: "wifi:connected",
+// "ethernet:connected", "wifi:disconnected", …). Returns one of:
+//   "connected"     at least one wifi device is joined to an AP
+//   "disconnected"  a wifi device exists but is on no AP (or the radio is off)
+//   "unavailable"   a wifi device exists but is unmanaged / rfkill-blocked, or
+//                   reports a state string we don't recognise
+//   "unknown"       no wifi device at all, or empty / unreadable input
+// "wifi-p2p" is a distinct TYPE and is ignored here. Multiple "wifi" rows
+// collapse to the strongest: connected > disconnected > unavailable. Junk in →
+// "unknown" out, so callers never need a try/catch — same safe-empty contract
+// as parseState. The widget gates its connect calls on this; the bash script
+// keeps its own independent gate so IPC / bare-CLI callers behave the same.
+function parseWifiState(raw) {
+  if (!raw || raw.length === 0) return "unknown";
+  var rank = { connected: 4, disconnected: 3, unavailable: 2 };
+  var best = "unknown";
+  var bestRank = 0;
+  var lines = raw.split("\n");
+  for (var i = 0; i < lines.length; i++) {
+    var m = lines[i].match(/^wifi:(\S+)/);
+    if (!m) continue;
+    var s = m[1];
+    if (!rank[s]) s = "unavailable";
+    if (rank[s] > bestRank) { bestRank = rank[s]; best = s; }
+  }
+  return best;
+}
+
+// True iff a wifi link is up right now. Accepts the string parseWifiState
+// returns, or a parsed object carrying a `wifiState` field, so either caller
+// shape works.
+function isWifiActive(x) {
+  if (x && typeof x === "object") x = x.wifiState;
+  return x === "connected";
+}
+
+// ── metrics sidecar (written by `protonvpn-rotate metrics` + connect/rotate) ─
+// {
+//   load: <int %>, protocol: "wireguard", latencyMs: <int>, latencyAt: <epoch>,
+//   rxBytes, txBytes, bytesAt: <epoch>,       // tunnel iface counters, reset per session
+//   rotations, rotationsToday, todayDate,
+//   distinctIps, ipChangedCount, failures, updated
+// }
+function parseMetrics(raw) {
+  var empty = {
+    load: 0, protocol: "", latencyMs: 0, latencyAt: 0,
+    rxBytes: 0, txBytes: 0, bytesAt: 0,
+    rotations: 0, rotationsToday: 0, todayDate: "",
+    distinctIps: 0, ipChangedCount: 0, failures: 0, updated: 0
+  };
+  if (!raw || raw.length === 0) return empty;
+  try {
+    var p = JSON.parse(raw);
+    if (!p || typeof p !== "object") return empty;
+    return {
+      load: num(p.load),
+      protocol: str(p.protocol),
+      latencyMs: num(p.latencyMs),
+      latencyAt: num(p.latencyAt),
+      rxBytes: num(p.rxBytes),
+      txBytes: num(p.txBytes),
+      bytesAt: num(p.bytesAt),
+      rotations: num(p.rotations),
+      rotationsToday: num(p.rotationsToday),
+      todayDate: str(p.todayDate),
+      distinctIps: num(p.distinctIps),
+      ipChangedCount: num(p.ipChangedCount),
+      failures: num(p.failures),
+      updated: num(p.updated)
+    };
+  } catch (e) {
+    return empty;
+  }
+}
+
 // ── widget-owned config (Kit.Store, owned mode) ──────────────────────────
 function parseConfig(raw) {
   var d = defaultConfig();
@@ -129,6 +205,73 @@ function iconFor(state) {
   return "\uf132";
 }
 
+// Label for an arbitrary interval: the matching preset's label, else a plain
+// "Nm" / formatCountdown fallback. Was hand-rolled in Panel.qml as
+// formatCountdown(sec).replace(" 00s", "m"), which only strips the string
+// " 00s" — for any exact-minute value formatCountdown already renders
+// zero-padded ("2m 00s"), so the replace left a stray trailing "m" behind
+// ("2mm"). Only presets are offered as buttons today, but a hand-edited
+// vpnrotate-config.json can set any clamped value, and this is also the
+// fallback the panel falls through to for those.
+function prettyInterval(sec) {
+  var presets = intervalPresets()
+  for (var i = 0; i < presets.length; i++)
+    if (presets[i].sec === sec) return presets[i].label
+  var s = Math.max(0, Math.floor(sec))
+  var r = s % 60
+  if (r === 0) return Math.floor(s / 60) + "m"
+  return formatCountdown(s)
+}
+
+// ── metric formatting ───────────────────────────────────────────────────
+// Binary units (KiB/MiB/GiB) but labelled KB/MB/GB, matching how the other
+// alteringux.* monitors (diskmon, netwatch) render sizes.
+function formatBytes(n) {
+  n = Math.max(0, num(n));
+  if (n < 1024) return n + " B";
+  var u = ["KB", "MB", "GB", "TB"], i = -1;
+  do { n /= 1024; i++; } while (n >= 1024 && i < u.length - 1);
+  return (n < 10 ? n.toFixed(1) : Math.round(n)) + " " + u[i];
+}
+
+function formatRate(bytesPerSec) {
+  var b = Math.max(0, num(bytesPerSec));
+  if (b < 1) return "0 B/s";
+  return formatBytes(b) + "/s";
+}
+
+function formatLatency(ms) {
+  var m = num(ms);
+  return m > 0 ? Math.round(m) + " ms" : "—";
+}
+
+function formatLoad(pct) {
+  var p = num(pct);
+  return (p > 0 ? p : 0) + "%";
+}
+
+// "5 rotations · 4 changed IP · 9 seen · 1 failed" — omits zero-valued clauses
+// except the leading rotation count. `today` true swaps in the daily figure.
+function rotationSummary(m, today) {
+  if (!m) return "";
+  var n = today ? m.rotationsToday : m.rotations;
+  var bits = [n + (today ? " today" : (n === 1 ? " rotation" : " rotations"))];
+  if (m.ipChangedCount > 0) bits.push(m.ipChangedCount + " changed IP");
+  if (m.distinctIps > 0) bits.push(m.distinctIps + " IPs seen");
+  if (m.failures > 0) bits.push(m.failures + " failed");
+  return bits.join("  ·  ");
+}
+
+// Instantaneous throughput from two counter samples. Guards the counter reset
+// that happens when the tunnel iface is recreated on reconnect (negative → 0).
+function throughput(curBytes, curAt, prevBytes, prevAt) {
+  var dt = num(curAt) - num(prevAt);
+  if (!(dt > 0)) return 0;
+  var db = num(curBytes) - num(prevBytes);
+  if (!(db > 0)) return 0;
+  return db / dt;
+}
+
 // One-line human summary for the panel header / tooltip.
 function summaryLine(state) {
   if (!state) return "Not connected";
@@ -146,15 +289,25 @@ function summaryLine(state) {
 if (typeof module !== "undefined") {
   module.exports = {
     parseState: parseState,
+    parseWifiState: parseWifiState,
+    isWifiActive: isWifiActive,
     parseConfig: parseConfig,
+    parseMetrics: parseMetrics,
     defaultConfig: defaultConfig,
     clampInterval: clampInterval,
     intervalPresets: intervalPresets,
     shortAgo: shortAgo,
     secondsUntilNextRotation: secondsUntilNextRotation,
     formatCountdown: formatCountdown,
+    prettyInterval: prettyInterval,
     barLabel: barLabel,
     iconFor: iconFor,
-    summaryLine: summaryLine
+    summaryLine: summaryLine,
+    formatBytes: formatBytes,
+    formatRate: formatRate,
+    formatLatency: formatLatency,
+    formatLoad: formatLoad,
+    rotationSummary: rotationSummary,
+    throughput: throughput
   };
 }

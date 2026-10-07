@@ -18,7 +18,7 @@ BarWidget {
   readonly property int castCount: (indexLoaded && root.index) ? (root.index.count || 0) : 0
   readonly property var latest: (indexLoaded && root.index) ? root.index.latest : null
 
-  readonly property string glyph: "" // nf-fa-film
+  readonly property string glyph: "󰿎" // nf-md-movie_open
   readonly property string displayText: castCount > 0 ? (glyph + "  " + castCount) : glyph
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
@@ -28,22 +28,37 @@ BarWidget {
     id: indexStore
     fileName: "devcast-index.json"
     watch: true
-    pollMs: 4000
+    pollMs: 60000
     parse: function (raw) { return Model.parseIndex(raw) }
   }
 
   // ---- building state (also surfaced to the panel)
   property bool building: false
 
+  // build/catalog/import all used a bare `onExited: { ... }` handler with no
+  // exit-code parameter and no captured stderr — a failure (no active
+  // session, a stale `--project` path, jq missing, the projects dir being
+  // unreadable) reset the busy flag and reloaded the same index with no
+  // trace anywhere that anything went wrong. `lastError` plus each Process's
+  // StdioCollector fixes that; a fresh attempt clears it immediately so a
+  // stale error can't linger over a later success.
+  property string lastError: ""
+
   Process {
     id: buildProc
     running: false
-    onExited: { root.building = false; indexStore.reload() }
+    stderr: StdioCollector { id: buildErr; waitForEnd: true }
+    onExited: function (code) {
+      root.building = false
+      root.lastError = code === 0 ? "" : ("Build failed: " + root.tail(buildErr.text, "exit " + code))
+      indexStore.reload()
+    }
   }
 
   function buildLatest(open) {
     guard.run("buildLatest", function () {
       if (buildProc.running) return
+      root.lastError = ""
       root.building = true
       buildProc.command = open
         ? [root.scriptPath, "build", "latest", "--open"]
@@ -58,6 +73,13 @@ BarWidget {
     })
   }
 
+  // Last non-blank line of a captured stderr stream, or `fallback` if there
+  // wasn't one — short enough to fit a one-line panel message.
+  function tail(text, fallback) {
+    var lines = String(text || "").split("\n").map(function (l) { return l.trim() }).filter(Boolean)
+    return lines.length ? lines[lines.length - 1] : fallback
+  }
+
   // ---- session catalogue ("all sessions + history")
   readonly property var catalog: (indexLoaded && root.index && root.index.catalog) ? root.index.catalog : null
   property bool scanning: false
@@ -66,17 +88,28 @@ BarWidget {
   Process {
     id: catalogProc
     running: false
-    onExited: { root.scanning = false; indexStore.reload() }
+    stderr: StdioCollector { id: catalogErr; waitForEnd: true }
+    onExited: function (code) {
+      root.scanning = false
+      root.lastError = code === 0 ? "" : ("Rescan failed: " + root.tail(catalogErr.text, "exit " + code))
+      indexStore.reload()
+    }
   }
   Process {
     id: importProc
     running: false
-    onExited: { root.importing = false; indexStore.reload() }
+    stderr: StdioCollector { id: importErr; waitForEnd: true }
+    onExited: function (code) {
+      root.importing = false
+      root.lastError = code === 0 ? "" : ("Import failed: " + root.tail(importErr.text, "exit " + code))
+      indexStore.reload()
+    }
   }
 
   function refreshCatalog() {
     guard.run("refreshCatalog", function () {
       if (catalogProc.running) return
+      root.lastError = ""
       root.scanning = true
       catalogProc.command = [root.scriptPath, "catalog"]
       catalogProc.running = true
@@ -86,6 +119,7 @@ BarWidget {
   function importRecent() {
     guard.run("importRecent", function () {
       if (importProc.running) return
+      root.lastError = ""
       root.importing = true
       importProc.command = [root.scriptPath, "import"]
       importProc.running = true
@@ -95,6 +129,7 @@ BarWidget {
   function buildSession(sourcePath, open) {
     guard.run("buildSession", function () {
       if (buildProc.running || !sourcePath) return
+      root.lastError = ""
       root.building = true
       buildProc.command = open
         ? [root.scriptPath, "build", sourcePath, "--open"]
@@ -115,7 +150,8 @@ BarWidget {
           scanning: root.scanning,
           importing: root.importing,
           latest: root.latest,
-          catalog: root.catalog
+          catalog: root.catalog,
+          lastError: root.lastError
         })
       }, "{}")
     }

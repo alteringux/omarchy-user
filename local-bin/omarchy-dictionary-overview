@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Rich word overview via llm-blurb (Featherless). Fallback/enrichment layer.
+# Rich word overview via llm-blurb (NanoGPT). Fallback/enrichment layer.
 # Usage: omarchy-dictionary-overview <word> [local-summary-context]
 # Output: {"word": str, "pronunciation": str, "part_of_speech": str,
 #          "definitions": [str], "examples": [str], "synonyms": [str], "etymology": str}

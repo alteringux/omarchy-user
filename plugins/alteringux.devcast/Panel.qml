@@ -28,7 +28,7 @@ Panel {
   readonly property bool importing: !!(hostWidget && hostWidget.importing)
   readonly property var catalog: (hostWidget && hostWidget.catalog) ? hostWidget.catalog : null
   readonly property var sessions: (root.catalog && root.catalog.recent) ? root.catalog.recent : []
-  readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-devcast"
+  readonly property string lastError: hostWidget ? hostWidget.lastError : ""
 
   function open() {
     root.controller.show()
@@ -75,7 +75,7 @@ Panel {
 
           Kit.PanelHead {
             width: parent.width
-            glyph: "" // nf-fa-film
+            glyph: "󰿎" // nf-md-movie_open
             title: "Devcast"
             meta: root.building
               ? "BUILDING…"
@@ -116,6 +116,16 @@ Panel {
             text: "Also: /devcast in Claude Code, or `omarchy-devcast build <session-id>`. "
                 + "Secrets are auto-redacted; replays stay under ~/.local/state/omarchy/devcasts/."
             color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Text {
+            width: parent.width
+            visible: root.lastError.length > 0
+            text: root.lastError
+            color: Kit.Palette.negative
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -163,7 +173,7 @@ Panel {
                 Text {
                   width: parent.width
                   text: modelData.summary || ""
-                  color: Qt.darker(root.barForeground, 1.4)
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight
@@ -229,7 +239,7 @@ Panel {
                 ? (root.catalog.totalSessions + " sessions · " + root.catalog.built + " replays"
                    + (root.catalog.stale > 0 ? " · " + root.catalog.stale + " stale" : ""))
                 : (root.scanning ? "scanning…" : "—")
-              color: Qt.darker(root.barForeground, 1.4)
+              color: Kit.Palette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -310,7 +320,7 @@ Panel {
                   Text {
                     text: modelData.built ? "▶" : (modelData.stale ? "~" : "·")
                     color: modelData.built ? Kit.Palette.positive
-                      : (modelData.stale ? Kit.Palette.warning : Qt.darker(root.barForeground, 1.5))
+                      : (modelData.stale ? Kit.Palette.warning : Kit.Palette.faint)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                     width: Style.space(12)
@@ -333,7 +343,7 @@ Panel {
                     return when + "  ·  " + modelData.toolUses + " tools  ·  " + proj
                       + (modelData.stale ? "  ·  replay stale" : "")
                   }
-                  color: Qt.darker(root.barForeground, 1.5)
+                  color: Kit.Palette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   elide: Text.ElideRight

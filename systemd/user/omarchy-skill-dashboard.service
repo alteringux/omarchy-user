@@ -1,0 +1,6 @@
+[Unit]
+Description=Refresh the Omarchy skill dashboard
+
+[Service]
+Type=oneshot
+ExecStart=%h/.config/omarchy/local-bin/omarchy-skill-refresh

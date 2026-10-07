@@ -22,16 +22,17 @@ Panel {
   readonly property bool connected: st && st.connected
   readonly property bool busy: hostWidget ? hostWidget.busy : false
   readonly property int secsToRotate: hostWidget ? hostWidget.secsToRotate : -1
+  readonly property string wifiState: hostWidget ? hostWidget.wifiState : "unknown"
+  readonly property bool wifiBlocksConnect: hostWidget ? hostWidget.wifiBlocksConnect : false
 
   readonly property var guard: Kit.BugGuard.create("alteringux.vpnrotate", function (argv) { Quickshell.execDetached(argv) })
 
   readonly property var presets: Model.intervalPresets()
+  readonly property string killSwitchError: hostWidget ? hostWidget.killSwitchError : ""
 
-  function prettyInterval(sec) {
-    for (var i = 0; i < presets.length; i++)
-      if (presets[i].sec === sec) return presets[i].label
-    return Model.formatCountdown(sec).replace(" 00s", "m")
-  }
+  readonly property var metrics: hostWidget ? hostWidget.metrics : Model.parseMetrics("")
+  readonly property real rxRate: hostWidget ? hostWidget.rxRate : 0
+  readonly property real txRate: hostWidget ? hostWidget.txRate : 0
 
   KeyboardPanel {
     id: panel
@@ -49,7 +50,7 @@ Panel {
       onActivateRequested: {
         if (!root.hostWidget || root.busy) return
         if (root.connected) root.hostWidget.runDisconnect()
-        else root.hostWidget.runConnect()
+        else if (!root.wifiBlocksConnect) root.hostWidget.runConnect()
       }
       onDeleteRequested: if (root.hostWidget && root.connected && !root.busy) root.hostWidget.runDisconnect()
 
@@ -89,6 +90,56 @@ Panel {
           wrapMode: Text.WordWrap
         }
 
+        // ── connection metrics (throughput / load / latency / rotation tally) ──
+        Column {
+          width: content.width
+          spacing: Style.space(3)
+          visible: root.connected || root.metrics.rotations > 0
+
+          Text {
+            visible: root.connected
+            width: parent.width
+            text: "↓ " + Model.formatRate(root.rxRate) + "    ↑ " + Model.formatRate(root.txRate)
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: root.connected && (root.metrics.rxBytes > 0 || root.metrics.txBytes > 0)
+            width: parent.width
+            text: Model.formatBytes(root.metrics.rxBytes) + " down  ·  " + Model.formatBytes(root.metrics.txBytes) + " up  ·  this session"
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            visible: root.connected
+            width: parent.width
+            text: {
+              var bits = []
+              if (root.metrics.load > 0) bits.push("Load " + Model.formatLoad(root.metrics.load))
+              if (root.metrics.protocol) bits.push(root.metrics.protocol === "wireguard" ? "WireGuard" : root.metrics.protocol)
+              bits.push("Exit " + Model.formatLatency(root.metrics.latencyMs))
+              return bits.join("  ·  ")
+            }
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
+
+          Text {
+            visible: root.metrics.rotations > 0
+            width: parent.width
+            text: Model.rotationSummary(root.metrics, false)
+            color: Kit.Palette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
+
         // Next-rotation readout + thin progress bar (only meaningful while
         // auto-rotate is armed and the tunnel is up).
         Text {
@@ -109,7 +160,7 @@ Panel {
           width: content.width
           height: Style.space(6)
           radius: height / 2
-          color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.18)
+          color: Util.alpha(root.barForeground, 0.18)
           visible: root.cfg.autoRotate && root.connected && root.secsToRotate >= 0
 
           Rectangle {
@@ -137,7 +188,7 @@ Panel {
             text: root.connected ? "Disconnect" : "Connect"
             foreground: root.barForeground
             bordered: true
-            enabled: root.hostWidget && !root.busy
+            enabled: root.hostWidget && !root.busy && (root.connected || !root.wifiBlocksConnect)
             onClicked: {
               if (!root.hostWidget) return
               if (root.connected) root.hostWidget.runDisconnect()
@@ -153,10 +204,24 @@ Panel {
           }
         }
 
+        // WiFi-only gate: explain why Connect is greyed out when off WiFi.
+        Text {
+          width: content.width
+          visible: !root.connected && root.wifiBlocksConnect
+          text: (root.wifiState === "unavailable"
+                 ? "Connect is disabled — WiFi is off or blocked. "
+                 : "Connect is disabled — you're not on WiFi. ")
+                + "The VPN only comes up over WiFi so your wired IP is never left exposed."
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
+        }
+
         Text {
           width: content.width
           text: "Each rotation drops open connections for a few seconds while the tunnel re-handshakes."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -170,7 +235,7 @@ Panel {
           activeFocusOnTab: false
           label: "Auto-rotate"
           description: root.cfg.autoRotate
-            ? ("Switches server every " + root.prettyInterval(root.cfg.intervalSec))
+            ? ("Switches server every " + Model.prettyInterval(root.cfg.intervalSec))
             : "Off — rotate manually with the button above"
           checked: root.cfg.autoRotate
           foreground: root.barForeground
@@ -204,7 +269,7 @@ Panel {
         Text {
           width: content.width
           text: "A new interval takes effect on the next cycle. Proton's free tier shares a small IP pool, so this beats simple per-IP limits but not blocks on the whole VPN range."
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           wrapMode: Text.WordWrap
@@ -218,18 +283,28 @@ Panel {
           activeFocusOnTab: false
           label: "Kill switch"
           description: root.cfg.killSwitch
-            ? "Traffic is blocked during the reconnect gap (no leak, brief offline)"
-            : "Traffic uses your real IP during the reconnect gap"
+            ? "Internet is blocked if the tunnel drops or a reconnect fails — no real-IP leak, brief offline until it recovers"
+            : "If the tunnel drops, traffic falls back to your real IP"
           checked: root.cfg.killSwitch
           foreground: root.barForeground
           onClicked: if (root.hostWidget) root.hostWidget.toggleKillSwitch()
+        }
+
+        Text {
+          width: content.width
+          visible: root.killSwitchError.length > 0
+          text: root.killSwitchError
+          color: Kit.Palette.negative
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          wrapMode: Text.WordWrap
         }
 
         PanelSeparator {}
 
         Text {
           text: "Enter: connect/disconnect  ·  Del: disconnect  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: Kit.Palette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

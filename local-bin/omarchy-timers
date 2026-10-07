@@ -13,6 +13,7 @@
 #   omarchy-timers pause-toggle <id>        pause a running / resume a paused timer
 #   omarchy-timers remove <id>              stop + fold into the completion log
 #   omarchy-timers clear                    fold every timer into the log, empty the list
+#   omarchy-timers forget <label>           drop every matching entry from the completion log
 #
 # OMARCHY_STATE_DIR overrides the state directory (used by test/cli.test.sh).
 set -euo pipefail
@@ -20,6 +21,7 @@ set -euo pipefail
 STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
 STATE_FILE="$STATE_DIR/timers.json"
 HISTORY_FILE="$STATE_DIR/timers-history.json"
+LOCK_FILE="$STATE_DIR/timers.lock"
 HISTORY_CAP=200
 
 DEFAULT_STATE='{"version":1,"entries":[]}'
@@ -29,21 +31,6 @@ mkdir -p "$STATE_DIR"
 
 now_ms() { date +%s%3N; }
 new_id() { printf 't%s-%s' "$(now_ms)" "$(LC_ALL=C tr -dc 'a-z0-9' </dev/urandom | head -c 6)"; }
-
-read_state()   { { [ -f "$STATE_FILE" ]   && jq -e . "$STATE_FILE"   2>/dev/null; } || printf '%s' "$DEFAULT_STATE"; }
-read_history() { { [ -f "$HISTORY_FILE" ] && jq -e . "$HISTORY_FILE" 2>/dev/null; } || printf '%s' "$DEFAULT_HISTORY"; }
-
-write_json() {   # $1 = target file; stdin = JSON
-  local target="$1" tmp
-  tmp="$target.tmp.$$"
-  if jq . > "$tmp" && [ -s "$tmp" ]; then
-    mv -f "$tmp" "$target"
-  else
-    rm -f "$tmp"
-    echo "omarchy-timers: refusing to write empty/invalid JSON to $target" >&2
-    return 1
-  fi
-}
 
 # jq helpers shared by the verbs: the two-part elapsed clock, with the legacy
 # fallback (no runningSince key -> running since createdAt). Mirrors Model.js
@@ -59,13 +46,117 @@ def elapsed($now):
 def is_paused: rs == 0;
 '
 
+# Valid JSON can still have the wrong shape (for example, entries: "oops").
+# Normalize it at every read and drop malformed entries like Model.parseState.
+# Numeric strings are accepted for the timestamp fields, matching JS Number().
+STATE_NORMALIZER='
+def num_or($fallback): try tonumber catch $fallback;
+def sanitize_entry($now; $index):
+  if type != "object" then empty
+  else
+    . as $raw
+    | ($raw.label | if type == "string" then gsub("^\\s+|\\s+$"; "") else "" end) as $label
+    | ($raw.createdAt | num_or(0)) as $created
+    | if ($label | length) == 0 or $created <= 0 then empty
+      else
+        ($raw.accumulatedMs | num_or(0)) as $accumulated
+        | {
+            id: ($raw.id | if type == "string" and length > 0
+                 then . else ("t" + ($now | tostring) + "-legacy-" + ($index | tostring)) end),
+            label: $label,
+            createdAt: $created,
+            accumulatedMs: (if $accumulated >= 0 then $accumulated else 0 end),
+            runningSince: (
+              if ($raw | has("runningSince")) and $raw.runningSince != null
+              then ($raw.runningSince | num_or(0) | if . > 0 then . else 0 end)
+              else $created
+              end)
+          }
+      end
+  end;
+if type == "object" then
+  .version = 1
+  | (.entries) as $entries
+  | .entries = (
+      if ($entries | type) == "array"
+      then [$entries | to_entries[] | . as $item
+            | ($item.value | sanitize_entry($now; $item.key))]
+      else []
+      end)
+else
+  {"version": 1, "entries": []}
+end
+'
+
+HISTORY_NORMALIZER='
+def num_or($fallback): try tonumber catch $fallback;
+def sanitize_completion:
+  if type != "object" then empty
+  else
+    . as $raw
+    | ($raw.label | if type == "string" then gsub("^\\s+|\\s+$"; "") else "" end) as $label
+    | ($raw.startedAt | num_or(0)) as $started
+    | ($raw.endedAt | num_or(0)) as $ended
+    | ($raw.durationMs | num_or(-1)) as $duration
+    | if ($label | length) == 0 or $started <= 0 or $ended <= 0 then empty
+      else {
+        label: $label,
+        startedAt: $started,
+        endedAt: $ended,
+        durationMs: (if $duration >= 0 then $duration else ([0, $ended - $started] | max) end)
+      }
+      end
+  end;
+if type == "object" then
+  .version = 1
+  | (.completed) as $completed
+  | .completed = (
+      if ($completed | type) == "array"
+      then [$completed[] | sanitize_completion]
+      else []
+      end)
+else
+  {"version": 1, "completed": []}
+end
+'
+
+read_state() {
+  { [ -f "$STATE_FILE" ] && jq -e --argjson now "$(now_ms)" "$STATE_NORMALIZER" "$STATE_FILE" 2>/dev/null; } ||
+    printf '%s' "$DEFAULT_STATE"
+}
+
+read_history() {
+  { [ -f "$HISTORY_FILE" ] && jq -e "$HISTORY_NORMALIZER" "$HISTORY_FILE" 2>/dev/null; } ||
+    printf '%s' "$DEFAULT_HISTORY"
+}
+
+write_json() {   # $1 = target file; stdin = JSON
+  local target="$1" tmp
+  tmp="$target.tmp.$$"
+  if jq . > "$tmp" && [ -s "$tmp" ]; then
+    mv -f "$tmp" "$target"
+  else
+    rm -f "$tmp"
+    echo "omarchy-timers: refusing to write empty/invalid JSON to $target" >&2
+    return 1
+  fi
+}
+
+# All state and history mutations use one lock. In particular, add shares this
+# lock with remove/clear so clear cannot read an old list and then erase a timer
+# that was added while its history records were being written.
 state_jq() {   # [extra jq args...] <program> — $now in scope; input = current state; writes back
   local prog="${!#}"
   local args=("${@:1:$#-1}")
-  read_state | jq --argjson now "$(now_ms)" "${args[@]}" "$JQ_LIB $prog" | write_json "$STATE_FILE"
+  (
+    flock 9
+    read_state | jq --argjson now "$(now_ms)" "${args[@]}" "$JQ_LIB $prog" | write_json "$STATE_FILE"
+  ) 9>"$LOCK_FILE"
 }
 
-# Fold one entry (JSON on $entry) into the completion log, newest first, capped.
+# Fold one entry (JSON on $entry) into the completion log. Caller holds
+# LOCK_FILE; keeping this write inside the caller's transaction makes remove
+# and clear atomic with their state update.
 record_completion() {
   local entry="$1"
   read_history | jq \
@@ -79,7 +170,7 @@ record_completion() {
           startedAt: $started,
           endedAt: $now,
           durationMs: ($entry | elapsed($now))
-        }] + (.completed // []))[0:$cap]
+        }] + .completed)[0:$cap]
     ' | write_json "$HISTORY_FILE"
 }
 
@@ -140,20 +231,45 @@ case "$cmd" in
 
   remove)
     id="${1:?usage: omarchy-timers remove <id>}"
-    entry="$(read_state | jq -c --arg id "$id" '.entries[]? | select(.id == $id)')"
-    [ -n "$entry" ] && record_completion "$entry"
-    state_jq --arg id "$id" '.entries = [ .entries[] | select(.id != $id) ]'
+    (
+      flock 9
+      state="$(read_state)"
+      # Read, record, and remove under one transaction lock. A second remove
+      # for the same ID therefore sees no entry and records nothing.
+      entry="$(jq -c --arg id "$id" 'first(.entries[]? | select(.id == $id)) // empty' <<<"$state")"
+      [ -n "$entry" ] && record_completion "$entry"
+      jq --arg id "$id" '.entries = [ .entries[] | select(.id != $id) ]' <<<"$state" |
+        write_json "$STATE_FILE"
+    ) 9>"$LOCK_FILE"
     ;;
 
   clear)
-    while IFS= read -r entry; do
-      [ -n "$entry" ] && record_completion "$entry"
-    done < <(read_state | jq -c '.entries[]?')
-    state_jq '.entries = []'
+    (
+      flock 9
+      state="$(read_state)"
+      while IFS= read -r entry; do
+        [ -n "$entry" ] && record_completion "$entry"
+      done < <(jq -c '.entries[]' <<<"$state")
+      # Keep this write in the same transaction as every completion write.
+      jq '.entries = []' <<<"$state" | write_json "$STATE_FILE"
+    ) 9>"$LOCK_FILE"
+    ;;
+
+  forget)
+    label="${1-}"
+    trimmed="$(printf '%s' "$label" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+    [ -n "$trimmed" ] || exit 0
+    lc="$(printf '%s' "$trimmed" | tr '[:upper:]' '[:lower:]')"
+    (
+      flock 9
+      read_history | jq --arg lc "$lc" --argjson cap "$HISTORY_CAP" '
+        .completed = ([ .completed[] | select((.label // "" | ascii_downcase | gsub("^\\s+|\\s+$";"")) != $lc) ])[0:$cap]
+      ' | write_json "$HISTORY_FILE"
+    ) 9>"$LOCK_FILE"
     ;;
 
   -h | --help | help)
-    sed -n '2,18p' "$0"
+    sed -n '2,19p' "$0"
     ;;
 
   *)

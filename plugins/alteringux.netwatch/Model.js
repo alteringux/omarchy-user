@@ -12,9 +12,16 @@
 
 var MB = 1e6
 var GB = 1e9
-var MBPS_TO_BPS = 125000 // 1 Mbit/s = 1e6/8 bytes/s
+var MBPS_TO_BPS = 125000 // 1 Mbit/s = 1e6/8 bytes/sec
+var DEFAULT_SAMPLE_INTERVAL_SEC = 20
+var MIN_SAMPLE_INTERVAL_SEC = 1
 
 function num(value, fallback) {
+  // JSON hand-edits may use numeric strings, but blank strings and non-numeric
+  // types are malformed values rather than useful zeroes or ones.
+  if (value === null || value === undefined || typeof value === "boolean") return fallback
+  if (typeof value !== "number" && typeof value !== "string") return fallback
+  if (typeof value === "string" && value.trim() === "") return fallback
   var n = Number(value)
   return isFinite(n) ? n : fallback
 }
@@ -22,7 +29,7 @@ function num(value, fallback) {
 function defaultConfig() {
   return {
     iface: "auto", // "auto" = follow the default route; or a fixed name e.g. "wlp2s0"
-    sampleIntervalSec: 20, // cadence the systemd timer / widget calls `sample`
+    sampleIntervalSec: DEFAULT_SAMPLE_INTERVAL_SEC, // cadence the systemd timer / widget calls `sample`
     monthlyQuotaGB: 0, // 0 = unlimited; >0 drives the quota % + 80/100 alerts
     quotaCountsTx: true, // count upload toward the cap too (typical for mobile plans)
     spikeMbps: 50, // sustained combined rate above this raises an info alert
@@ -65,7 +72,7 @@ function parseConfig(raw) {
     console.warn("netwatch: config parse failed:", e)
   }
   // Guard the numerics a hand-edit could break.
-  parsed.sampleIntervalSec = Math.max(1, num(parsed.sampleIntervalSec, 20))
+  parsed.sampleIntervalSec = Math.max(MIN_SAMPLE_INTERVAL_SEC, num(parsed.sampleIntervalSec, DEFAULT_SAMPLE_INTERVAL_SEC))
   parsed.monthlyQuotaGB = Math.max(0, num(parsed.monthlyQuotaGB, 0))
   parsed.spikeMbps = Math.max(0, num(parsed.spikeMbps, 50))
   parsed.ratesRingSize = Math.max(10, num(parsed.ratesRingSize, 180))
@@ -73,6 +80,11 @@ function parseConfig(raw) {
   parsed.dailyCap = Math.max(1, num(parsed.dailyCap, 90))
   parsed.monthlyCap = Math.max(1, num(parsed.monthlyCap, 24))
   return parsed
+}
+
+// Keep every polling caller on the same normalized, numeric cadence.
+function sampleIntervalMs(config) {
+  return Math.round(parseConfig(config).sampleIntervalSec * 1000)
 }
 
 function parseState(raw) {
@@ -273,7 +285,13 @@ function ingest(state, prevSample, cur, config, now) {
           kind: "spike",
           level: "info",
           attention: false,
-          msg: "Sustained " + compactRate(rxRate + txRate) + "/s (over " + cfg.spikeMbps + " Mbps) on " + s.iface
+          msg: "Sustained " + compactRate(rxRate + txRate) + "/s (over " + cfg.spikeMbps + " Mbps) on " + s.iface,
+          data: {
+            rateMbps: Math.round(((rxRate + txRate) / MBPS_TO_BPS) * 10) / 10,
+            thresholdMbps: cfg.spikeMbps,
+            samples: 3,
+            windowSec: Math.round((t - tail[0].ts) / 1000)
+          }
         })
       }
     }
@@ -372,8 +390,13 @@ function report(state, range, now) {
     }
   } else if (range === "month") {
     var mk = monthKey(d)
-    var daysInMonth = new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate()
-    for (var day = 1; day <= daysInMonth; day++) {
+    // MTD per the doc comment above: stop at today, not the last day of the
+    // month. The loop used to run through daysInMonth regardless of `now`,
+    // so the mini bar chart in Panel.qml padded out with empty columns for
+    // days that hadn't happened yet, and "peak day" could tie against one of
+    // them (all-zero series still finds day 1 as the initial peak).
+    var lastDay = Math.min(new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(), d.getDate())
+    for (var day = 1; day <= lastDay; day++) {
       var key = mk + "-" + pad2(day)
       var mb = s.buckets.daily[key] || { rx: 0, tx: 0 }
       series.push({ label: pad2(day), rx: mb.rx, tx: mb.tx })
@@ -454,6 +477,7 @@ if (typeof module !== "undefined") {
     defaultState: defaultState,
     parseConfig: parseConfig,
     parseState: parseState,
+    sampleIntervalMs: sampleIntervalMs,
     parseSample: parseSample,
     ingest: ingest,
     status: status,

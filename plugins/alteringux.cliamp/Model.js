@@ -2,10 +2,15 @@
 // over its control socket and formatting them for display. No QML / Quickshell
 // APIs in here so it can be unit-tested with `node --test`.
 //
-//   `cliamp status --json`  -> one JSON object (see parseStatus)
+//   `cliamp status --json`  -> one JSON object (see parseStatus). NOTE: the
+//                              binary's status JSON has no `visualizer` field —
+//                              the current mode only appears in visstream
+//                              frames — so parseStatus carries `visualizer`
+//                              forward from a previous status when the JSON
+//                              omits it.
 //   `cliamp visstream`      -> newline-delimited JSON, one frame per line,
 //                              each `{ "ok":true, "visualizer":"Bars",
-//                              "bands":[10 floats 0..1] }` (see parseBands)
+//                              "bands":[10 floats 0..1] }` (see parseVisFrame)
 //
 // When cliamp is not running every command prints a plain
 // "cliamp is not running (no socket at ...)" line and exits non-zero; every
@@ -13,6 +18,40 @@
 // throwing.
 
 var BAND_COUNT = 10
+var SIMPLE_VERBS = ["play", "pause", "toggle", "next", "prev", "stop", "shuffle", "repeat"]
+
+// Normalize the small command surface exposed by the widget into argv. IPC
+// callers can supply the visualizer name, so never pass arbitrary arguments
+// through to cliamp (even though execDetached does not invoke a shell).
+function safeVerbArgs(args) {
+  if (!Array.isArray(args) || args.length === 0 || typeof args[0] !== "string") return null
+
+  var verb = args[0]
+  if (SIMPLE_VERBS.indexOf(verb) !== -1) return args.length === 1 ? [verb] : null
+
+  if (verb === "seek") {
+    if (args.length !== 2 || typeof args[1] !== "string" || !/^(0|[1-9][0-9]*)$/.test(args[1])) return null
+    var seconds = Number(args[1])
+    return isFinite(seconds) && seconds <= 2147483647 ? [verb, args[1]] : null
+  }
+
+  if (verb === "volume") {
+    if (args.length !== 2 || typeof args[1] !== "string" || !/^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$/.test(args[1])) return null
+    var db = Number(args[1])
+    return isFinite(db) && Math.abs(db) <= 100 ? [verb, args[1]] : null
+  }
+
+  if (verb === "vis") {
+    var name = args[1]
+    if (args.length !== 2 || typeof name !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(name) ||
+        name === "list" || name === "next") return null
+    return [verb, name]
+  }
+
+  return null
+}
+
 
 function emptyStatus() {
   return {
@@ -40,7 +79,7 @@ function baseName(path) {
   return seg.replace(/\.[A-Za-z0-9]{1,5}$/, "")
 }
 
-function parseStatus(raw) {
+function parseStatus(raw, prev) {
   var out = emptyStatus()
   if (!raw || typeof raw !== "string") return out
   var text = raw.trim()
@@ -67,17 +106,22 @@ function parseStatus(raw) {
 
   out.position = Number(p.position) || 0
   out.total = Number(p.total) || 0
-  out.visualizer = String(p.visualizer || "")
+  // The status JSON carries no visualizer field; keep the mode the last
+  // visstream frame reported (or that the user just picked) instead of
+  // resetting the dropdown to its fallback every 2 s poll.
+  out.visualizer = String(p.visualizer || (prev && prev.visualizer) || "")
   out.shuffle = p.shuffle === true
   out.repeat = String(p.repeat || "Off")
   out.speed = Number(p.speed) || 1
   return out
 }
 
-// One line of `cliamp visstream`. Returns an array of BAND_COUNT numbers in
-// [0,1], or null if the line isn't a usable frame (so the caller keeps the
-// previous frame instead of collapsing the bars).
-function parseBands(line) {
+// One line of `cliamp visstream`. Returns { bands, visualizer } where bands
+// is an array of BAND_COUNT numbers in [0,1], or null if the line isn't a
+// usable frame (so the caller keeps the previous frame instead of collapsing
+// the bars). Every real frame carries the active visualizer mode's name, so
+// this is the widget's source of truth for which mode is selected.
+function parseVisFrame(line) {
   if (!line || typeof line !== "string") return null
   var text = line.trim()
   if (!text || text.charAt(0) !== "{") return null
@@ -88,13 +132,19 @@ function parseBands(line) {
     return null
   }
   if (!p || !Array.isArray(p.bands) || p.bands.length === 0) return null
-  var out = []
+  var bands = []
   for (var i = 0; i < BAND_COUNT; i++) {
     var v = Number(p.bands[i])
     if (!isFinite(v)) v = 0
-    out.push(v < 0 ? 0 : (v > 1 ? 1 : v))
+    bands.push(v < 0 ? 0 : (v > 1 ? 1 : v))
   }
-  return out
+  return { bands: bands, visualizer: String(p.visualizer || "") }
+}
+
+// Bands-only view of parseVisFrame, for callers that don't need the mode.
+function parseBands(line) {
+  var frame = parseVisFrame(line)
+  return frame ? frame.bands : null
 }
 
 // A synthesised idle waveform for when nothing is streaming — a slow travelling
@@ -146,9 +196,11 @@ var api = {
   emptyStatus: emptyStatus,
   baseName: baseName,
   parseStatus: parseStatus,
+  parseVisFrame: parseVisFrame,
   parseBands: parseBands,
   idleBands: idleBands,
   progressFraction: progressFraction,
+  safeVerbArgs: safeVerbArgs,
   formatTime: formatTime,
   barLabel: barLabel,
   stateMeta: stateMeta

@@ -23,6 +23,7 @@ function ics(events) {
     e.status ? "STATUS:" + e.status : null,
     "DTSTART:" + e.start,
     e.end ? "DTEND:" + e.end : null,
+    e.duration ? "DURATION:" + e.duration : null,
   ].filter(Boolean).join("\r\n") + "\r\nEND:VEVENT").join("\r\n")
   return "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" + body + "\r\nEND:VCALENDAR\r\n"
 }
@@ -69,6 +70,29 @@ test("parseIcsDate: UTC, date-only, and floating", () => {
   assert.equal(valueDate.allDay, true)
   assert.equal(Model.parseIcsDate("nope", {}), null)
 })
+test("parseIcsDate resolves TZID wall clocks deterministically", () => {
+  const parsed = Model.parseIcsDate("20260830T140000", { TZID: "Europe/Berlin" })
+  assert.equal(parsed.epoch, utc(2026, 8, 30, 12, 0))
+  assert.equal(parsed.allDay, false)
+})
+
+test("parseIcsDuration parses RFC 5545 dur-values", () => {
+  assert.equal(Model.parseIcsDuration("PT90M"), 90 * 60)
+  assert.equal(Model.parseIcsDuration("PT1H30M"), 5400)
+  assert.equal(Model.parseIcsDuration("PT45S"), 45)
+  assert.equal(Model.parseIcsDuration("P1D"), DAY)
+  assert.equal(Model.parseIcsDuration("P1DT12H"), DAY + 12 * HOUR)
+  assert.equal(Model.parseIcsDuration("P2W"), 14 * DAY)
+  assert.equal(Model.parseIcsDuration("+PT5M"), 300)
+  assert.equal(Model.parseIcsDuration("-PT5M"), -300)
+  // Year/month components have no fixed length -> rejected.
+  assert.equal(Model.parseIcsDuration("P1M"), null)
+  assert.equal(Model.parseIcsDuration("P1Y2M"), null)
+  // Bare P / PT and garbage are unparseable.
+  assert.equal(Model.parseIcsDuration("P"), null)
+  assert.equal(Model.parseIcsDuration("PT"), null)
+  assert.equal(Model.parseIcsDuration("nope"), null)
+})
 
 test("parseEvents pulls fields and defaults the end", () => {
   const events = Model.parseEvents(ics([
@@ -80,6 +104,42 @@ test("parseEvents pulls fields and defaults the end", () => {
   assert.equal(events[0].start, utc(2026, 8, 30, 14, 0))
   assert.equal(events[0].end, utc(2026, 8, 30, 14, 0) + HOUR)
   assert.equal(events[0].allDay, false)
+})
+
+test("parseEvents ignores VALARM sub-component properties", () => {
+  const cal =
+    "BEGIN:VCALENDAR\r\nVERSION:2.0\r\n" +
+    "BEGIN:VEVENT\r\nUID:u1\r\nSUMMARY:Standup\r\nLOCATION:HQ\r\n" +
+    "DTSTART:20260830T140000Z\r\n" +
+    "BEGIN:VALARM\r\nACTION:DISPLAY\r\nSUMMARY:Alarm summary\r\n" +
+    "DESCRIPTION:Beep\r\nTRIGGER:-PT10M\r\nEND:VALARM\r\n" +
+    "END:VEVENT\r\nEND:VCALENDAR\r\n"
+  const events = Model.parseEvents(cal)
+  assert.equal(events.length, 1)
+  assert.equal(events[0].summary, "Standup")
+  assert.equal(events[0].location, "HQ")
+})
+
+test("parseEvents uses DURATION when DTEND is absent", () => {
+  const events = Model.parseEvents(ics([
+    { summary: "Sprint", start: "20260830T140000Z", duration: "PT90M" },
+  ]))
+  assert.equal(events.length, 1)
+  assert.equal(events[0].end, utc(2026, 8, 30, 14, 0) + 90 * 60)
+})
+
+test("parseEvents prefers DTEND over DURATION", () => {
+  const events = Model.parseEvents(ics([
+    { summary: "Both", start: "20260830T140000Z", end: "20260830T150000Z", duration: "PT90M" },
+  ]))
+  assert.equal(events[0].end, utc(2026, 8, 30, 15, 0))
+})
+
+test("parseEvents falls back to the default end when DURATION is invalid", () => {
+  const events = Model.parseEvents(ics([
+    { summary: "Bad", start: "20260830T140000Z", duration: "P1M" }, // months: no fixed length
+  ]))
+  assert.equal(events[0].end, utc(2026, 8, 30, 14, 0) + HOUR)
 })
 
 test("computeAgenda picks the soonest not-yet-ended timed event as next", () => {
@@ -94,6 +154,16 @@ test("computeAgenda picks the soonest not-yet-ended timed event as next", () => 
   // "Ongoing" started before now but hasn't ended -> still the next thing.
   assert.equal(agenda.next.summary, "Ongoing")
   assert.equal(agenda.upcoming.map((e) => e.summary).join(","), "Ongoing,Soon,Later")
+})
+test("computeAgenda expands a weekly recurrence to its next occurrence", () => {
+  const now = utc(2026, 8, 30, 12, 0)
+  const cal = ics([
+    { uid: "weekly", summary: "Weekly", start: "20260824T140000Z", end: "20260824T150000Z", rrule: true },
+  ])
+  const agenda = Model.computeAgenda([cal], now, {})
+  assert.equal(agenda.next.summary, "Weekly")
+  assert.equal(agenda.next.start, utc(2026, 8, 31, 14, 0))
+  assert.equal(agenda.next.recurring, true)
 })
 
 test("computeAgenda skips CANCELLED and de-dupes by uid+start", () => {

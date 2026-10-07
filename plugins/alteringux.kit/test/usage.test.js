@@ -43,6 +43,37 @@ test("parse tolerates empty / garbage / partial input", () => {
   assert.deepStrictEqual(d.actions.neg.recent, [])
 })
 
+test("pluginSummary aggregates action usage and latest valid lastAt", () => {
+  let d = U.defaultDoc()
+  d = U.record(d, "old", T0 - 3 * DAY)
+  d = U.record(d, "new", T0 - DAY)
+  d = U.record(d, "new", T0)
+  const summary = U.pluginSummary(d, T0)
+  assert.deepStrictEqual(summary, {
+    uses: 3,
+    lastAt: T0,
+    daysIdle: 0,
+    neverUsed: false
+  })
+})
+
+test("pluginSummary is tolerant of malformed and never-used records", () => {
+  const summary = U.pluginSummary({
+    firstAt: T0 - 4 * DAY,
+    actions: {
+      good: { count: 2, lastAt: T0 - 2 * DAY },
+      bad: { count: -9, lastAt: "nope" }
+    }
+  }, T0)
+  assert.strictEqual(summary.uses, 2)
+  assert.strictEqual(summary.lastAt, T0 - 2 * DAY)
+  assert.strictEqual(summary.daysIdle, 2)
+  assert.strictEqual(summary.neverUsed, false)
+  assert.deepStrictEqual(U.pluginSummary(U.defaultDoc(), T0), {
+    uses: 0, lastAt: 0, daysIdle: null, neverUsed: true
+  })
+})
+
 test("record folds in a use without mutating the input", () => {
   const before = U.defaultDoc()
   const after = U.record(before, "add", T0)

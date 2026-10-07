@@ -3,7 +3,8 @@
 // Kit.Store) and calls into here.
 //
 // Doc shape:
-//   { actions: { "<name>": { count:int, lastAt:ms, recent:[ms,...] } }, firstAt: ms }
+//   { actions: { "<name>": { count:int, lastAt:ms, recent:[ms,...] } },
+//     firstAt: ms }
 //
 // `recent` is a capped ring of the last RECENT_CAP use timestamps — it feeds
 // the recency half of the blended score. `count` / `lastAt` are the lifetime
@@ -19,6 +20,14 @@ function now_(t) { return (typeof t === "number" && isFinite(t)) ? t : Date.now(
 
 function defaultDoc() { return { actions: {}, firstAt: 0 }; }
 
+function positiveInt_(n) {
+  return isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function positiveTime_(n) {
+  return isFinite(n) && n > 0 ? n : 0;
+}
+
 // Tolerant parse: "" / missing / malformed / partially-garbled all degrade to
 // a sane doc, never throw. Only well-formed action entries are adopted.
 function parse(raw) {
@@ -30,8 +39,8 @@ function parse(raw) {
       for (var k in s.actions) {
         var a = s.actions[k] || {};
         doc.actions[k] = {
-          count:  (isFinite(a.count)  && a.count  > 0) ? Math.floor(a.count) : 0,
-          lastAt: (isFinite(a.lastAt) && a.lastAt > 0) ? a.lastAt : 0,
+          count:  positiveInt_(a.count),
+          lastAt: positiveTime_(a.lastAt),
           recent: Array.isArray(a.recent)
             ? a.recent.filter(function (n) { return isFinite(n) && n > 0; }).slice(-RECENT_CAP)
             : []
@@ -42,7 +51,33 @@ function parse(raw) {
   } catch (e) { /* corrupt -> empty doc */ }
   return doc;
 }
-
+// Canonical plugin-level activity summary. It deliberately derives from the
+// action records so old files remain useful and malformed fields contribute
+// nothing. `daysIdle` is null when there has never been a valid use timestamp
+// or when a record is explicitly never-used.
+function pluginSummary(doc, at) {
+  var d = (doc && doc.actions) ? doc : defaultDoc();
+  var uses = 0;
+  var firstAt = positiveTime_(d.firstAt);
+  var lastAt = 0;
+  for (var name in d.actions) {
+    var a = d.actions[name] || {};
+    uses += positiveInt_(a.count);
+    var actionLastAt = positiveTime_(a.lastAt);
+    if (actionLastAt > lastAt) lastAt = actionLastAt;
+  }
+  var neverUsed = uses === 0;
+  if (!neverUsed && !lastAt) lastAt = firstAt;
+  var daysIdle = (!neverUsed && lastAt)
+    ? Math.max(0, Math.floor((now_(at) - lastAt) / DAY_MS))
+    : null;
+  return {
+    uses: uses,
+    lastAt: lastAt,
+    daysIdle: daysIdle,
+    neverUsed: neverUsed
+  };
+}
 // Returns a NEW doc with one use of `action` folded in. Clones through
 // parse(JSON.stringify(...)) so the caller's object is never mutated and the
 // result is always in canonical shape.
@@ -113,6 +148,7 @@ if (typeof module !== "undefined") {
     defaultDoc: defaultDoc,
     parse: parse,
     record: record,
+    pluginSummary: pluginSummary,
     score: score,
     rank: rank,
     top: top,

@@ -113,15 +113,13 @@ notify() {
 # below (a lock taken here would release the moment this script returns). A
 # second bug while an agent runs is still recorded above; it just does not get
 # a concurrent agent.
-agent_bin=$(command -v claude || true)
+agent_bin=$(command -v hermes || true)
 if [[ -z $agent_bin ]]; then
-  notify "Bug caught in $plugin" "No 'claude' CLI on PATH; bundle saved."
+  notify "Bug caught in $plugin" "No 'hermes' CLI on PATH; bundle saved."
   exit 0
 fi
 
 agent_log="${bundle%.md}.agent.log"
-agent_name="plugin-bug-fixer"
-[[ -f "$HOME/.claude/agents/$agent_name.md" ]] || agent_name=""
 
 prompt=$(cat <<PROMPT
 /$DIAG_SKILL
@@ -151,7 +149,7 @@ Constraints:
 PROMPT
 )
 
-notify "Bug caught in $plugin" "Diagnosing with claude ($source_kind)…"
+notify "Bug caught in $plugin" "Diagnosing with hermes ($source_kind)…"
 
 {
   echo "=== omarchy-plugin-bug-report $(date -Is) ==="
@@ -161,7 +159,7 @@ notify "Bug caught in $plugin" "Diagnosing with claude ($source_kind)…"
 } >"$agent_log"
 
 runner='
-  config_dir=$1; agent_bin=$2; agent_log=$3; prompt=$4; plugin=$5; lock=$6; agent_name=$7
+  config_dir=$1; agent_bin=$2; agent_log=$3; prompt=$4; plugin=$5; lock=$6
   exec 9>"$lock"
   if ! flock -n 9; then
     echo "=== another bug agent is already running; skipped ===" >>"$agent_log"
@@ -171,9 +169,7 @@ runner='
     exit 0
   fi
   cd "$config_dir" || exit 1
-  cmd=("$agent_bin" -p "$prompt" --dangerously-skip-permissions)
-  [ -n "$agent_name" ] && cmd+=(--agent "$agent_name")
-  "${cmd[@]}" >>"$agent_log" 2>&1
+  "${agent_bin}" -z "${prompt}" --ignore-rules --safe-mode >>"$agent_log" 2>&1
   status=$?
   echo "=== agent exited: $status ===" >>"$agent_log"
   command -v omarchy-notification-send >/dev/null 2>&1 || exit 0
@@ -188,7 +184,7 @@ runner='
   fi
 '
 setsid bash -c "$runner" _ \
-  "$OMARCHY_CONFIG_DIR" "$agent_bin" "$agent_log" "$prompt" "$plugin" "$LOCK_FILE" "$agent_name" >/dev/null 2>&1 &
+  "$OMARCHY_CONFIG_DIR" "$agent_bin" "$agent_log" "$prompt" "$plugin" "$LOCK_FILE" >/dev/null 2>&1 &
 
 disown
 exit 0

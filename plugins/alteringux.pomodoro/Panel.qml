@@ -22,7 +22,8 @@ Panel {
   readonly property var config: hostWidget ? hostWidget.config : Model.defaultConfig()
   readonly property var stats: hostWidget ? hostWidget.stats : Model.defaultStats()
   readonly property string today: Model.todayDateString()
-  readonly property var todayBucket: stats.daily && stats.daily[today] ? stats.daily[today] : { completed: 0, focusedMs: 0 }
+  // Same bucket BarWidget.todayBucket derives, reused rather than recomputed.
+  readonly property var todayBucket: hostWidget ? hostWidget.todayBucket : { completed: 0, focusedMs: 0 }
   readonly property var weekly: Model.weeklyTotals(stats, today)
   readonly property real allTimeFocusedMs: Model.allTimeFocusedMs(stats)
 
@@ -42,6 +43,7 @@ Panel {
     if (shortBreakField.field && shortBreakField.field.activeFocus) return true
     if (longBreakField.field && longBreakField.field.activeFocus) return true
     if (cycleField.field && cycleField.field.activeFocus) return true
+    if (dailyGoalField.field && dailyGoalField.field.activeFocus) return true
     if (reminderField.field && reminderField.field.activeFocus) return true
     for (var i = 0; i < soundRepeater.count; i++) {
       var item = soundRepeater.itemAt(i)
@@ -101,13 +103,18 @@ Panel {
         Text { text: String(root.todayBucket.completed); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
 
         Text { text: "Focused today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: Model.formatDuration(root.todayBucket.focusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+        Text { text: Model.formatDuration(root.hostWidget ? root.hostWidget.focusedTodayMs : root.todayBucket.focusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
 
         Text { text: "This week"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
         Text { text: root.weekly.completed + " (" + Model.formatDuration(root.weekly.focusedMs) + ")"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
         Text { text: "All-time focus"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
         Text { text: Model.formatDuration(root.allTimeFocusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+        Text { text: "Daily goal"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+        Text { text: Model.formatDuration(root.config.dailyGoalMinutes * 60000); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+        Text { text: "Remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+        Text { text: root.hostWidget ? root.hostWidget.goalText : "0m remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
 
         Text { text: "Streak"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
         Text { text: root.stats.streak + (root.stats.streak === 1 ? " day" : " days"); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
@@ -170,6 +177,19 @@ Panel {
           to: 60
           foreground: root.barForeground
           onModified: function(v) { root.updateConfig({ shortBreakMinutes: v }) }
+        }
+      }
+      Row {
+        spacing: Style.space(14)
+
+        NumberField {
+          id: dailyGoalField
+          label: "Daily goal (min)"
+          value: root.config.dailyGoalMinutes
+          from: 1
+          to: 1440
+          foreground: root.barForeground
+          onModified: function(v) { root.updateConfig({ dailyGoalMinutes: v }) }
         }
       }
 
@@ -293,11 +313,14 @@ Panel {
 
       PanelSeparator {}
 
+      // Hint / tertiary line — Style.font.caption + Kit.Palette.faint per the
+      // panel text-hierarchy ramp (docs/adr/0005), not the meta-tag treatment
+      // (this is a full sentence, not a glanceable status).
       Text {
         text: "Enter: start/pause  ·  X: skip  ·  R: reset  ·  Esc: close"
-        color: Qt.darker(root.barForeground, 1.4)
+        color: Kit.Palette.faint
         font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
+        font.pixelSize: Style.font.caption
       }
     }
     }

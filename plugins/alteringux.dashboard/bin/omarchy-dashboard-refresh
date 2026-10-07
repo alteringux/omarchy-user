@@ -17,25 +17,26 @@ LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 COUNTER_FILE="$STATE_DIR/dashboard-refresh-count"
 DIGEST_EVERY=5 # roughly every ~2.5h at the widget's 30-min refresh cadence
 
-ensure_state_file
+ensure_state_file || { echo "dashboard: failed to initialize state file" >&2; exit 1; }
+
+# Skills are local and keyless; keep their snapshot independent of network
+# fetches so the dashboard remains useful offline.
+SKILL_USAGE_BIN="$SCRIPT_DIR/../../../local-bin/omarchy-skill-usage"
+skills_json=$(OMARCHY_SKILL_USAGE_DIR="$HOME/.local/state/omarchy/skill-usage" "$SKILL_USAGE_BIN" --json 2>/dev/null || echo '{"version":1,"skills":[],"summary":{}}')
 
 # ---------------------------------------------------------------- news
-# Fetch the story IDs, then pull all item bodies concurrently (curl
-# --parallel) into a scratch dir keyed by position, so a slow single
-# item can't serialize the whole refresh (~6 sequential 6s fetches
-# before). Order is preserved by reading the scratch files back in index
-# order. The scratch dir has a fixed name under $STATE_DIR (not mktemp) and
-# is wiped on entry + on EXIT: the shell SIGKILLs this Process on plugin
-# reload, which skips the EXIT trap, so a fixed path keeps at most one
-# stale dir around instead of leaking one per killed run.
-SCRATCH="$STATE_DIR/.dashboard-hn"
+# Fetch each item into a unique scratch directory. A fixed shared directory
+# lets overlapping refresh processes delete each other's responses.
+SCRATCH_BASE="$STATE_DIR/.dashboard-hn"
 news_json="null"
 ids=$(curl -fsS --max-time 6 'https://hacker-news.firebaseio.com/v0/topstories.json' 2>/dev/null | jq -c '.[0:6]' 2>/dev/null)
 if [[ -n "$ids" && "$ids" != "null" ]]; then
   mapfile -t id_arr < <(echo "$ids" | jq -r '.[]' 2>/dev/null)
   if ((${#id_arr[@]} > 0)); then
-    scratch="$SCRATCH"
-    rm -rf "$scratch"; mkdir -p "$scratch"
+    scratch=$(mktemp -d "${SCRATCH_BASE}.XXXXXX") || {
+      echo "dashboard: failed to create news scratch directory" >&2
+      exit 1
+    }
     trap 'rm -rf "$scratch"' EXIT
     curl_args=()
     for i in "${!id_arr[@]}"; do
@@ -64,20 +65,28 @@ if [[ -n "$ids" && "$ids" != "null" ]]; then
   fi
 fi
 
-# Catch a non-zero exit (jq/curl/claude choking) and hand it to the plugin
+# Catch a non-zero exit (jq/curl/llm-blurf choking) and hand it to the plugin
 # bug-report pipeline. Sourced after the scratch-dir EXIT trap above so it
 # chains rather than clobbers. Best-effort: absent guard file = no-op.
 OMARCHY_PLUGIN_ID="alteringux.dashboard"
 [[ -r "$HOME/.local/bin/plugin-bin-guard.sh" ]] && source "$HOME/.local/bin/plugin-bin-guard.sh"
 
 # -------------------------------------------------------------- system
-sys_lines=$(omarchy-update-available 2>/dev/null)
-sys_status=$?
-sys_items="[]"
-if [[ $sys_status -eq 0 && -n "$sys_lines" ]]; then
-  sys_items=$(printf '%s\n' "$sys_lines" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({text: .})')
+if ! sys_lines=$(omarchy-update-available 2>/dev/null); then
+  echo "dashboard: omarchy-update-available failed" >&2
+  exit 1
 fi
-system_json=$(jq -n --argjson items "$sys_items" --arg now "$(now_iso)" '{updatedAt: $now, items: $items}')
+sys_items="[]"
+if [[ -n "$sys_lines" ]]; then
+  sys_items=$(printf '%s\n' "$sys_lines" | jq -R -s -c 'split("\n") | map(select(length > 0)) | map({text: .})') || {
+    echo "dashboard: failed to parse system updates" >&2
+    exit 1
+  }
+fi
+system_json=$(jq -n --argjson items "$sys_items" --arg now "$(now_iso)" '{updatedAt: $now, items: $items}') || {
+  echo "dashboard: failed to build system state" >&2
+  exit 1
+}
 
 # ------------------------------------------------- engagement-weighted sort
 # Stories the user has actually clicked before (rare but possible for a
@@ -90,25 +99,41 @@ if [[ "$news_json" != "null" ]]; then
     '.items |= sort_by(-(($eng[.title].clicks) // 0))' 2>/dev/null || echo "$news_json")
 fi
 
-# ------------------------------------------------------- merge + write
-(
-  flock 9
-  tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+if ! (
+  flock 9 || exit 1
+  tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+  trap 'rm -f "$tmp"' EXIT
   jq -c \
     --argjson news "$news_json" \
     --argjson system "$system_json" \
-    '(if $news != null then .news = $news else . end) | .system = $system' \
-    "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
-) 9>"$LOCK_FILE"
+    --argjson skills "$skills_json" \
+    '(if $news != null then .news = $news else . end) | .system = $system | .skills = $skills' \
+    "$STATE_FILE" >"$tmp" || exit 1
+  mv "$tmp" "$STATE_FILE"
+) 9>"$LOCK_FILE"; then
+  echo "dashboard: failed to write refreshed state" >&2
+  exit 1
+fi
 
 # --------------------------------------------------- self-improving digest
-# Every DIGEST_EVERY refreshes, ask llm-blurb (Featherless) for a one-line
+# Every DIGEST_EVERY refreshes, ask llm-blurb (NanoGPT) for a one-line
 # glance summary of what's currently on the dashboard. Cheap and infrequent
 # by design.
-count=0
-[[ -f "$COUNTER_FILE" ]] && count=$(cat "$COUNTER_FILE" 2>/dev/null || echo 0)
-count=$((count + 1))
-echo "$count" >"$COUNTER_FILE"
+count=$(
+  exec 9>"$LOCK_FILE" || exit 1
+  flock 9 || exit 1
+  current=0
+  if [[ -f "$COUNTER_FILE" ]]; then
+    current=$(cat "$COUNTER_FILE") || exit 1
+  fi
+  [[ "$current" =~ ^[0-9]+$ ]] || current=0
+  current=$((current + 1))
+  printf '%s\n' "$current" >"$COUNTER_FILE" || exit 1
+  printf '%s\n' "$current"
+) || {
+  echo "dashboard: failed to update refresh counter" >&2
+  exit 1
+}
 
 if ((count % DIGEST_EVERY == 0)); then
   notes_text=$(jq -r '.notes.items[]?.text' "$STATE_FILE" 2>/dev/null | head -5)
@@ -122,12 +147,17 @@ System: ${sys_text:-none}"
 
     digest=$("$LLM_BLURB" --max-tokens 120 "$prompt" 2>/dev/null || true)
     if [[ -n "$digest" ]]; then
-      (
-        flock 9
-        tmp=$(mktemp "${STATE_FILE}.XXXXXX")
+      if ! (
+        flock 9 || exit 1
+        tmp=$(mktemp "${STATE_FILE}.XXXXXX") || exit 1
+        trap 'rm -f "$tmp"' EXIT
         jq -c --arg d "$digest" --arg now "$(now_iso)" '.digest = {text: $d, updatedAt: $now}' \
-          "$STATE_FILE" >"$tmp" && mv "$tmp" "$STATE_FILE" || rm -f "$tmp"
-      ) 9>"$LOCK_FILE"
+          "$STATE_FILE" >"$tmp" || exit 1
+        mv "$tmp" "$STATE_FILE"
+      ) 9>"$LOCK_FILE"; then
+        echo "dashboard: failed to write digest" >&2
+        exit 1
+      fi
     fi
   fi
 fi

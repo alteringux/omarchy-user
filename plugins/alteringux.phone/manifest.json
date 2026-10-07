@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.phone",
+  "name": "Phone",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "Hands-free voice phone calls with LLM-backed contacts. A phone icon opens a contact picker; picking one starts a real-time spoken conversation (mic -> whisper -> NanoGPT -> Piper), with barge-in, per-contact voices and personas, tool use (web search), durable cross-call memory, and opt-in incoming calls. Engine + state owned by ~/.local/bin/omarchy-phone.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Phone",
+    "description": "Phone icon for the bar; click for the contact picker and to start a call. Shows a live pill while a call is connected. Contacts have fixed personas, distinct voices, tools, and memory that persists between calls.",
+    "category": "AI",
+    "allowMultiple": false
+  }
+}

@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# omarchy-crochet — CLI engine for the Croche-Loom crochet-machine project
+# (~/Work/crochet-machine): a peg-loom + latch-hook crochet machine design,
+# with a Python pattern compiler/simulator and an ESP32 firmware skeleton.
+#
+# Sole writer of ~/.local/state/omarchy/crochet-index.json. The
+# alteringux.crochet bar widget is a thin view: it watches that file and
+# shells out to the verbs below. See ../../docs/adr/0006-cli-first-plugins.md
+# (the pattern this follows, from the omarchy-kit skill).
+#
+#   omarchy-crochet list                 pattern names in sim/patterns/
+#   omarchy-crochet run <pattern>        compile + render a pattern, update status
+#   omarchy-crochet test                 run the sim test suite, update status
+#   omarchy-crochet status               print crochet-index.json
+#   omarchy-crochet open project         xdg-open the project folder
+#   omarchy-crochet open preview         xdg-open the published artifact preview
+#   omarchy-crochet open doc             xdg-open docs/DESIGN.md
+#   omarchy-crochet open last            xdg-open the last run's .svg
+
+set -euo pipefail
+
+PROJECT_DIR="$HOME/Work/crochet-machine"
+SIM_DIR="$PROJECT_DIR/sim"
+STATE_DIR="$HOME/.local/state/omarchy"
+STATE_FILE="$STATE_DIR/crochet-index.json"
+PREVIEW_URL="https://claude.ai/code/artifact/38c758c2-96ed-4fc3-bc78-53d2ab126349"
+
+mkdir -p "$STATE_DIR"
+
+now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Merge a jq filter's output into STATE_FILE, seeding a default doc if absent.
+# Atomic: write to a temp file in the same dir, then mv over the target.
+update_state() {
+  local filter="$1"
+  shift
+  local tmp
+  tmp="$(mktemp "$STATE_DIR/.crochet-index.XXXXXX")"
+  if [[ -f "$STATE_FILE" ]]; then
+    jq "$@" "$filter" "$STATE_FILE" > "$tmp"
+  else
+    jq -n "$@" "$filter" > "$tmp"
+  fi
+  mv "$tmp" "$STATE_FILE"
+}
+
+cmd_list() {
+  local names=()
+  for f in "$SIM_DIR"/patterns/*.pattern; do
+    [[ -e "$f" ]] || continue
+    names+=("$(basename "$f" .pattern)")
+  done
+  printf '%s\n' "${names[@]}"
+}
+
+cmd_run() {
+  local pattern="${1:-}"
+  if [[ -z "$pattern" ]]; then
+    echo "usage: omarchy-crochet run <pattern-name>" >&2
+    exit 1
+  fi
+  local pfile="$SIM_DIR/patterns/${pattern}.pattern"
+  if [[ ! -f "$pfile" ]]; then
+    echo "error: no such pattern: $pfile" >&2
+    exit 1
+  fi
+
+  local out
+  local ok="true"
+  local err_msg=""
+  if out=$(cd "$SIM_DIR" && python3 -m stitch_sim.cli "patterns/${pattern}.pattern" 2>&1); then
+    ok="true"
+  else
+    ok="false"
+    err_msg="$out"
+  fi
+
+  local stitches rows width
+  stitches=$(printf '%s\n' "$out" | grep -oP '(?<=ok: )\d+(?= stitches)' || echo null)
+  rows=$(printf '%s\n' "$out" | grep -oP '\d+(?= rows)' || echo null)
+  width=$(printf '%s\n' "$out" | grep -oP '(?<=final row width )\d+' || echo null)
+
+  local svg_path="" stitch_path=""
+  if [[ "$ok" == "true" ]]; then
+    svg_path="$SIM_DIR/patterns/${pattern}.svg"
+    stitch_path="$SIM_DIR/patterns/${pattern}.stitch"
+  fi
+
+  update_state '{
+      updatedAt: $ts,
+      previewUrl: $previewUrl,
+      projectPath: $projectPath,
+      tests: (.tests // null),
+      lastRun: {
+        pattern: $pattern,
+        ok: ($ok == "true"),
+        error: (if $err == "" then null else $err end),
+        stitches: $stitches,
+        rows: $rows,
+        finalRowWidth: $width,
+        svgPath: (if $svg == "" then null else $svg end),
+        stitchPath: (if $stitchFile == "" then null else $stitchFile end),
+        at: $ts
+      }
+    }' \
+    --arg ts "$(now)" \
+    --arg pattern "$pattern" \
+    --arg ok "$ok" \
+    --arg err "$err_msg" \
+    --argjson stitches "${stitches:-null}" \
+    --argjson rows "${rows:-null}" \
+    --argjson width "${width:-null}" \
+    --arg svg "$svg_path" \
+    --arg stitchFile "$stitch_path" \
+    --arg previewUrl "$PREVIEW_URL" \
+    --arg projectPath "$PROJECT_DIR"
+
+  echo "$out"
+  [[ "$ok" == "true" ]]
+}
+
+cmd_test() {
+  local out
+  local ok="true"
+  if out=$(cd "$SIM_DIR" && python3 -m unittest discover -s tests -t . 2>&1); then
+    ok="true"
+  else
+    ok="false"
+  fi
+
+  local ran failed
+  ran=$(printf '%s\n' "$out" | grep -oP '(?<=Ran )\d+' | tail -1 || echo null)
+  failed=$(printf '%s\n' "$out" | grep -oP '(?<=failures=)\d+' || echo 0)
+  [[ -z "${failed:-}" ]] && failed=0
+  local passed
+  if [[ "$ran" != "null" ]]; then
+    passed=$(( ran - failed ))
+  else
+    passed="null"
+  fi
+
+  update_state '{
+      updatedAt: $ts,
+      previewUrl: $previewUrl,
+      projectPath: $projectPath,
+      lastRun: (.lastRun // null),
+      tests: { total: $ran, passed: $passed, failed: $failed, ok: ($ok == "true"), at: $ts }
+    }' \
+    --arg ts "$(now)" \
+    --argjson ran "${ran:-null}" \
+    --argjson passed "${passed}" \
+    --argjson failed "${failed}" \
+    --arg ok "$ok" \
+    --arg previewUrl "$PREVIEW_URL" \
+    --arg projectPath "$PROJECT_DIR"
+
+  echo "$out"
+  [[ "$ok" == "true" ]]
+}
+
+cmd_status() {
+  if [[ -f "$STATE_FILE" ]]; then
+    cat "$STATE_FILE"
+  else
+    echo '{}'
+  fi
+}
+
+cmd_open() {
+  local what="${1:-project}"
+  case "$what" in
+    project) xdg-open "$PROJECT_DIR" >/dev/null 2>&1 & disown ;;
+    preview) xdg-open "$PREVIEW_URL" >/dev/null 2>&1 & disown ;;
+    doc)     xdg-open "$PROJECT_DIR/docs/DESIGN.md" >/dev/null 2>&1 & disown ;;
+    last)
+      local svg
+      svg=$(jq -r '.lastRun.svgPath // empty' "$STATE_FILE" 2>/dev/null || true)
+      if [[ -n "$svg" && -f "$svg" ]]; then
+        xdg-open "$svg" >/dev/null 2>&1 & disown
+      else
+        echo "no last-run SVG yet — run 'omarchy-crochet run <pattern>' first" >&2
+        exit 1
+      fi
+      ;;
+    *) echo "usage: omarchy-crochet open {project|preview|doc|last}" >&2; exit 1 ;;
+  esac
+}
+
+main() {
+  local verb="${1:-}"
+  shift || true
+  case "$verb" in
+    list)   cmd_list "$@" ;;
+    run)    cmd_run "$@" ;;
+    test)   cmd_test "$@" ;;
+    status) cmd_status "$@" ;;
+    open)   cmd_open "$@" ;;
+    *)
+      echo "usage: omarchy-crochet {list|run <pattern>|test|status|open {project|preview|doc|last}}" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

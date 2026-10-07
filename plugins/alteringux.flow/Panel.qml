@@ -31,12 +31,71 @@ Panel {
   readonly property var runState: hostWidget && hostWidget.runState ? hostWidget.runState : ({ nodes: {}, envelopes: [] })
   readonly property var envelopes: runState && runState.envelopes ? runState.envelopes : []
   readonly property var nodes: doc && doc.nodes ? doc.nodes : []
+  // Every canvas edit (move/rename/add/remove/toggleEdge) reassigns `doc` to a
+  // freshly cloned object, so the node Repeater below destroys and recreates
+  // every delegate on each edit — there's no stable per-node identity to diff
+  // against. A delegate destroyed mid-edit skips InlineEdit's own
+  // commit()/cancel(), so its onEditingChanged decrement never fires and
+  // inlineEditors is left stuck above 0 forever, permanently blocking Esc /
+  // close on the whole panel. Reset it here, at the one moment we know every
+  // live editor is about to die anyway.
+  onNodesChanged: root.inlineEditors = 0
   readonly property var edges: root.guard.call("edges", function () { return Model.edgeList(root.doc) }, [])
   readonly property var canvasBounds: root.guard.call("bounds", function () { return Model.bounds(root.doc) }, ({ w: 400, h: 300 }))
 
   property string tab: "output"
   property string selectedId: ""
   readonly property var selectedNode: root.selectedId ? Model.nodeById(root.doc, root.selectedId) : null
+
+  // ---- brief play controls -------------------------------------------------
+  readonly property string focusSector: root.hostWidget ? (root.hostWidget.focusSector || "") : ""
+  readonly property bool hasBriefText: root.hostWidget && root.hostWidget.briefText && root.hostWidget.briefText.length > 0
+  readonly property bool isBrief: String(root.doc.id || "").indexOf("brief") >= 0
+  // Sector names come straight from the "Headlines per sector" chart's labels,
+  // so the picker always mirrors what the last run actually fetched.
+  readonly property var sectorLabels: root.guard.call("sectorLabels", function () {
+    for (var i = 0; i < root.envelopes.length; i++) {
+      var e = root.envelopes[i]
+      if (e && e.shape === "series" && e.data && Array.isArray(e.data.labels) && e.data.labels.length)
+        return e.data.labels
+    }
+    return []
+  }, [])
+
+  function speakBrief() { if (root.hostWidget) root.hostWidget.speakBrief() }
+  function speakText(t) { if (root.hostWidget) root.hostWidget.speak(t) }
+  function stopSpeak() { if (root.hostWidget) root.hostWidget.stopSpeak() }
+  function pickSector(name) { if (root.hostWidget) root.hostWidget.setSector(name || "") }
+
+  // Per-sector news mood from the "Sector mood" table envelope. {} until the
+  // flow has produced one.
+  readonly property var sectorScores: root.guard.call("sectorScores", function () {
+    return Model.sectorScoreMap(root.envelopes)
+  }, ({}))
+  function scoreBadge(sector) {
+    return root.guard.call("scoreBadge", function () {
+      return Model.scoreBadge(root.sectorScores[sector])
+    }, null)
+  }
+  function scoreSuffix(sector) {
+    var b = root.scoreBadge(sector)
+    return b ? ("  " + b.text) : ""
+  }
+
+  // One brief bullet -> a Text.StyledText string: bold accent hook, plain
+  // detail, muted source. All fields entity-escaped.
+  function bulletHtml(b) {
+    return root.guard.call("bulletHtml", function () {
+      var esc = Model.escapeHtml
+      var lead = b.lead
+        ? ("<b><font color=\"" + Color.accent + "\">" + esc(b.lead) + "</font></b>  ")
+        : ""
+      var src = b.source
+        ? ("  <font color=\"" + Color.muted + "\">" + esc(b.source) + "</font>")
+        : ""
+      return lead + esc(b.text) + src
+    }, (b && b.text) || "")
+  }
 
   function roleColor(role) {
     if (role === "positive") return Kit.Palette.positive
@@ -71,6 +130,16 @@ Panel {
         id: content
         anchors.fill: parent
         spacing: Style.spacing.panelGap
+
+        // Deferred by docs/adr/0005-panel-text-hierarchy.md pending concurrent
+        // work on this plugin; prepended now per the pomodoro precedent it
+        // names. The toolbar row below keeps its own PanelSectionHeader —
+        // PanelHero's single trailingControl can't hold four buttons.
+        Kit.PanelHead {
+          title: "Flow"
+          meta: root.doc.id || ""
+          foreground: root.barForeground
+        }
 
         // ---- header: title + tabs + run ------------------------------------
         RowLayout {
@@ -113,19 +182,97 @@ Panel {
           font.pixelSize: Style.font.caption
         }
 
+        // Model.parseRunState already carries finishedAt; nothing showed it.
+        // A silent stale "last run: (no output)" gives no clue how old that
+        // output is.
+        Text {
+          visible: !root.runState.error && !!root.runState.finishedAt
+          width: content.width
+          text: "last run: " + root.runState.finishedAt
+          color: Kit.Palette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
+
         // ================= OUTPUT =========================================
-        Flickable {
+        Kit.PanelScroll {
           visible: root.tab === "output"
           width: content.width
           height: content.height - y
-          clip: true
           contentHeight: outCol.implicitHeight
-          boundsBehavior: Flickable.StopAtBounds
 
           Column {
             id: outCol
             width: parent.width
             spacing: Style.space(12)
+
+            // ---- play + sector controls (brief flows only) -----------------
+            Column {
+              width: outCol.width
+              spacing: Style.space(6)
+              visible: root.hasBriefText || (root.isBrief && root.sectorLabels.length > 0)
+
+              RowLayout {
+                width: parent.width
+                spacing: Style.space(8)
+                visible: root.hasBriefText
+
+                Button {
+                  text: "▶ Speak brief"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: root.speakBrief()
+                }
+                Button {
+                  text: "■ Stop"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: root.stopSpeak()
+                }
+                Item { Layout.fillWidth: true }
+                Text {
+                  text: root.focusSector ? ("focus: " + root.focusSector) : "focus: all sectors"
+                  color: Kit.Palette.faint
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Flow {
+                width: parent.width
+                spacing: Style.space(6)
+                visible: root.isBrief && root.sectorLabels.length > 0
+
+                Button {
+                  text: "★ All"
+                  foreground: root.barForeground
+                  bordered: true
+                  enabled: root.focusSector !== ""
+                  onClicked: root.pickSector("")
+                }
+                Repeater {
+                  model: root.sectorLabels
+                  delegate: Button {
+                    required property var modelData
+                    text: modelData + root.scoreSuffix(modelData)
+                    foreground: root.barForeground
+                    bordered: true
+                    enabled: root.focusSector !== modelData
+                    onClicked: root.pickSector(modelData)
+                  }
+                }
+              }
+
+              Text {
+                width: parent.width
+                visible: root.isBrief && root.sectorLabels.length > 0
+                text: "Pick a sector to re-run the brief focused on it · ★ All restores every sector"
+                color: Qt.darker(root.barForeground, 1.4)
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
 
             Kit.EmptyState {
               visible: root.envelopes.length === 0
@@ -137,46 +284,201 @@ Panel {
             Repeater {
               model: root.envelopes
               delegate: Rectangle {
+                id: envCard
                 required property var modelData
                 readonly property var env: modelData
+                readonly property string rendered: root.guard.call("renderEnv", function () {
+                  return Model.renderEnvelopeText(modelData)
+                }, "")
+                // A markdown brief with "## Sector" headings -> speakable sections.
+                readonly property var sections: root.guard.call("sections", function () {
+                  return (modelData && modelData.shape === "markdown")
+                    ? Model.splitSections(rendered) : []
+                }, [])
+                readonly property bool sectioned: sections.length >= 2
+                readonly property bool isTable: env.shape === "table" && env.data
+                  && Array.isArray(env.data.columns) && Array.isArray(env.data.rows)
+                readonly property var tableCols: envCard.isTable ? env.data.columns : []
+                readonly property var tableRows: envCard.isTable ? env.data.rows : []
+                // semantic tone -> Kit.Palette colour (shared card vocabulary)
+                readonly property string tone: envCard.sectioned ? "accent"
+                  : env.shape === "table" ? "warning"
+                  : env.shape === "series" ? "positive"
+                  : "accent"
+                readonly property color accentColor: Kit.Palette.toneColor(envCard.tone)
                 width: outCol.width
                 height: card.implicitHeight + Style.space(20)
                 radius: Style.cornerRadius
-                color: Util.alpha(root.barForeground, 0.05)
+                clip: true
+                color: Kit.Palette.cardBg
                 border.width: 1
-                border.color: Util.alpha(root.barForeground, 0.14)
+                border.color: Kit.Palette.cardBorder
+
+                // coloured spine so each card reads as its own block at a glance
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.top: parent.top
+                  anchors.bottom: parent.bottom
+                  width: Style.space(3)
+                  color: envCard.accentColor
+                  opacity: 0.9
+                }
 
                 Column {
                   id: card
                   anchors.left: parent.left
                   anchors.right: parent.right
                   anchors.top: parent.top
-                  anchors.margins: Style.space(12)
-                  spacing: Style.space(6)
+                  anchors.leftMargin: Style.space(14)
+                  anchors.rightMargin: Style.space(12)
+                  anchors.topMargin: Style.space(12)
+                  spacing: Style.space(7)
 
-                  Text {
+                  Kit.SectionHeading {
                     width: parent.width
-                    text: ((env.meta && env.meta.title) || env.node || "") + "  ·  " + (env.shape || "")
-                    color: Kit.Palette.faint
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    font.bold: true
+                    text: (env.meta && env.meta.title) || env.node || ""
+                    foreground: envCard.accentColor
+                    pixelSize: Style.font.caption
                   }
 
-                  // Every shape drawn as monospace text (Model.renderEnvelopeText),
-                  // the same output `flow view` prints in a terminal — no fragile
-                  // nested layouts. Markdown/text wrap; series/table/log are
-                  // pre-aligned so they stay in a fixed-pitch block.
+                  // Non-sectioned: every shape drawn as monospace text
+                  // (Model.renderEnvelopeText), same as `flow view` in a
+                  // terminal. Markdown/text wrap; series/table/log stay in a
+                  // fixed-pitch block.
                   Text {
+                    visible: !envCard.sectioned && !envCard.isTable
                     width: parent.width
                     wrapMode: (env.shape === "markdown" || env.shape === "text") ? Text.WordWrap : Text.NoWrap
                     textFormat: Text.PlainText
-                    text: root.guard.call("renderEnv", function () { return Model.renderEnvelopeText(env) }, "")
+                    text: envCard.rendered
                     color: root.barForeground
                     font.family: (env.shape === "markdown" || env.shape === "text")
                       ? Style.font.family
                       : "monospace"
                     font.pixelSize: Style.font.bodySmall
+                  }
+
+                  // Tables (the "Sector mood" grid) get real cells so the
+                  // signed numbers can be tinted green / red / neutral.
+                  Grid {
+                    visible: envCard.isTable
+                    width: parent.width
+                    columns: Math.max(1, envCard.tableCols.length)
+                    columnSpacing: Style.space(12)
+                    rowSpacing: Style.space(4)
+                    flow: Grid.LeftToRight
+
+                    Repeater {
+                      model: envCard.isTable ? envCard.tableCols : []
+                      delegate: Text {
+                        required property var modelData
+                        text: String(modelData).toUpperCase()
+                        color: envCard.accentColor
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        font.letterSpacing: 0.4
+                      }
+                    }
+                    Repeater {
+                      model: envCard.isTable ? (envCard.tableRows.length * envCard.tableCols.length) : 0
+                      delegate: Text {
+                        required property int index
+                        readonly property int col: index % envCard.tableCols.length
+                        readonly property string colName: String(envCard.tableCols[col] || "")
+                        readonly property var cell: envCard.tableRows[Math.floor(index / envCard.tableCols.length)][col]
+                        readonly property bool numeric: /^[+-]?\d/.test(String(cell))
+                          && ["Today", "Δ prev", "7d avg"].indexOf(colName) >= 0
+                        readonly property real n: numeric ? parseFloat(String(cell).replace("+", "")) : 0
+                        text: (cell === undefined || cell === null) ? "" : String(cell)
+                        color: numeric ? Kit.Palette.signColor(n)
+                          : (col === 0 ? root.barForeground : Kit.Palette.faint)
+                        font.family: (colName === "Trend") ? "monospace" : Style.font.family
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: col === 0 || (numeric && n !== 0)
+                      }
+                    }
+                  }
+
+                  // Sectioned brief: per "## Sector" — an accent heading with a
+                  // 🔊 button + mood badge, a hairline rule, then styled bullets
+                  // (bold accent hook · detail · muted source). The leading
+                  // dateline (heading "") is a small italic accent line.
+                  Repeater {
+                    model: envCard.sectioned ? envCard.sections : []
+                    delegate: Column {
+                      id: secCol
+                      required property var modelData
+                      readonly property var bullets: root.guard.call("bullets", function () {
+                        return Model.splitBullets(modelData.body)
+                      }, [])
+                      width: card.width
+                      spacing: Style.space(4)
+                      topPadding: modelData.heading ? Style.space(8) : Style.space(2)
+
+                      // ---- dateline (no heading) ----
+                      Text {
+                        visible: !modelData.heading
+                        width: parent.width
+                        text: modelData.body.replace(/^_+|_+$/g, "").replace(/\*/g, "")
+                        color: Color.accent
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.italic: true
+                        font.bold: true
+                        wrapMode: Text.WordWrap
+                      }
+
+                      // ---- section heading row ----
+                      RowLayout {
+                        width: parent.width
+                        spacing: Style.space(6)
+                        visible: !!modelData.heading
+                        Button {
+                          text: "🔊"
+                          foreground: root.barForeground
+                          bordered: true
+                          onClicked: root.speakText(modelData.speakText)
+                        }
+                        Kit.SectionHeading {
+                          text: modelData.heading
+                          uppercase: false
+                          pixelSize: Style.font.heading
+                        }
+                        Text {
+                          readonly property var badge: root.scoreBadge(modelData.heading)
+                          visible: !!badge
+                          text: badge ? badge.text : ""
+                          color: badge ? root.roleColor(badge.role) : root.barForeground
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.bodySmall
+                          font.bold: true
+                        }
+                        Item { Layout.fillWidth: true }
+                      }
+
+                      Rectangle {
+                        visible: !!modelData.heading
+                        width: parent.width
+                        height: 1
+                        color: Kit.Palette.hairline
+                      }
+
+                      // ---- bullets ---- (skip for the dateline section)
+                      Repeater {
+                        model: secCol.modelData.heading ? secCol.bullets : []
+                        delegate: Kit.Bullet {
+                          required property var modelData
+                          width: card.width - Style.space(4)
+                          styled: true
+                          glyph: modelData.kind === "bullet" ? "▪" : ""
+                          foreground: modelData.kind === "note" ? Kit.Palette.faint : root.barForeground
+                          text: modelData.kind === "note"
+                            ? ("<i>" + Kit.Str.escapeHtml(modelData.text) + "</i>")
+                            : root.bulletHtml(modelData)
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -385,7 +687,7 @@ Panel {
               }
               Text {
                 width: parent.width
-                text: "Enter to save this field · drag a node to move (snaps + saves) · double-click a label to rename"
+                text: "Enter to save this field · drag a node to move (snaps + saves) · click a label to rename"
                 color: Qt.darker(root.barForeground, 1.4)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption

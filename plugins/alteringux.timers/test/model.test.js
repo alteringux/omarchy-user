@@ -266,6 +266,23 @@ test("formatBadge: icon + count only, never elapsed time", () => {
   assert.strictEqual(Model.formatBadge(entries), "  2")
 })
 
+test("formatBadge: every timer paused parenthesises the count", () => {
+  const entries = [
+    { id: "a", label: "a", createdAt: 10000, accumulatedMs: 5000, runningSince: 0 },
+    { id: "b", label: "b", createdAt: 1000, accumulatedMs: 2000, runningSince: 0 }
+  ]
+  assert.strictEqual(Model.formatBadge(entries), "(2)")
+})
+
+test("formatBadge: some (not all) paused shows running/total", () => {
+  const entries = [
+    { id: "a", label: "a", createdAt: 10000, runningSince: 10000 },
+    { id: "b", label: "b", createdAt: 1000, accumulatedMs: 2000, runningSince: 0 },
+    { id: "c", label: "c", createdAt: 500, runningSince: 500 }
+  ]
+  assert.strictEqual(Model.formatBadge(entries), "  2/3")
+})
+
 // ---------------------------------------------------------- self-improvement
 
 test("defaultHistory / parseHistory tolerate empty and garbage", () => {
