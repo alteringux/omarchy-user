@@ -176,6 +176,20 @@ Panel {
                   font.pixelSize: Style.font.caption
                 }
                 Button {
+                  visible: modelData.owned && modelData.status !== "disabled"
+                  text: "Disable"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("disable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status === "disabled"
+                  text: "Enable"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
+                Button {
                   visible: modelData.owned && modelData.status !== "deprecated"
                   text: "Deprecate"
                   foreground: root.barForeground
@@ -188,6 +202,13 @@ Panel {
                   foreground: root.barForeground
                   bordered: true
                   onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && !modelData.acknowledgedAt
+                  text: "Acknowledge"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("acknowledge", modelData)
                 }
                 Button {
                   visible: modelData.owned && modelData.status !== "removed"

@@ -59,8 +59,9 @@ def scan(*, now_ms=None, threshold_days=DEFAULT_THRESHOLD_DAYS, roots=None, stat
         never_used = tracked and uses == 0
         days_idle = None if not last_at or never_used else max(0, (now_ms - last_at) // DAY_MS)
         stale = tracked and (never_used or (days_idle is not None and threshold_days > 0 and days_idle >= threshold_days))
-        status = lifecycle_skills.get(row["id"], {}).get("status", "active") if isinstance(lifecycle_skills.get(row["id"], {}), dict) else "active"
-        rows.append({**row, "tracked": tracked, "uses": uses, "lastAt": last_at, "daysIdle": days_idle, "neverUsed": never_used, "stale": stale, "status": status})
+        lifecycle_row = lifecycle_skills.get(row["id"], {})
+        lifecycle_row = lifecycle_row if isinstance(lifecycle_row, dict) else {}
+        rows.append({**row, "tracked": tracked, "uses": uses, "lastAt": last_at, "daysIdle": days_idle, "neverUsed": never_used, "stale": stale, "status": lifecycle_row.get("status", "active"), "acknowledgedAt": lifecycle_row.get("acknowledgedAt")})
     rows.sort(key=lambda row: (-row["uses"], row["id"]))
     return {"version": 1, "generatedAt": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), "thresholdDays": max(0, int(threshold_days)), "skills": rows, "summary": {"total": len(rows), "tracked": sum(r["tracked"] for r in rows), "untracked": sum(not r["tracked"] for r in rows), "neverUsed": sum(r["neverUsed"] for r in rows), "stale": sum(r["stale"] for r in rows), "uses": sum(r["uses"] for r in rows)}}
 
