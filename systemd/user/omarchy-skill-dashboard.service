@@ -3,4 +3,4 @@ Description=Refresh the Omarchy skill dashboard
 
 [Service]
 Type=oneshot
-ExecStart=%h/.config/omarchy/local-bin/omarchy-skill-refresh
+ExecStart=%h/.config/omarchy/local-bin/omarchy-skilldashboard refresh
