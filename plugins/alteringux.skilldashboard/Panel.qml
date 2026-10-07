@@ -7,7 +7,7 @@ import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
 Panel {
-  id: root; moduleName: "alteringux.skilldashboard"; property var anchorItem: null; property var hostWidget: null; property bool productOnly: false
+  id: root; moduleName: "alteringux.skilldashboard"; ipcTarget: ""; property var anchorItem: null; property var hostWidget: null; property bool productOnly: false
   readonly property var state: hostWidget ? hostWidget.state : Model.defaults()
   readonly property var rows: productOnly ? state.skills.filter(function (s) { return s.id === "product-teardown" || (s.name || "").toLowerCase().indexOf("product-teardown") >= 0 }) : state.skills
   function act(verb, skill) { if (hostWidget) hostWidget.runSkillAction(verb, skill) }
