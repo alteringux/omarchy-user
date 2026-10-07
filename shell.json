@@ -74,6 +74,9 @@
           "id": "alteringux.dashboard"
         },
         {
+          "id": "alteringux.skilldashboard"
+        },
+        {
           "id": "alteringux.glimpse"
         },
         {
@@ -147,6 +150,9 @@
     },
     {
       "id": "alteringux.recall"
+    },
+    {
+      "id": "alteringux.skilldashboard"
     }
   ],
   "version": 1
