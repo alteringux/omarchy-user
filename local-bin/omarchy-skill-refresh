@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
+SNAPSHOT="$STATE_DIR/skill-dashboard.json"
+mkdir -p "$STATE_DIR"
+raw="$($HERE/local-bin/omarchy-skill-usage --json)"
+tmp=$(mktemp "$SNAPSHOT.XXXXXX")
+printf '%s\n' "$raw" > "$tmp"
+mv "$tmp" "$SNAPSHOT"
+stale=$(printf '%s' "$raw" | jq -r '.summary.stale // 0')
+if [ "$stale" -gt 0 ] && command -v omarchy-pulse >/dev/null 2>&1; then
+  omarchy-pulse attention alteringux.skills --level warning --label "$stale skill(s) need review" --action "omarchy dashboard" --action-label "Open dashboard" >/dev/null 2>&1 || true
+fi
+printf '%s\n' "$SNAPSHOT"
