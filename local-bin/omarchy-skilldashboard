@@ -4,13 +4,14 @@ STATE_DIR="${OMARCHY_STATE_DIR:-$HOME/.local/state/omarchy}"
 STATE_FILE="$STATE_DIR/skilldashboard.json"
 LIFECYCLE_FILE="${OMARCHY_SKILL_LIFECYCLE:-$STATE_DIR/skilldashboard-lifecycle.json}"
 USAGE_DIR="${OMARCHY_SKILL_USAGE_DIR:-$STATE_DIR/skill-usage}"
+TRASH_DIR="${OMARCHY_SKILL_TRASH_DIR:-$STATE_DIR/skill-trash}"
 ROOTS_RAW="${OMARCHY_SKILL_ROOTS:-$HOME/.codex/skills:$HOME/.agents/skills}"
 THRESHOLD="${OMARCHY_SKILL_DAYS:-30}"
 now_ms() { date +%s%N | cut -c1-13; }
 read_lifecycle() { [ -s "$LIFECYCLE_FILE" ] && cat "$LIFECYCLE_FILE" || printf '%s' '{"version":1,"skills":{},"history":[]}'; }
 refresh() {
   mkdir -p "$STATE_DIR"; local now tmp rows root dir id name uses last days stale status ack owned
-  now=$(now_ms); rows=$(mktemp); trap 'rm -f "$rows"' RETURN
+  now=$(now_ms); rows=$(mktemp); trap 'rm -f "${rows:-}"' RETURN
   while IFS= read -r root; do
     [ -d "$root" ] || continue
     while IFS= read -r dir; do
@@ -25,9 +26,22 @@ refresh() {
 }
 action() {
   local verb="$1" id="$2" path="${3:-}" now current tmp backup; mkdir -p "$STATE_DIR"; now=$(now_ms); current=$(read_lifecycle)
-  [[ "$path" == "$HOME"/* ]] || { echo 'system-owned skill protected' >&2; return 1; }
   case "$verb" in
-    acknowledge|disable|enable|deprecate) current=$(jq --arg id "$id" --arg verb "$verb" --argjson now "$now" '.skills[$id].status=(if $verb=="disable" then "disabled" elif $verb=="deprecate" then "deprecated" else (.skills[$id].status // "active") end)|if $verb=="acknowledge" then .skills[$id].acknowledgedAt=$now else . end|.history += [{action:$verb,id:$id,at:$now}]' <<<"$current") ;;
+    acknowledge|disable|enable|deprecate)
+      current=$(jq --arg id "$id" --arg verb "$verb" --argjson now "$now" '.skills[$id].status=(if $verb=="disable" then "disabled" elif $verb=="deprecate" then "deprecated" else (.skills[$id].status // "active") end)|if $verb=="acknowledge" then .skills[$id].acknowledgedAt=$now else . end|.history += [{action:$verb,id:$id,at:$now}]' <<<"$current") ;;
+    remove)
+      [[ "$path" == "$HOME"/* ]] || { echo 'system-owned skill protected' >&2; return 1; }
+      [[ -f "$path/SKILL.md" && -d "$path" ]] || { echo 'skill path not found' >&2; return 1; }
+      mkdir -p "$TRASH_DIR"; backup="$TRASH_DIR/$id"; [[ ! -e "$backup" ]] || { echo 'skill already removed' >&2; return 1; }
+      mv -- "$path" "$backup"
+      current=$(jq --arg id "$id" --arg path "$path" --arg backup "$backup" --argjson now "$now" '.skills[$id] = ((.skills[$id] // {}) + {status:"removed",originalPath:$path,trashPath:$backup,removedAt:$now}) | .history += [{action:"remove",id:$id,at:$now}]' <<<"$current") ;;
+    restore)
+      backup=$(jq -r --arg id "$id" '.skills[$id].trashPath // empty' <<<"$current")
+      path=$(jq -r --arg id "$id" '.skills[$id].originalPath // empty' <<<"$current")
+      [[ -n "$backup" && -n "$path" && "$backup" == "$TRASH_DIR/"* && "$path" == "$HOME/"* ]] || { echo 'restore path is protected' >&2; return 1; }
+      [[ -d "$backup" && ! -e "$path" ]] || { echo 'restore target is unavailable' >&2; return 1; }
+      mkdir -p "$(dirname -- "$path")"; mv -- "$backup" "$path"
+      current=$(jq --arg id "$id" --argjson now "$now" '.skills[$id].status="active" | del(.skills[$id].trashPath,.skills[$id].originalPath,.skills[$id].removedAt) | .history += [{action:"restore",id:$id,at:$now}]' <<<"$current") ;;
     *) echo "unsupported action" >&2; return 2 ;;
   esac
   tmp=$(mktemp "$LIFECYCLE_FILE.XXXXXX"); printf '%s\n' "$current" | jq . > "$tmp"; mv "$tmp" "$LIFECYCLE_FILE"; refresh >/dev/null
