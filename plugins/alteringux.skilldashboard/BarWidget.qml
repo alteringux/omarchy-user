@@ -41,7 +41,7 @@ BarWidget {
     // onFileChanged never fires again without this idle poll. Same
     // watch-on-create blind spot Kit.Store's own header documents.
     pollMs: 60000
-    parse: function (raw) { return Model.parseState(raw) }
+    parse: function (raw) { return Model.parse(raw) }
   }
 
   Process {
