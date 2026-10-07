@@ -111,7 +111,7 @@ if (typeof module !== "undefined") {
   module.exports = {
     defaultState: defaultState,
     parseState: parseState,
-    formatRelative: formatRelative
-    ,parseSkills: parseSkills
+    formatRelative: formatRelative,
+    parseSkills: parseSkills
   }
 }
