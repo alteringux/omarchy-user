@@ -174,6 +174,20 @@ Panel {
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
+                Button {
+                  visible: modelData.owned && modelData.status !== "deprecated"
+                  text: "Deprecate"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("deprecate", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status === "deprecated"
+                  text: "Restore"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
               }
             }
           }

@@ -20,6 +20,7 @@ BarWidget {
   readonly property string home: Quickshell.env("HOME")
   readonly property string pluginDir: home + "/.config/omarchy/plugins/alteringux.dashboard"
   readonly property string refreshScript: pluginDir + "/bin/omarchy-dashboard-refresh"
+  readonly property string skillActionScript: home + "/.config/omarchy/local-bin/omarchy-skill-action"
 
   // dashboard.json lives under ~/.local/state/omarchy/ (NOT in the plugin's own
   // source tree — the shell's plugin-file watcher would reload the widget on
@@ -69,6 +70,16 @@ BarWidget {
       refreshProc.running = true
     })
   }
+
+  function runSkillAction(action, skill) {
+    guard.run("runSkillAction", function() {
+      if (!skill || !skill.id || !skill.owned) return
+      skillActionProc.command = [skillActionScript, action, skill.id, "--path", skill.path]
+      skillActionProc.running = true
+    })
+  }
+
+  Process { id: skillActionProc; running: false; onExited: { stateStore.reload(); root.runRefresh() } }
 
   Timer {
     id: refreshTimer

@@ -43,16 +43,24 @@ def discover(roots=None):
             rows.setdefault(directory.name, {"id": directory.name, "name": name, "description": description, "source": str(root), "path": str(real), "owned": str(real).startswith(str(Path.home()))})
     return [rows[key] for key in sorted(rows)]
 
-def scan(*, now_ms=None, threshold_days=DEFAULT_THRESHOLD_DAYS, roots=None, state_dir=None):
+def scan(*, now_ms=None, threshold_days=DEFAULT_THRESHOLD_DAYS, roots=None, state_dir=None, lifecycle_path=None):
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     state_dir = state_dir or Path(os.environ.get("OMARCHY_SKILL_USAGE_DIR", DEFAULT_STATE))
+    lifecycle_path = lifecycle_path or Path(os.environ.get("OMARCHY_SKILL_LIFECYCLE", state_dir.parent / "skill-lifecycle.json"))
+    try:
+        lifecycle = json.loads(lifecycle_path.read_text(encoding="utf-8"))
+        lifecycle = lifecycle if isinstance(lifecycle, dict) else {}
+    except (OSError, ValueError, TypeError):
+        lifecycle = {}
+    lifecycle_skills = lifecycle.get("skills", {}) if isinstance(lifecycle.get("skills", {}), dict) else {}
     rows = []
     for row in discover(roots):
         tracked, uses, last_at = _read_usage(state_dir / f"{row['id']}.json")
         never_used = tracked and uses == 0
         days_idle = None if not last_at or never_used else max(0, (now_ms - last_at) // DAY_MS)
         stale = tracked and (never_used or (days_idle is not None and threshold_days > 0 and days_idle >= threshold_days))
-        rows.append({**row, "tracked": tracked, "uses": uses, "lastAt": last_at, "daysIdle": days_idle, "neverUsed": never_used, "stale": stale})
+        status = lifecycle_skills.get(row["id"], {}).get("status", "active") if isinstance(lifecycle_skills.get(row["id"], {}), dict) else "active"
+        rows.append({**row, "tracked": tracked, "uses": uses, "lastAt": last_at, "daysIdle": days_idle, "neverUsed": never_used, "stale": stale, "status": status})
     rows.sort(key=lambda row: (-row["uses"], row["id"]))
     return {"version": 1, "generatedAt": datetime.fromtimestamp(now_ms / 1000, timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"), "thresholdDays": max(0, int(threshold_days)), "skills": rows, "summary": {"total": len(rows), "tracked": sum(r["tracked"] for r in rows), "untracked": sum(not r["tracked"] for r in rows), "neverUsed": sum(r["neverUsed"] for r in rows), "stale": sum(r["stale"] for r in rows), "uses": sum(r["uses"] for r in rows)}}
 
