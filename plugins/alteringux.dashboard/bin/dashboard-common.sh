@@ -10,7 +10,7 @@ LOCK_FILE="$STATE_DIR/dashboard.lock"
 # drift into subtly different shapes (they previously carried three
 # slightly different literals). Model.parseState tolerates older files
 # missing the engagement/digest keys, so seeding them here is harmless.
-DASHBOARD_SEED='{"version":1,"notes":{"items":[]},"news":{"updatedAt":null,"items":[]},"system":{"updatedAt":null,"items":[]},"engagement":{"news":{}},"digest":{"text":"","updatedAt":null}}'
+DASHBOARD_SEED='{"version":1,"notes":{"items":[]},"news":{"updatedAt":null,"items":[]},"system":{"updatedAt":null,"items":[]},"engagement":{"news":{}},"digest":{"text":"","updatedAt":null},"skills":{"generatedAt":null,"thresholdDays":30,"skills":[],"summary":{}}}'
 
 now_iso() { date -u +"%Y-%m-%dT%H:%M:%SZ"; }
 

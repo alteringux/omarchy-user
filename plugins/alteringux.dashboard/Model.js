@@ -11,8 +11,21 @@ function defaultState() {
     news: { updatedAt: null, items: [] },
     system: { updatedAt: null, items: [] },
     engagement: { news: {} },
-    digest: { text: "", updatedAt: null }
+    digest: { text: "", updatedAt: null },
+    skills: { generatedAt: null, thresholdDays: 30, items: [], summary: {} }
   }
+}
+
+function parseSkills(raw) {
+  var out = { generatedAt: null, thresholdDays: 30, items: [], summary: {} }
+  if (!isRecord(raw)) return out
+  out.generatedAt = stringOrNull(raw.generatedAt)
+  if (typeof raw.thresholdDays === "number" && isFinite(raw.thresholdDays)) out.thresholdDays = Math.max(0, raw.thresholdDays)
+  if (isRecord(raw.summary)) out.summary = raw.summary
+  if (Array.isArray(raw.skills)) out.items = raw.skills.filter(function (item) {
+    return isRecord(item) && typeof item.id === "string" && item.id.length > 0
+  })
+  return out
 }
 
 // Tolerant parse: missing/malformed sections fall back to empty defaults
@@ -72,6 +85,7 @@ function parseState(raw) {
       state.digest.text = typeof parsed.digest.text === "string" ? parsed.digest.text : ""
       state.digest.updatedAt = stringOrNull(parsed.digest.updatedAt)
     }
+    state.skills = parseSkills(parsed.skills)
   } catch (e) {
     console.warn("dashboard: state parse failed:", e)
   }
@@ -98,5 +112,6 @@ if (typeof module !== "undefined") {
     defaultState: defaultState,
     parseState: parseState,
     formatRelative: formatRelative
+    ,parseSkills: parseSkills
   }
 }

@@ -47,6 +47,15 @@ test("parseState pulls through well-formed sections", () => {
   assert.strictEqual(s.digest.text, "all quiet")
 })
 
+test("parseState exposes a tolerant skill snapshot", () => {
+  const s = Model.parseState(JSON.stringify({
+    skills: { generatedAt: "2026-01-01T00:00:00Z", thresholdDays: 7, summary: { total: 1 }, skills: [{ id: "product-teardown", uses: 4 }] }
+  }))
+  assert.strictEqual(s.skills.generatedAt, "2026-01-01T00:00:00Z")
+  assert.strictEqual(s.skills.thresholdDays, 7)
+  assert.strictEqual(s.skills.items[0].id, "product-teardown")
+})
+
 test("parseState ignores a section whose items field is not an array", () => {
   const s = Model.parseState(JSON.stringify({ news: { items: "nope", updatedAt: "t" } }))
   assert.deepStrictEqual(s.news.items, [])

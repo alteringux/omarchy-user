@@ -20,6 +20,10 @@ Panel {
 
   readonly property var state: hostWidget ? hostWidget.state : Model.defaultState()
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
+  property bool productTeardownOnly: false
+  readonly property var visibleSkills: productTeardownOnly
+    ? root.state.skills.items.filter(function(skill) { return skill.id === "product-teardown" || (skill.name || "").toLowerCase().indexOf("product-teardown") >= 0 })
+    : root.state.skills.items
 
   readonly property color cardBackground: Util.alpha(root.barForeground, 0.05)
   readonly property color cardBorder: Util.alpha(root.barForeground, 0.14)
@@ -103,6 +107,76 @@ Panel {
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           font.italic: true
+        }
+
+        Rectangle {
+          width: parent.width
+          height: skillsColumn.implicitHeight + Style.spacing.panelPadding * 2
+          radius: Style.cornerRadius
+          color: root.cardBackground
+          border.width: 1
+          border.color: root.cardBorder
+
+          Column {
+            id: skillsColumn
+            anchors.fill: parent
+            anchors.margins: Style.spacing.panelPadding
+            spacing: Style.spacing.md
+
+            RowLayout {
+              width: parent.width
+              Text {
+                text: "Skills"
+                color: root.barForeground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                Layout.fillWidth: true
+              }
+              Text {
+                text: (root.state.skills.summary.stale || 0) + " stale · " + (root.state.skills.summary.total || 0) + " total"
+                color: Kit.Palette.faint
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+              Button {
+                text: root.productTeardownOnly ? "All skills" : "Product teardown"
+                foreground: root.barForeground
+                bordered: true
+                onClicked: root.productTeardownOnly = !root.productTeardownOnly
+              }
+            }
+
+            Text {
+              visible: root.visibleSkills.length === 0
+              text: "No matching skills."
+              color: Kit.Palette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Repeater {
+              model: root.visibleSkills
+              delegate: RowLayout {
+                required property var modelData
+                width: skillsColumn.width
+                Text {
+                  text: modelData.name || modelData.id
+                  color: root.barForeground
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.bodySmall
+                  Layout.fillWidth: true
+                  elide: Text.ElideRight
+                }
+                Text {
+                  text: modelData.neverUsed ? "never used" : (modelData.uses || 0) + " uses"
+                  color: modelData.stale ? Color.urgent : Kit.Palette.faint
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
         }
 
         // ---- News card (full width)

@@ -19,6 +19,11 @@ DIGEST_EVERY=5 # roughly every ~2.5h at the widget's 30-min refresh cadence
 
 ensure_state_file || { echo "dashboard: failed to initialize state file" >&2; exit 1; }
 
+# Skills are local and keyless; keep their snapshot independent of network
+# fetches so the dashboard remains useful offline.
+SKILL_USAGE_BIN="$SCRIPT_DIR/../../../local-bin/omarchy-skill-usage"
+skills_json=$(OMARCHY_SKILL_USAGE_DIR="$HOME/.local/state/omarchy/skill-usage" "$SKILL_USAGE_BIN" --json 2>/dev/null || echo '{"version":1,"skills":[],"summary":{}}')
+
 # ---------------------------------------------------------------- news
 # Fetch each item into a unique scratch directory. A fixed shared directory
 # lets overlapping refresh processes delete each other's responses.
@@ -101,7 +106,8 @@ if ! (
   jq -c \
     --argjson news "$news_json" \
     --argjson system "$system_json" \
-    '(if $news != null then .news = $news else . end) | .system = $system' \
+    --argjson skills "$skills_json" \
+    '(if $news != null then .news = $news else . end) | .system = $system | .skills = $skills' \
     "$STATE_FILE" >"$tmp" || exit 1
   mv "$tmp" "$STATE_FILE"
 ) 9>"$LOCK_FILE"; then
