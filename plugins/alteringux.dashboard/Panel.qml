@@ -21,6 +21,7 @@ Panel {
   readonly property var state: hostWidget ? hostWidget.state : Model.defaultState()
   readonly property bool refreshing: hostWidget ? hostWidget.refreshing : false
   property bool productTeardownOnly: false
+  property string pendingRemoveId: ""
   readonly property var visibleSkills: productTeardownOnly
     ? root.state.skills.items.filter(function(skill) { return skill.id === "product-teardown" || (skill.name || "").toLowerCase().indexOf("product-teardown") >= 0 })
     : root.state.skills.items
@@ -187,6 +188,18 @@ Panel {
                   foreground: root.barForeground
                   bordered: true
                   onClicked: if (hostWidget) hostWidget.runSkillAction("enable", modelData)
+                }
+                Button {
+                  visible: modelData.owned && modelData.status !== "removed"
+                  text: root.pendingRemoveId === modelData.id ? "Confirm remove" : "Remove"
+                  foreground: root.barForeground
+                  bordered: true
+                  onClicked: {
+                    if (root.pendingRemoveId === modelData.id) {
+                      if (hostWidget) hostWidget.runSkillAction("remove", modelData)
+                      root.pendingRemoveId = ""
+                    } else root.pendingRemoveId = modelData.id
+                  }
                 }
               }
             }
