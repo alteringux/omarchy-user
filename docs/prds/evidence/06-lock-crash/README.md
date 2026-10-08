@@ -8,7 +8,7 @@ The runner verifies the pre-existing Hyprland PID/start-time and Wayland socket
 identity after cleanup. A normal-process negative control is rejected.
 
 [Baseline result and binary provenance](baseline-result.json) ·
-[Debugger output](baseline-client.log).
+[Debugger output](baseline-client.txt).
 
 The upstream repair is applied in the separate release-source checkout:
 `/home/alteringux/worktrees/quickshell-lock-backport`. Its three runtime source

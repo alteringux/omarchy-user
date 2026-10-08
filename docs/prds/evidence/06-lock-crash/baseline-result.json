@@ -12,7 +12,7 @@
       "holderSecure": true,
       "secondDeclined": false,
       "challengerSecure": false,
-      "log": "docs/prds/evidence/06-lock-crash/baseline-client.log"
+      "log": "docs/prds/evidence/06-lock-crash/baseline-client.txt"
     }
   ],
   "binarySha256": "2dc99382c032710fe495ed115cdee9dc9c69bdb3a21af4d86a9a8ea16733069b",
