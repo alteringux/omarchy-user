@@ -17,6 +17,7 @@ import "../alteringux.kit" as Kit
 // runs the round through Overlay.qml, and turns every user action back into
 // an omarchy-glimpse verb.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.glimpse"
 
@@ -59,19 +60,19 @@ BarWidget {
   readonly property bool overlayUp: root.promptKind !== "" || root.roundActive
 
   readonly property string displayText: {
-    if (!root.configValue.enabled) return "👁"
-    if (root.nowMs < root.stateValue.pauseUntilMs) return "👁 ⏸"
-    if (root.roundActive) return "👁 ●"
-    if (root.promptKind !== "") return "👁 !"
-    if (root.dueCount === 0) return "👁 ✓"
-    return "👁 " + root.dueCount
+    if (!root.configValue.enabled) return "󰈈"
+    if (root.nowMs < root.stateValue.pauseUntilMs) return "󰈈 󰏤"
+    if (root.roundActive) return "󰈈 ●"
+    if (root.promptKind !== "") return "󰈈 !"
+    if (root.dueCount === 0) return "󰈈 ✓"
+    return "󰈈 " + root.dueCount
   }
 
   readonly property color displayColor: {
-    if (root.promptKind === "takeover") return Kit.Palette.negative
-    if (root.overlayUp) return Kit.Palette.urgent
-    if (!root.configValue.enabled || root.nowMs < root.stateValue.pauseUntilMs) return Kit.Palette.faint
-    return root.bar ? Color.bar.text : "#ffffff"
+    if (root.promptKind === "takeover") return _webPalette.barNegative
+    if (root.overlayUp) return _webPalette.barUrgent
+    if (!root.configValue.enabled || root.nowMs < root.stateValue.pauseUntilMs) return _webPalette.barMuted
+    return root.bar ? _webPalette.barForeground : _webPalette.foreground
   }
 
   // ---- the CLI bridge --------------------------------------------------

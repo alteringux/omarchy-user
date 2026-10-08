@@ -8,7 +8,8 @@
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PLUGIN=$(dirname "$HERE")
-CLI="$HOME/.local/bin/omarchy-breathe"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="$REPO/local-bin/omarchy-breathe"
 CANON="$PLUGIN/techniques.json"
 
 RESULTS=$(mktemp)

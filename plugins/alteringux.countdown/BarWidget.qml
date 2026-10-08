@@ -14,6 +14,7 @@ import "Model.js" as Model
 // keeps ticking across restarts and rolls over on its own at local midnight.
 // Same bar-widget + click-panel shape as alteringux.timers.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.countdown"
 
@@ -44,7 +45,7 @@ BarWidget {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.countdown", function(argv) { Quickshell.execDetached(argv) })
 
-  // Ids already notified that their countdown reached "Today", so the 30s
+  // Ids already notified that their countdown reached "Today", so the 60s
   // tick below fires the notification exactly once per countdown per day
   // rather than nagging every tick. In-memory only (reset on a shell
   // restart) — a missed notification across a restart is an acceptable
@@ -105,20 +106,62 @@ BarWidget {
   // ---- the CLI that owns every write to countdowns.json / countdown-history.json
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-countdowns"
 
+  property string actionStatus: ""
+  property int actionGeneration: 0
+  readonly property bool actionPending: actionProc.feedbackGeneration === actionGeneration && actionProc.feedbackGeneration >= 0
+  signal actionFeedback(string message, int generation, bool success)
+  function reportActionStatus(message, success) {
+    actionStatus = message
+    actionFeedback(message, actionGeneration, success)
+  }
+
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: { stateStore.reload(); historyStore.reload() }
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      // Quickshell emits runningChanged(false), without exited, on launch failure.
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Countdown helper unavailable. Check ~/.local/bin/omarchy-countdowns is installed and executable, then try again.", false)
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload(); historyStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Countdown request completed."
+        : "Countdown request failed (exit " + code + "). Try again; check that ~/.local/state/omarchy is writable.", code === 0 && status === 0)
+    }
   }
 
   // Run one omarchy-countdowns verb (argv after the script path). Serialised
   // through actionProc; a verb fired mid-run falls back to execDetached.
   function runVerb(argv) {
-    guard.run("runVerb:" + argv[0], function() {
-      var cmd = [root.scriptPath].concat(argv)
-      if (actionProc.running) { Quickshell.execDetached(cmd); return }
-      actionProc.command = cmd
-      actionProc.running = true
+    return guard.run("runVerb:" + argv[0], function() {
+      root.actionGeneration++
+      try {
+        var cmd = [root.scriptPath].concat(argv)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(cmd)
+          root.reportActionStatus("Request sent. Completion is unavailable; check the countdown list before trying again.", false)
+          return -1
+        }
+        actionProc.feedbackGeneration = root.actionGeneration
+        actionProc.feedbackStarted = false
+        actionProc.command = cmd
+        root.actionStatus = "Working…"
+        actionProc.running = true
+        return root.actionGeneration
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        root.reportActionStatus("Countdown request could not be sent. Check ~/.local/bin/omarchy-countdowns is installed and executable, then try again.", false)
+        throw error
+      }
     })
   }
 
@@ -133,8 +176,9 @@ BarWidget {
   //      The CLI also owns folding an add into the history log.
   function addEntry(label, days) {
     if (!label || label.trim().length === 0) return
-    root.runVerb(["add", String(days), label])
+    var generation = root.runVerb(["add", String(days), label])
     root.nowMs = Date.now()
+    return generation
   }
 
   // Add by an absolute target epoch (the panel's date picker). The CLI takes a
@@ -143,8 +187,9 @@ BarWidget {
     if (!label || label.trim().length === 0) return
     var key = Model.keyForEpoch(targetEpoch)
     if (!key) return
-    root.runVerb(["add-at", key, label])
+    var generation = root.runVerb(["add-at", key, label])
     root.nowMs = Date.now()
+    return generation
   }
 
   function removeEntry(id) { root.runVerb(["remove", id]) }
@@ -265,7 +310,7 @@ BarWidget {
       clip: true
       visible: root.hasEntries
 
-      readonly property color fg: root.bar ? root.bar.barForeground : Color.foreground
+      readonly property color fg: root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.foreground
       readonly property string fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       readonly property real gap: 56
       readonly property real copyWidth: seg1.implicitWidth + gap

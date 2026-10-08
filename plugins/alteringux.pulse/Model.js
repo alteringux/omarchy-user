@@ -372,6 +372,79 @@ function unreadEvents(activity, state) {
   return events.filter(function (e) { return e.ts > since })
 }
 
+// Pick the two most repeated messages from the full retained feed. Repeats
+// rise to the top; ties follow the newest occurrence.
+function activityMessageSummary(activity) {
+  var events = activity && Array.isArray(activity.events) ? activity.events : []
+  var byMessage = Object.create(null)
+  events.forEach(function (event) {
+    var message = slug(event && event.message).replace(/\s+/g, " ").trim()
+    if (!message) return
+    var plugin = slug(event && event.plugin, "unknown").replace(/^alteringux\./, "")
+    var key = JSON.stringify([plugin, message])
+    var entry = byMessage[key] || { plugin: plugin, message: message, count: 0, newestTs: 0 }
+    entry.count++
+    entry.newestTs = Math.max(entry.newestTs, coerceNumber(event.ts, 0))
+    byMessage[key] = entry
+  })
+
+  return Object.keys(byMessage).sort(function (a, b) {
+    var left = byMessage[a]
+    var right = byMessage[b]
+    return right.count - left.count || right.newestTs - left.newestTs
+  }).slice(0, 2).map(function (key) {
+    var entry = byMessage[key]
+    var summary = entry.plugin + ": " + entry.message
+    return entry.count > 1 ? summary + " ×" + entry.count : summary
+  }).join(" · ")
+}
+
+// A compact overview of every event retained in the activity feed.
+function activityDescription(activity, state, attention, displayedEventCount) {
+  var events = activity && Array.isArray(activity.events) ? activity.events : []
+  var needAction = attentionList(attention).length
+  if (!events.length) {
+    return needAction
+      ? needAction + (needAction === 1 ? " alert needs action" : " alerts need action")
+      : ""
+  }
+
+  var byPlugin = {}
+  var highPriority = 0
+  events.forEach(function (event) {
+    var plugin = slug(event.plugin, "unknown").replace(/^alteringux\./, "")
+    byPlugin[plugin] = (byPlugin[plugin] || 0) + 1
+    if (levelRank(event.level) >= levelRank("urgent")) highPriority++
+  })
+
+  var plugins = Object.keys(byPlugin).sort(function (a, b) {
+    return byPlugin[b] - byPlugin[a] || a.localeCompare(b)
+  })
+  var unread = unreadEvents(activity, state).length
+  var firstLine = events.length + " recent notification" + (events.length === 1 ? "" : "s") +
+    " from " + plugins.length + " plugin" + (plugins.length === 1 ? "" : "s") +
+    " · " + unread + " unread"
+  if (needAction) {
+    firstLine += " · " + needAction + (needAction === 1 ? " alert needs action" : " alerts need action")
+  }
+  if (highPriority) firstLine += " · " + highPriority + " urgent or critical"
+  if (displayedEventCount >= 0 && events.length > displayedEventCount) {
+    firstLine += " · newest " + displayedEventCount + " shown below"
+  }
+
+  var sourceSummary = plugins.slice(0, 2).map(function (plugin) {
+    return plugin + " (" + byPlugin[plugin] + ")"
+  }).join(" · ")
+  var otherPlugins = plugins.length - 2
+  if (otherPlugins > 0) {
+    var otherEvents = plugins.slice(2).reduce(function (total, plugin) {
+      return total + byPlugin[plugin]
+    }, 0)
+    sourceSummary += " · " + otherEvents + " across " + otherPlugins + " more"
+  }
+  return firstLine + "\nMost: " + sourceSummary
+}
+
 // The single "do this next" pick: loudest outstanding attention item, else the
 // most recent unread event that carries an action.
 function nextAction(activity, attention, state) {
@@ -473,6 +546,8 @@ if (typeof module !== "undefined" && module.exports) {
     makeUsageAttention: makeUsageAttention,
     attentionList: attentionList,
     unreadEvents: unreadEvents,
+    activityMessageSummary: activityMessageSummary,
+    activityDescription: activityDescription,
     nextAction: nextAction,
     usageMostUsed: usageMostUsed,
     usageLeastUsed: usageLeastUsed,

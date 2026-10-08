@@ -688,13 +688,13 @@ function moodFace(mood) {
   switch (mood) {
     case "ecstatic":
     case "content":
-      return "🙂"
+      return "󰱱"
     case "meh":
-      return "😐"
+      return "󰱴"
     case "hungry":
-      return "😋"
+      return "󰇹"
     case "grumpy":
-      return "🙁"
+      return "󰱶"
     default:
       return ""
   }
@@ -824,10 +824,10 @@ function pickTimeLine(hour, seed) {
 // active event (or null) for an exact date match; `pickSeasonalLine`
 // returns "" when no event is active so the caller can fall through.
 var SEASONAL_EVENTS = [
-  { id: "new_year", name: "New Year", glyph: "🎉", month: 1, day: 1 },
-  { id: "valentines", name: "Valentine's Day", glyph: "💝", month: 2, day: 14 },
-  { id: "halloween", name: "Halloween", glyph: "🎃", month: 10, day: 31 },
-  { id: "christmas", name: "Christmas", glyph: "🎄", month: 12, day: 25 }
+  { id: "new_year", name: "New Year", glyph: "󱁖", month: 1, day: 1 },
+  { id: "valentines", name: "Valentine's Day", glyph: "󰋑", month: 2, day: 14 },
+  { id: "halloween", name: "Halloween", glyph: "󰮿", month: 10, day: 31 },
+  { id: "christmas", name: "Christmas", glyph: "󰐅", month: 12, day: 25 }
 ]
 
 var SEASONAL_LINES = {

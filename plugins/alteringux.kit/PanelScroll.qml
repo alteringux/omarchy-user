@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import "." as Kit
 import qs.Commons
 
 // Kit.PanelScroll — the scrollable panel body every alteringux.* overlay
@@ -22,14 +23,15 @@ import qs.Commons
 // clip / boundsBehavior / flickableDirection are already set; keep binding
 // contentHeight from your inner column.
 Flickable {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   // Forwarded to Kit.WheelBoost. `wheelScale` is the one knob to tune feel —
   // turn it up if a touchpad drag still covers too little ground.
   property real wheelScale: 1.5
-  // Scrollbar handle colour. Faint grey by default so it reads as chrome,
-  // not content; a host can pass its panel foreground for more contrast.
-  property color handleColor: Qt.rgba(0.5, 0.5, 0.5, 0.9)
+  readonly property bool overflowing: height > 0 && contentHeight > height
+  // The handle uses the theme foreground with state-dependent opacity.
+  property color handleColor: _webPalette.foreground
 
   clip: true
   boundsBehavior: Flickable.StopAtBounds
@@ -37,15 +39,17 @@ Flickable {
   // Only grab drags when there's something to scroll — matches the stock
   // shell panels (shell/plugins/agents/Panel.qml). The wheel keeps working
   // via WheelBoost regardless, on its own overflow check.
-  interactive: contentHeight > height
+  interactive: overflowing
 
   ScrollBar.vertical: ScrollBar {
     id: vbar
-    // AsNeeded already hides the whole bar when the content fits, so the
-    // resting opacity below only ever paints when there's real overflow —
-    // it must be non-zero, or the bar is invisible until you grab it and
-    // there's no hint that the panel scrolls.
+    // AsNeeded can hide only the styled handle while leaving a live control
+    // over the content edge. Explicit availability prevents an unused bar
+    // from intercepting row hover or action input when there is no overflow.
     policy: ScrollBar.AsNeeded
+    visible: root.overflowing
+    enabled: visible
+    interactive: visible
     contentItem: Rectangle {
       implicitWidth: Style.space(6)
       radius: width / 2

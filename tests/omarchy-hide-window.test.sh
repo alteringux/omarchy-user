@@ -6,7 +6,8 @@
 # calls to a file. Run:  bash ~/.config/omarchy/tests/omarchy-hide-window.test.sh
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-SCRIPT="$HOME/.local/bin/omarchy-hide-window"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+SCRIPT="$REPO/local-bin/omarchy-hide-window"
 BINDINGS="$HOME/.config/hypr/bindings.lua"
 export PATH="$HERE/mocks:$PATH"
 

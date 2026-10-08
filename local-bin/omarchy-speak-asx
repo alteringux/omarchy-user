@@ -12,7 +12,7 @@
 #         "crumb"; cached in the state dir, best-effort -- if it can't be
 #         had, the movers list is left for the AI to source via web search)
 #   * The "why is it moving" colour, and the market-tone overview, come from
-#     a client-side tool-calling loop on Featherless: `llm-agent --json` runs
+#     a client-side tool-calling loop on NanoGPT: `llm-agent --json` runs
 #     a Kimi-K2 / Qwen3 model that calls web_search against the local SearXNG
 #     (searxng.service user unit) until it can return the briefing JSON. No
 #     Anthropic key needed. Override via ASX_LLM_MODEL / ASX_AI_ITERS.
@@ -196,7 +196,7 @@ say "Fetching the movers and the news behind them. One moment."
 GAINERS_TSV=$(bg_capture screener DESC); LOSERS_TSV=$(bg_capture screener ASC)
 
 # --- AI layer: overview colour + per-mover reasons, via web search --------
-# Runs the tool-calling loop on Featherless (open-weights, flat-rate) instead
+# Runs the tool-calling loop on NanoGPT (open-weights, flat-rate) instead
 # of Anthropic: `llm-agent --json` drives a model that calls web_search against
 # the local SearXNG (searxng.service user unit) and returns one JSON object.
 # Override the model with ASX_LLM_MODEL, the search-loop depth with ASX_AI_ITERS.

@@ -3,21 +3,30 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Compact RSS/Atom story row. The URL is opened only after validating it in
 // Panel.qml, keeping this visual component free of process-launch logic.
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   required property var article
   required property color barForeground
   signal openRequested(string url)
+  activeFocusOnTab: true
+  Accessible.role: Accessible.Link
+  Accessible.name: "Open article: " + (root.article.title || "Untitled article")
+  Accessible.onPressAction: root.openRequested(root.article.url || "")
 
   implicitHeight: body.implicitHeight + Style.space(20)
   radius: Style.cornerRadius
   color: Util.alpha(root.barForeground, 0.06)
   border.width: 1
-  border.color: Util.alpha(root.barForeground, 0.14)
+  border.color: activeFocus ? _webPalette.accent : _webPalette.cardBorderFor(root.barForeground)
+
+  Keys.onReturnPressed: root.openRequested(root.article.url || "")
+  Keys.onSpacePressed: root.openRequested(root.article.url || "")
 
   Column {
     id: body
@@ -31,16 +40,16 @@ Rectangle {
       width: parent.width
       spacing: Style.space(8)
 
-      Text {
+      MarqueeText {
         Layout.fillWidth: true
         text: root.article.title || "Untitled article"
         color: root.barForeground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
-        wrapMode: Text.WordWrap
-        maximumLineCount: 2
-        elide: Text.ElideRight
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.bodySmall
+        textFont.bold: true
+        requestedWrapMode: Text.WordWrap
+        requestedMaximumLineCount: 2
+        requestedElide: Text.ElideRight
       }
       Image {
         Layout.preferredWidth: Style.space(72)
@@ -55,7 +64,7 @@ Rectangle {
 
       Text {
         text: "↗"
-        color: Color.accent
+        color: _webPalette.accent
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -66,38 +75,37 @@ Rectangle {
 
       Text {
         text: root.article.source || "Feed"
-        color: Color.accent
+        color: _webPalette.accent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: true
       }
-      Text {
+      MarqueeText {
         visible: !!root.article.published
         text: root.article.published || ""
-        color: Kit.Palette.faint
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        elide: Text.ElideRight
+        color: _webPalette.faint
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.caption
+        requestedElide: Text.ElideRight
       }
     }
 
-    Text {
+    MarqueeText {
       visible: !!root.article.summary
       width: parent.width
       text: root.article.summary || ""
       color: root.barForeground
-      opacity: 0.72
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
-      wrapMode: Text.WordWrap
-      maximumLineCount: 2
-      elide: Text.ElideRight
+      textFont.family: Style.font.family
+      textFont.pixelSize: Style.font.caption
+      requestedWrapMode: Text.WordWrap
+      requestedMaximumLineCount: 2
+      requestedElide: Text.ElideRight
     }
   }
 
   MouseArea {
     anchors.fill: parent
     cursorShape: Qt.PointingHandCursor
-    onClicked: root.openRequested(root.article.url || "")
+    onClicked: { root.forceActiveFocus(); root.openRequested(root.article.url || "") }
   }
 }

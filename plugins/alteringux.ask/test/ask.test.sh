@@ -4,7 +4,8 @@
 # prompt at a time and replaces tagged speech before starting a new turn.
 set -uo pipefail
 
-ASK="${OMARCHY_ASK_BIN:-$HOME/.config/omarchy/local-bin/omarchy-nanogpt-ask}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+ASK="${OMARCHY_ASK_BIN:-$REPO/local-bin/omarchy-nanogpt-ask}"
 [ -x "$ASK" ] || { echo "not executable: $ASK" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

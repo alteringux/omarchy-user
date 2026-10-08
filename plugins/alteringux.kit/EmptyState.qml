@@ -1,4 +1,5 @@
 import QtQuick
+import "." as Kit
 import qs.Commons
 
 // Kit.EmptyState — the "nothing here yet" line every plugin panel hand-rolls
@@ -12,11 +13,12 @@ import qs.Commons
 //     foreground: root.barForeground  // match the host panel's text color
 //   }
 Column {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string text: ""
   property string hint: ""
-  property color foreground: Color.foreground
+  property color foreground: _webPalette.foreground
 
   spacing: Style.space(2)
   width: parent ? parent.width : implicitWidth
@@ -25,7 +27,6 @@ Column {
     width: parent.width
     text: root.text
     color: root.foreground
-    opacity: 0.55
     wrapMode: Text.WordWrap
     font.family: Style.font.family
     font.pixelSize: Style.font.bodySmall
@@ -35,8 +36,7 @@ Column {
     visible: root.hint.length > 0
     width: parent.width
     text: root.hint
-    color: root.foreground
-    opacity: 0.35
+    color: _webPalette.muted
     wrapMode: Text.WordWrap
     font.family: Style.font.family
     font.pixelSize: Style.font.caption

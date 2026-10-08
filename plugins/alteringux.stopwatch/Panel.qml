@@ -8,6 +8,7 @@ import "../alteringux.kit" as Kit
 
 // Start/cancel controls for the stopwatch overlay.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.stopwatch"
   ipcTarget: ""
@@ -32,7 +33,7 @@ Panel {
     })
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -41,7 +42,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(280))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       // While a text field is being edited, let every keystroke (including
       // space, h/j/k/l, x) reach it untouched instead of being intercepted
@@ -51,6 +52,10 @@ Panel {
       onCloseRequested: root.close()
       onActivateRequested: root.startIfPossible()
       onDeleteRequested: if (hostWidget && hostWidget.active) hostWidget.cancelStopwatch()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Start the stopwatch", context: "Stopwatch · shortcut focus" },
+        { keys: "X", description: "Cancel the active stopwatch", context: "Stopwatch · shortcut focus" }
+      ]
 
       Column {
         id: content
@@ -77,7 +82,7 @@ Panel {
         Text {
           visible: hostWidget && hostWidget.active
           text: hostWidget ? ((hostWidget.paused ? "Paused: " : "Running: ") + Model.formatElapsed(hostWidget.elapsedSeconds) + (hostWidget.label.length > 0 ? (" — " + hostWidget.label) : "")) : ""
-          color: (hostWidget && hostWidget.paused) ? Kit.Palette.warning : Color.accent
+          color: (hostWidget && hostWidget.paused) ? _webPalette.warning : _webPalette.accent
           font.family: Style.font.family
           font.pixelSize: Style.font.heading
           font.bold: true
@@ -90,13 +95,13 @@ Panel {
         // the change applies on the next announcement with no unit restart.
         // Shown in bell mode too now — the mute marker silences the bell as
         // well, for "show me the interval in the bar, don't ring it".
-        // Mouse-only (activeFocusOnTab off) to stay out of the panel's
-        // Enter=start / X=cancel / Esc=close keyboard model.
+        // These toggles join the panel's F6 control-focus route; the global
+        // start/cancel shortcuts only run while the panel key catcher owns focus.
         Toggle {
           id: voiceToggle
           visible: hostWidget && hostWidget.active
           width: content.width
-          activeFocusOnTab: false
+          activeFocusOnTab: true
           label: (hostWidget && hostWidget.chimeMode) ? "Interval bell" : "Voice announcements"
           description: (hostWidget && hostWidget.voiceMuted)
             ? "Muted — the interval still ticks over in the bar, silently"
@@ -112,11 +117,11 @@ Panel {
         // set as the default for the next stopwatch (persisted to config); a
         // click while one is running also flips it live via the CLI marker.
         // Turning it on also clears any mute, so the bell is actually audible.
-        // Mouse-only, same as the voice toggle.
+        // Keyboard focusable alongside the voice toggle.
         Toggle {
           id: bellToggle
           width: content.width
-          activeFocusOnTab: false
+          activeFocusOnTab: true
           label: "Ring a bell"
           readonly property bool chOn: hostWidget
             ? (hostWidget.active ? hostWidget.chimeMode : hostWidget.chimeDefault)
@@ -140,7 +145,7 @@ Panel {
         Text {
           visible: hostWidget && !hostWidget.active && hostWidget.lastSessionSummary.length > 0
           text: hostWidget ? ("Last session: " + hostWidget.lastSessionSummary) : ""
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           width: content.width
@@ -153,7 +158,7 @@ Panel {
         Text {
           visible: hostWidget && !hostWidget.active && hostWidget.todaySummary.length > 0
           text: hostWidget ? hostWidget.todaySummary : ""
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           width: content.width
@@ -198,18 +203,25 @@ Panel {
 
         PanelSeparator {}
 
-        Row {
+        Flow {
+          width: content.width
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
             text: "Start"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             foreground: root.barForeground
             bordered: true
             enabled: !(hostWidget && hostWidget.active)
             onClicked: root.startIfPossible()
           }
-          Button {
+          Kit.ActionButton {
             text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text + " stopwatch"
             foreground: root.barForeground
             bordered: true
             onClicked: {
@@ -223,8 +235,11 @@ Panel {
               }
             }
           }
-          Button {
+          Kit.ActionButton {
             text: "Cancel"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Cancel stopwatch"
             foreground: root.barForeground
             bordered: true
             enabled: hostWidget && hostWidget.active
@@ -233,10 +248,12 @@ Panel {
         }
 
         Text {
+          width: content.width
           text: "Enter: start  ·  X: cancel  ·  Esc: close"
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
       }
     }

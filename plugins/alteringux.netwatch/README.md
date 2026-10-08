@@ -27,7 +27,7 @@ Two things call `sample`:
 
 | Caller | When | Why |
 |---|---|---|
-| `omarchy-netwatch-sample.timer` (systemd --user) | every 30s | buckets keep accruing even when the shell / bar isn't running |
+| `omarchy-netwatch-sample.timer` (systemd --user) | every 5 minutes (with timer jitter) | buckets keep accruing even when the shell / bar isn't running |
 | the bar widget's own `Timer` | every `sampleIntervalSec` | a live rate while you're looking at it |
 
 Both writing is fine — `sample` is cheap and the bucket maths is a sum of

@@ -13,6 +13,7 @@ import "../alteringux.kit" as Kit
 // bar icon shows the most interesting match (a favourite team's live match,
 // else the next fixture); the popup panel holds the full dashboard.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.sports"
 
@@ -285,7 +286,7 @@ BarWidget {
       id: ticker
       anchors.centerIn: parent
       text: root.displayText
-      color: root.liveNow ? Kit.Palette.positive : (root.bar ? root.bar.barForeground : Color.foreground)
+      color: root.liveNow ? _webPalette.barPositive : (root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.foreground)
       fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
       fontSize: Style.font.body
     }

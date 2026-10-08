@@ -24,23 +24,6 @@ var SPORT_GLYPHS = {
   "Handball": "󰖟"
 }
 
-var SPORT_EMOJIS = {
-  "Soccer": "⚽",
-  "Rugby": "🏉",
-  "Basketball": "🏀",
-  "Ice Hockey": "🏒",
-  "American Football": "🏈",
-  "Baseball": "⚾",
-  "Cricket": "🏏",
-  "Motorsport": "🏎️",
-  "Tennis": "🎾",
-  "Fighting": "🥊",
-  "Boxing": "🥊",
-  "Cycling": "🚴",
-  "Golf": "⛳",
-  "Volleyball": "🏐",
-  "Handball": "🤾"
-}
 var SPORT_LABELS = {
   "Soccer": "Football",
   "Fighting": "UFC / MMA",
@@ -49,21 +32,21 @@ var SPORT_LABELS = {
   "Motorsport": "Motorsport"
 }
 var SPORT_COLORS = {
-  "Soccer": "#55D6BE",
-  "Rugby": "#FFB454",
-  "Basketball": "#FF875F",
-  "Fighting": "#FF5277",
-  "Boxing": "#FF5277",
-  "American Football": "#B58CFF",
-  "Baseball": "#F2D15C",
-  "Cricket": "#66C7FF",
-  "Tennis": "#B6E36B",
-  "Motorsport": "#FF6E9E",
-  "Ice Hockey": "#7ED7FF",
-  "Golf": "#7BD88F",
-  "Cycling": "#C7A7FF",
-  "Volleyball": "#FF9CD6",
-  "Handball": "#FFA86B"
+  "Soccer": "#00CC99",
+  "Rugby": "#FFCC00",
+  "Basketball": "#FF6600",
+  "Fighting": "#FF0066",
+  "Boxing": "#CC0033",
+  "American Football": "#9933FF",
+  "Baseball": "#CCCC00",
+  "Cricket": "#0099FF",
+  "Tennis": "#66CC00",
+  "Motorsport": "#FF3399",
+  "Ice Hockey": "#00CCFF",
+  "Golf": "#00CC66",
+  "Cycling": "#6600CC",
+  "Volleyball": "#CC3399",
+  "Handball": "#CC6600"
 }
 var FALLBACK_GLYPH = "󰜺" // nf-md-trophy-outline
 
@@ -72,12 +55,13 @@ function sportLabel(sport) {
 }
 
 function sportColor(sport) {
-  return SPORT_COLORS[sport] || "#A7B0C0"
+  return SPORT_COLORS[sport] || "#666666"
 }
 
 function defaultState() {
   return {
-    version: 1, updatedAt: null,
+    version: 1, updatedAt: null, matchDataUpdatedAt: null, articleDataUpdatedAt: null,
+    refreshHealth: { usedCachedMatches: false, usedCachedArticles: false },
     live: [], upcoming: [], results: [], articles: [],
     players: {}, standings: {}, teams: {}, predictions: {}
   }
@@ -93,6 +77,14 @@ function parseState(raw) {
   try { doc = JSON.parse(raw) } catch (e) { return st }
   if (!doc || typeof doc !== "object") return st
   st.updatedAt = (typeof doc.updatedAt === "string") ? doc.updatedAt : null
+  st.matchDataUpdatedAt = (typeof doc.matchDataUpdatedAt === "string") ? doc.matchDataUpdatedAt : null
+  st.articleDataUpdatedAt = (typeof doc.articleDataUpdatedAt === "string") ? doc.articleDataUpdatedAt : null
+  if (doc.refreshHealth && typeof doc.refreshHealth === "object") {
+    st.refreshHealth = {
+      usedCachedMatches: doc.refreshHealth.usedCachedMatches === true,
+      usedCachedArticles: doc.refreshHealth.usedCachedArticles === true
+    }
+  }
   st.live = asList(doc.live)
   st.upcoming = asList(doc.upcoming)
   st.results = asList(doc.results)
@@ -325,10 +317,6 @@ function sportGlyph(sport) {
   return SPORT_GLYPHS[sport] || FALLBACK_GLYPH
 }
 
-function sportEmoji(sport) {
-  return SPORT_EMOJIS[sport] || "🏆"
-}
-
 // Exposed only for the Node test harness under test/; QML's JS import
 // mechanism has no `module` global, so this is a no-op there.
 if (typeof module !== "undefined" && module.exports) {
@@ -354,7 +342,6 @@ if (typeof module !== "undefined" && module.exports) {
     matchCoverageUrl: matchCoverageUrl,
     parsePrediction: parsePrediction,
     sportGlyph: sportGlyph,
-    sportEmoji: sportEmoji,
     sportLabel: sportLabel,
     sportColor: sportColor
   }

@@ -2,7 +2,8 @@
 # Black-box checks for manual check-in state persistence.
 set -uo pipefail
 
-CLI="${OMARCHY_GLIMPSE_BIN:-$HOME/.config/omarchy/local-bin/omarchy-glimpse}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_GLIMPSE_BIN:-$REPO/local-bin/omarchy-glimpse}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

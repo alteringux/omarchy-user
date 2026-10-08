@@ -4,12 +4,14 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // One match card: two team rows (home/away), score or kick-off time, league
 // tag. Used for live matches (score + status), upcoming (time + venue) and
 // results (final score). Shape follows stocks' MoverCard — translucent card,
 // no Kit.Card body slot needed for this simple row layout.
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   required property var match
@@ -18,8 +20,12 @@ Rectangle {
   property string homeBadge: ""
   property string awayBadge: ""
   property var favouriteNames: []
-  property color barForeground: Color.foreground
-  property color accentColor: Color.accent
+  property color barForeground: _webPalette.foreground
+  property color accentColor: _webPalette.accent
+  readonly property color textForeground: _webPalette.contrastColorFor(
+    root.barForeground, root.color, 4.5, Color.popups.background)
+  readonly property color textAccent: _webPalette.contrastColorFor(
+    root.accentColor, root.color, 4.5, Color.popups.background)
   property var prediction: null
 
   signal detailsRequested(var match)
@@ -64,19 +70,17 @@ Rectangle {
 
       Text {
         text: Model.sportGlyph(root.match && root.match.sport)
-        color: root.accentColor
-        opacity: 0.9
+        color: root.textAccent
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
       }
-      Text {
+      MarqueeText {
         text: (root.match && root.match.league) || ""
         width: parent.width - x
-        elide: Text.ElideRight
-        color: root.barForeground
-        opacity: 0.5
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        requestedElide: Text.ElideRight
+        color: root.textForeground
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.caption
       }
     }
 
@@ -95,14 +99,14 @@ Rectangle {
         height: Style.space(24)
         fillMode: Image.PreserveAspectFit
       }
-      Text {
+      MarqueeText {
         text: root.homeLabel(root.match || {})
         width: parent.width - scoreText.width - homeBadgeImage.width - parent.spacing * 2
-        elide: Text.ElideRight
+        requestedElide: Text.ElideRight
         color: root.barForeground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        font.bold: root.favTouch || root.live
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.body
+        textFont.bold: root.favTouch || root.live
       }
       Text {
         id: scoreText
@@ -114,10 +118,10 @@ Rectangle {
         }
         color: {
           var m = root.match || {}
-          if (!root.live && !root.isResult) return root.accentColor
+          if (!root.live && !root.isResult) return root.textAccent
           var hs = m.homeScore, as_ = m.awayScore
-          if (hs === null || hs === undefined || as_ === null || as_ === undefined) return root.barForeground
-          return hs >= as_ ? root.accentColor : root.barForeground
+          if (hs === null || hs === undefined || as_ === null || as_ === undefined) return root.textForeground
+          return hs >= as_ ? root.textAccent : root.textForeground
         }
         font.family: Style.font.family
         font.pixelSize: Style.font.body
@@ -140,14 +144,14 @@ Rectangle {
         height: Style.space(24)
         fillMode: Image.PreserveAspectFit
       }
-      Text {
+      MarqueeText {
         text: root.awayLabel(root.match || {})
         width: parent.width - awayBadgeImage.width - parent.spacing
-        elide: Text.ElideRight
-        color: root.barForeground
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        font.bold: root.favTouch || root.live
+        requestedElide: Text.ElideRight
+        color: root.textForeground
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.body
+        textFont.bold: root.favTouch || root.live
       }
       Text {
         id: scoreText2
@@ -170,8 +174,9 @@ Rectangle {
         if (root.isResult) return "final"
         return m.venue || ""
       }
-      color: root.live ? Kit.Palette.positive : root.barForeground
-      opacity: root.live ? 1.0 : 0.5
+      color: root.live
+        ? _webPalette.contrastColorFor(_webPalette.positive, root.color, 4.5, Color.popups.background)
+        : root.textForeground
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
       font.bold: root.live
@@ -182,80 +187,84 @@ Rectangle {
 
       Text {
         text: root.prediction && root.prediction.predictedWinner
-          ? "🤖 Model pick: " + root.prediction.predictedWinner
+          ? "󰚩 Model pick: " + root.prediction.predictedWinner
             + (root.prediction.confidence !== null ? " (" + Math.round(root.prediction.confidence * 100) + "%)" : "")
-          : "🤖 Prediction unavailable"
-        color: root.prediction && root.prediction.predictedWinner ? root.accentColor : Kit.Palette.warning
+          : "󰚩 Prediction unavailable"
+        color: root.prediction && root.prediction.predictedWinner
+          ? root.textAccent
+          : _webPalette.contrastColorFor(_webPalette.warning, root.color, 4.5, Color.popups.background)
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.bold: true
       }
 
-      Text {
+      MarqueeText {
         visible: !!(root.prediction && (root.prediction.reason || root.prediction.error))
         text: (root.prediction && (root.prediction.reason || root.prediction.error)) || ""
         width: parent.width
-        elide: Text.ElideRight
-        color: root.barForeground
-        opacity: 0.65
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
+        requestedElide: Text.ElideRight
+        color: root.textForeground
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.caption
       }
     }
 
-    Row {
+    Flow {
+      width: parent.width
       spacing: Style.space(8)
       visible: !!root.match
 
-      Text {
+      Kit.ActionButton {
         text: "▶ Highlights"
-        color: root.accentColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(Model.matchHighlightsUrl(root.match))
-        }
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open highlights for " + root.homeLabel(root.match) + " versus " + root.awayLabel(root.match)
+        foreground: root.textAccent
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(Model.matchHighlightsUrl(root.match))
       }
 
-      Text {
+      Kit.ActionButton {
         visible: !!(root.match && root.match.videoUrl)
-        text: "🎬 Official video"
-        color: root.accentColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(root.match.videoUrl || "")
-        }
+        text: "󰕧 Official video"
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open official video for " + root.homeLabel(root.match) + " versus " + root.awayLabel(root.match)
+        foreground: root.textAccent
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(root.match.videoUrl || "")
       }
 
-      Text {
-        text: "🔎 Official coverage"
-        color: root.barForeground
-        opacity: 0.65
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(Model.matchCoverageUrl(root.match))
-        }
+      Kit.ActionButton {
+        text: "󰍉 Official coverage"
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open official coverage for " + root.homeLabel(root.match) + " versus " + root.awayLabel(root.match)
+        foreground: root.textForeground
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(Model.matchCoverageUrl(root.match))
       }
 
-      Text {
+      Kit.ActionButton {
         text: "ⓘ Details"
-        color: root.barForeground
-        opacity: 0.65
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.detailsRequested(root.match)
-        }
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Show match details for " + root.homeLabel(root.match) + " versus " + root.awayLabel(root.match)
+        foreground: root.textForeground
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.detailsRequested(root.match)
       }
     }
   }

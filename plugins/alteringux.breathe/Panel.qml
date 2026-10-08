@@ -4,6 +4,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The breathe popup: pick a technique, run a session without dimming the
 // desktop, read the metrics, and set the plugin up.
@@ -12,6 +13,7 @@ import "../alteringux.kit" as Kit
 // the fullscreen guide call, so a session started from a keybinding, a
 // conductor ritual, the overlay or this panel is one implementation.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.breathe"
   ipcTarget: ""
@@ -28,7 +30,7 @@ Panel {
   readonly property bool paused: hostWidget ? hostWidget.paused : false
   readonly property bool idle: hostWidget ? hostWidget.idle : true
   readonly property bool active: !root.idle
-  readonly property color barForeground: root.bar ? Color.bar.text : Color.foreground
+  readonly property color barForeground: root.bar ? _webPalette.barForeground : _webPalette.foreground
 
   // Which technique's detail is open. One at a time keeps the list scannable;
   // eleven expanded cards would be a wall.
@@ -66,10 +68,10 @@ Panel {
   }
 
   function toneColor(tone) {
-    if (tone === "positive") return Kit.Palette.positive
-    if (tone === "negative") return Kit.Palette.negative
-    if (tone === "warning") return Kit.Palette.warning
-    if (tone === "info") return Kit.Palette.info
+    if (tone === "positive") return _webPalette.positive
+    if (tone === "negative") return _webPalette.negative
+    if (tone === "warning") return _webPalette.warning
+    if (tone === "info") return _webPalette.info
     return root.barForeground
   }
 
@@ -87,7 +89,7 @@ Panel {
     return false
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -96,9 +98,23 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(Math.min(body.implicitHeight, Style.space(640)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: root.anyFieldFocused()
+      escapeShortcutDescription: root.editorOpen
+        ? "Cancel inline text editing, or close the pattern editor"
+        : "Close the panel"
+      escapeShortcutContext: root.editorOpen ? "Breathe · pattern editor" : "Breathe · shortcut focus"
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Toggle the breathing session", context: "Breathe · shortcut focus" },
+        { keys: "G", description: "Show or hide the breathing guide", context: "Breathe · shortcut focus" },
+        { keys: "S", description: "Stop the active breathing session", context: "Breathe · shortcut focus" },
+        { keys: "Enter / Return / Space", description: "Show or hide details for the focused technique", context: "Breathe · technique controls" },
+        { keys: "Space", description: "Pause or resume the breathing session", context: "Breathe · fullscreen guide" },
+        { keys: "Right Arrow", description: "Skip the active breath hold", context: "Breathe · fullscreen guide" },
+        { keys: "L", description: "Toggle looping for this session", context: "Breathe · fullscreen guide" },
+        { keys: "Escape", description: "Hide the fullscreen guide", context: "Breathe · fullscreen guide" }
+      ]
 
       onCloseRequested: {
         if (root.editorOpen) { root.editorOpen = false; return }
@@ -135,6 +151,16 @@ Panel {
             foreground: root.barForeground
           }
 
+          Text {
+            width: parent.width
+            visible: !root.editorOpen
+            text: "Panel shortcuts · Enter / Space: toggle session  ·  G: show/hide guide  ·  S: stop active session"
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           // ================= the pattern builder =========================
           Loader {
             id: editorLoader
@@ -156,9 +182,9 @@ Panel {
             visible: !root.editorOpen && root.active
             height: liveCol.implicitHeight + Style.space(22)
             radius: Style.cornerRadius
-            color: Kit.Palette.cardBg
+            color: _webPalette.cardBg
             border.width: 1
-            border.color: Kit.Palette.cardBorder
+            border.color: _webPalette.cardBorder
 
             Column {
               id: liveCol
@@ -179,7 +205,7 @@ Panel {
                   width: parent.width * (root.live ? root.live.orbScale : Model.SCALE_MIN) * 1.25
                   height: width
                   radius: width / 2
-                  color: root.hostWidget ? root.hostWidget.toneColor : Kit.Palette.info
+                  color: root.hostWidget ? root.hostWidget.toneColor : _webPalette.info
                   opacity: 0.12
                   Behavior on width { NumberAnimation { duration: 200; easing.type: Easing.OutCubic } }
                 }
@@ -190,13 +216,13 @@ Panel {
                   height: width
                   radius: width / 2
                   color: {
-                    var c = root.hostWidget ? root.hostWidget.toneColor : Kit.Palette.info
+                    var c = root.hostWidget ? root.hostWidget.toneColor : _webPalette.info
                     return Qt.rgba(c.r, c.g, c.b, root.paused ? 0.10 : 0.24)
                   }
                   border.width: 1.5
                   border.color: root.paused
-                    ? Kit.Palette.faint
-                    : (root.hostWidget ? root.hostWidget.toneColor : Kit.Palette.info)
+                    ? _webPalette.faint
+                    : (root.hostWidget ? root.hostWidget.toneColor : _webPalette.info)
                 }
 
                 Text {
@@ -221,7 +247,7 @@ Panel {
                 font.bold: true
               }
 
-              Text {
+              MarqueeText {
                 width: parent.width
                 horizontalAlignment: Text.AlignHCenter
                 text: {
@@ -231,44 +257,59 @@ Panel {
                     : "cycle " + (root.live.cycleIndex + 1) + "/" + root.live.cycleCount
                   return root.technique.name + " · " + where
                 }
-                color: Kit.Palette.faint
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-                elide: Text.ElideRight
+                color: _webPalette.faint
+                textFont.family: Style.font.family
+                textFont.pixelSize: Style.font.caption
+                requestedElide: Text.ElideRight
               }
 
               Row {
                 anchors.horizontalCenter: parent.horizontalCenter
                 spacing: Style.space(8)
 
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: root.paused ? "Resume" : "Pause"
                   bordered: true
                   foreground: root.barForeground
                   visible: root.running || root.paused
                   onClicked: if (root.hostWidget) root.hostWidget.toggleSession()
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "Skip hold"
                   bordered: true
                   foreground: root.barForeground
                   visible: root.running && root.live && root.live.isHold
                   onClicked: if (root.hostWidget) root.hostWidget.skipHold()
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "Finish"
                   bordered: true
                   foreground: root.barForeground
                   visible: root.running || root.paused
                   onClicked: if (root.hostWidget) root.hostWidget.stopSession()
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: root.hostWidget && root.hostWidget.guideVisible ? "Hide guide" : "Full screen"
                   bordered: true
                   foreground: root.barForeground
                   onClicked: if (root.hostWidget) root.hostWidget.toggleGuide()
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "Clear"
                   bordered: true
                   foreground: root.barForeground
@@ -321,11 +362,17 @@ Panel {
                     color: card.isCurrent
                       ? Qt.rgba(root.toneColor(modelData.tone).r, root.toneColor(modelData.tone).g,
                                 root.toneColor(modelData.tone).b, 0.10)
-                      : Kit.Palette.cardBg
+                      : _webPalette.cardBg
                     border.width: 1
-                    border.color: card.isCurrent ? root.toneColor(modelData.tone) : Kit.Palette.cardBorder
+                    border.color: cardMouse.activeFocus ? _webPalette.accent
+                      : (card.isCurrent ? root.toneColor(modelData.tone) : _webPalette.cardBorder)
 
                     Behavior on height { NumberAnimation { duration: 150; easing.type: Easing.OutCubic } }
+
+                    function toggleDetails() {
+                      var key = group.modelData.key + ":" + card.modelData.id
+                      root.expandedId = (root.expandedId === key) ? "" : key
+                    }
 
                     // The tone spine, so a technique keeps one identifying
                     // colour across the picker, the metrics bars and the orb.
@@ -340,10 +387,18 @@ Panel {
                     }
 
                     MouseArea {
+                      id: cardMouse
                       anchors.fill: parent
+                      activeFocusOnTab: true
+                      Accessible.role: Accessible.Button
+                      Accessible.name: (card.expanded ? "Hide" : "Show") + " details for " + card.modelData.name
+                      Accessible.onPressAction: card.toggleDetails()
+                      Keys.onReturnPressed: card.toggleDetails()
+                      Keys.onEnterPressed: card.toggleDetails()
+                      Keys.onSpacePressed: card.toggleDetails()
                       onClicked: {
-                        var key = group.modelData.key + ":" + card.modelData.id
-                        root.expandedId = (root.expandedId === key) ? "" : key
+                        cardMouse.forceActiveFocus()
+                        card.toggleDetails()
                       }
                     }
 
@@ -357,17 +412,17 @@ Panel {
                         width: parent.width
                         height: Math.max(nameText.implicitHeight, playButton.implicitHeight)
 
-                        Text {
+                        MarqueeText {
                           id: nameText
                           anchors.left: parent.left
                           anchors.verticalCenter: parent.verticalCenter
                           width: parent.width - playButton.implicitWidth - patternText.implicitWidth - Style.space(16)
                           text: card.modelData.name
                           color: root.barForeground
-                          font.family: Style.font.family
-                          font.pixelSize: Style.font.bodySmall
-                          font.bold: true
-                          elide: Text.ElideRight
+                          textFont.family: Style.font.family
+                          textFont.pixelSize: Style.font.bodySmall
+                          textFont.bold: true
+                          requestedElide: Text.ElideRight
                         }
 
                         Text {
@@ -376,12 +431,18 @@ Panel {
                           anchors.rightMargin: Style.space(8)
                           anchors.verticalCenter: parent.verticalCenter
                           text: card.modelData.pattern
-                          color: Kit.Palette.faint
+                          color: _webPalette.faint
                           font.family: Style.font.family
                           font.pixelSize: Style.font.caption
                         }
 
-                        Button {
+                        Kit.ActionButton {
+                          focusable: true
+                          Accessible.role: Accessible.Button
+                          Accessible.name: card.isCurrent && root.running
+                            ? "Pause " + card.modelData.name
+                            : (card.isCurrent && root.paused ? "Resume " : "Start ") + card.modelData.name
+                          Accessible.description: card.modelData.pattern
                           id: playButton
                           anchors.right: parent.right
                           anchors.verticalCenter: parent.verticalCenter
@@ -405,7 +466,7 @@ Panel {
                         Text {
                           width: parent.width
                           text: card.modelData.blurb || ""
-                          color: Kit.Palette.faint
+                          color: _webPalette.faint
                           wrapMode: Text.WordWrap
                           font.family: Style.font.family
                           font.pixelSize: Style.font.caption
@@ -415,7 +476,7 @@ Panel {
                           width: parent.width
                           visible: !!card.modelData.use
                           text: "Good for: " + (card.modelData.use || "")
-                          color: Kit.Palette.faint
+                          color: _webPalette.faint
                           wrapMode: Text.WordWrap
                           font.family: Style.font.family
                           font.pixelSize: Style.font.caption
@@ -429,14 +490,14 @@ Panel {
                           radius: Style.cornerRadius
                           color: "transparent"
                           border.width: 1
-                          border.color: Kit.Palette.warning
+                          border.color: _webPalette.warning
 
                           Text {
                             id: warnText
                             anchors.centerIn: parent
                             width: parent.width - Style.space(12)
                             text: card.modelData.warning || ""
-                            color: Kit.Palette.warning
+                            color: _webPalette.warning
                             wrapMode: Text.WordWrap
                             font.family: Style.font.family
                             font.pixelSize: Style.font.caption
@@ -451,7 +512,7 @@ Panel {
                             anchors.verticalCenter: parent.verticalCenter
                             text: Model.formatDuration(Model.sessionSeconds(card.modelData, card.modelData.defaultCycles))
                               + " · " + card.modelData.defaultCycles + " cycles"
-                            color: Kit.Palette.faint
+                            color: _webPalette.faint
                             font.family: Style.font.family
                             font.pixelSize: Style.font.caption
                           }
@@ -463,16 +524,22 @@ Panel {
                           spacing: Style.space(8)
                           visible: card.modelData.family === "custom"
 
-                          Button {
+                          Kit.ActionButton {
+                            focusable: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: text
                             text: "Edit"
                             bordered: true
                             foreground: root.barForeground
                             onClicked: { root.editingId = card.modelData.id; root.editorOpen = true }
                           }
-                          Button {
+                          Kit.ActionButton {
+                            focusable: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: text
                             text: "Delete"
                             bordered: true
-                            foreground: Kit.Palette.negative
+                            foreground: _webPalette.negative
                             onClicked: if (root.hostWidget) root.hostWidget.deleteCustomTechnique(card.modelData.id)
                           }
                         }
@@ -483,7 +550,10 @@ Panel {
               }
             }
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               width: parent.width
               text: "  New pattern"
               bordered: true
@@ -514,6 +584,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Full screen guide on start"
               description: "Raise the breath overlay whenever a session begins"
               checked: root.config.overlayOnStart === true
@@ -523,6 +600,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Silent"
               description: "No phase cues and no completion sound, on every session"
               checked: root.config.silent === true
@@ -532,6 +616,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Loop"
               description: "When a session finishes, start it again until you stop"
               checked: root.config.loop === true
@@ -541,6 +632,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Spoken cues"
               description: "Say \"In\", \"Out\", \"Hold\" at each phase instead of a chime"
               checked: root.config.cueVoice === true
@@ -550,6 +648,12 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Notify when a session finishes"
               checked: root.config.notifyOnEnd === true
               foreground: root.barForeground
@@ -558,6 +662,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Reduce motion"
               description: "Keep the countdown and rings, drop the breathing animation"
               checked: root.config.reduceMotion === true
@@ -567,6 +678,12 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Countdown on the bar"
               checked: root.config.showBarCountdown === true
               foreground: root.barForeground
@@ -582,7 +699,6 @@ Panel {
                 width: Style.space(96)
                 text: "Overlay dim"
                 color: root.barForeground
-                opacity: 0.6
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -601,7 +717,7 @@ Panel {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: Math.round((root.config.overlayDim || 0.82) * 100) + "%"
-                color: Kit.Palette.faint
+                color: _webPalette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -627,7 +743,6 @@ Panel {
                 width: Style.space(84)
                 text: "Phase cue"
                 color: root.barForeground
-                opacity: 0.6
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -653,7 +768,6 @@ Panel {
                 width: Style.space(84)
                 text: "End cue"
                 color: root.barForeground
-                opacity: 0.6
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -674,6 +788,13 @@ Panel {
 
             Toggle {
               width: parent.width
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: label
+              Accessible.checkable: true
+              Accessible.checked: checked
+              Accessible.description: description
+              Accessible.onPressAction: clicked()
+              Accessible.onToggleAction: clicked()
               label: "Remind me to breathe"
               description: "A quiet nudge when you have not breathed in a while"
               checked: root.config.nudge && root.config.nudge.enabled === true
@@ -702,7 +823,7 @@ Panel {
                 text: "Quiet between " + (root.config.nudge ? root.config.nudge.quietFrom : "22:00")
                   + " and " + (root.config.nudge ? root.config.nudge.quietTo : "08:00")
                   + ". Edit the hours in breathe-config.json."
-                color: Kit.Palette.faint
+                color: _webPalette.faint
                 wrapMode: Text.WordWrap
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption

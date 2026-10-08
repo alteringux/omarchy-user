@@ -2,14 +2,15 @@
 # Speaks a daily briefing aloud via Piper TTS: date, weather, and what's
 # happening locally. Run again while speaking to stop.
 #
-# Weather comes from wttr.in (no key). "What's happening" uses `claude -p` with
-# its web-search tool -- no API key, no third-party model host. Both parts degrade
-# gracefully if offline or unconfigured.
+# Weather comes from wttr.in (no key). "What's happening" uses llm-blurb
+# (hermes -> NanoGPT). Both parts degrade gracefully if offline or
+# unconfigured.
 set -uo pipefail
 
 VOICE="${OMARCHY_SPEAK_VOICE:-$HOME/.local/share/piper-voices/en_US-lessac-medium.onnx}"
 ENV_FILE="$HOME/.config/omarchy/ai-briefing/env"
 PIPER_TTS="$(command -v piper-tts 2>/dev/null || echo "$HOME/.local/bin/piper-tts")"
+LLM_BLURB="$(command -v llm-blurb || echo "$HOME/.local/bin/llm-blurb")"
 # Override with LOCATION=... in the env file; blank = wttr.in IP geolocation.
 LOCATION=""
 
@@ -56,21 +57,18 @@ fi
 
 # --- What's happening ----------------------------------------------------
 happenings() {
-  command -v claude >/dev/null 2>&1 || return 1
   local where="$LOCATION"
   [[ -z "$where" ]] && return 1
-  local day resp
+  local day
   day=$(date '+%A %-d %B %Y')
-  resp=$(timeout -k 5 60 claude -p "Its ${day}. Give a spoken briefing of whats happening today in ${where}: 2 to 3 items across local news, events, transport disruptions or sport, plus any weather warnings. Plain text only. No markdown, no headings, no URLs, no citations, no follow-up suggestions. 3 to 5 short sentences to be read aloud. Start immediately with the first item. Do NOT say that you are searching, do NOT write phrases like \"based on the search results\" or \"heres your briefing\"." \
-    --system-prompt "You write short spoken-word briefings. Plain text only." \
-    --allowedTools WebSearch \
-    --output-format text </dev/null 2>/dev/null) || return 1
+  resp=$("$LLM_BLURB" --max-tokens 300 --timeout 60 \
+    "It's ${day}. Give a spoken briefing of whats happening today in ${where}: 2 to 3 items across local news, events, transport disruptions or sport, plus any weather warnings. Plain text only. No markdown, no headings, no URLs -- 3 to 5 short sentences to be read aloud." 2>/dev/null) || return 1
   printf '%s' "$resp" | python3 -c "
-import json,sys,re
+import sys,re
 out=' '.join(sys.stdin.read().split())
 if not out: sys.exit(1)
-out=re.sub(r'\s*(?:Next steps?|Sources?|Follow-?ups?)\b.*\$', '', out, flags=re.I)
-meta=re.compile(r\"(i'll search|let me search|i will search|based on (the |my )?search|here'?s your|here is your|searching for)\", re.I)
+out=re.sub(r'\s*(?:Next steps?|Sources?|Follow-?ups?)\b.*$', '', out, flags=re.I)
+meta=re.compile(r\"(i'll |let me |i will |based on |here'?s your|here is your)\", re.I)
 parts=re.split(r'(?<=[.!?])\s+', out)
 while parts and meta.search(parts[0]):
     parts.pop(0)

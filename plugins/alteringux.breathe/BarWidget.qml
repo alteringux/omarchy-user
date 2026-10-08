@@ -20,6 +20,7 @@ import "../alteringux.kit" as Kit
 // savedAtMs between the daemon's heartbeat writes, which is why a smooth orb
 // needs no per-second subprocess.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.breathe"
 
@@ -52,16 +53,16 @@ BarWidget {
   // guides read this rather than resolving separately, so they cannot drift.
   readonly property var live: Model.resolve(root.session, root.technique, root.nowMs)
 
-  readonly property color barForeground: root.bar ? Color.bar.text : Color.foreground
+  readonly property color barForeground: root.bar ? _webPalette.barForeground : _webPalette.foreground
 
   // The technique's semantic colour, resolved once here so the bar fill, the
   // orb and the panel cards all agree.
   readonly property color toneColor: {
     var tone = root.technique ? root.technique.tone : "neutral"
-    if (tone === "positive") return Kit.Palette.positive
-    if (tone === "negative") return Kit.Palette.negative
-    if (tone === "warning") return Kit.Palette.warning
-    if (tone === "info") return Kit.Palette.info
+    if (tone === "positive") return _webPalette.barPositive
+    if (tone === "negative") return _webPalette.barNegative
+    if (tone === "warning") return _webPalette.barWarning
+    if (tone === "info") return _webPalette.barAccent
     return root.barForeground
   }
 
@@ -418,7 +419,7 @@ BarWidget {
         id: track
         anchors.fill: parent
         radius: height / 2
-        color: Kit.Palette.faint
+        color: _webPalette.barMuted
         opacity: 0.35
       }
 
@@ -428,7 +429,7 @@ BarWidget {
         anchors.bottom: parent.bottom
         radius: height / 2
         width: Math.round(track.width * Math.max(0, Math.min(1, root.progressFraction)))
-        color: root.done ? Kit.Palette.positive : root.toneColor
+        color: root.done ? _webPalette.barPositive : root.toneColor
         opacity: root.paused ? 0.4 : 1
 
         // The fraction already advances every tick, so this only needs to

@@ -4,7 +4,8 @@
 #   OMARCHY_PULSE_BIN=... bash test/cli.test.sh
 set -uo pipefail
 
-CLI="${OMARCHY_PULSE_BIN:-$HOME/.local/bin/omarchy-pulse}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_PULSE_BIN:-$REPO/local-bin/omarchy-pulse}"
 PULSE_DIR="${OMARCHY_PULSE_DIR:-$(cd "$(dirname "$0")/.." && pwd)}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 

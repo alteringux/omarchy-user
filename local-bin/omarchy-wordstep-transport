@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Keep transport controls scoped to Wordstep's Piper job.
+set -uo pipefail
+
+action=${1:-}
+run_base="${XDG_RUNTIME_DIR:-/tmp}/piper-tts"
+current="$run_base/current.json"
+piper_tts="${HOME}/.local/bin/piper-tts"
+ctl="${HOME}/Work/bin/tts-player-ctl"
+tag=${2:-alteringux-wordstep}
+
+[[ "$tag" =~ ^alteringux-wordstep-[0-9]+-[0-9]+$ || "$tag" == alteringux-wordstep ]] || exit 2
+
+case "$action" in
+  stop)
+    exec "$piper_tts" --stop --tag "$tag"
+    ;;
+  pause|resume)
+    current_tag=$(python3 - "$current" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        print(json.load(stream).get("tag", ""))
+except (OSError, ValueError, TypeError):
+    pass
+PY
+)
+    if [[ "$action" == pause ]]; then
+      : > "$run_base/$tag.paused"
+      [[ "$current_tag" == "$tag" ]] || exit 0
+      exec "$ctl" pause
+    fi
+    rm -f "$run_base/$tag.paused"
+    [[ "$current_tag" == "$tag" ]] || exit 0
+    exec "$ctl" resume
+    ;;
+  *)
+    echo "Usage: omarchy-wordstep-transport {pause|resume|stop}" >&2
+    exit 2
+    ;;
+esac

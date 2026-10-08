@@ -9,7 +9,8 @@
 # full the disk actually is.
 set -uo pipefail
 
-CLI="${OMARCHY_DISKMON_BIN:-$HOME/.local/bin/omarchy-diskmon}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_DISKMON_BIN:-$REPO/local-bin/omarchy-diskmon}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

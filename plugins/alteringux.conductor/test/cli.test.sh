@@ -11,7 +11,8 @@
 #   bash test/cli.test.sh
 set -uo pipefail
 
-CLI="${OMARCHY_CONDUCTOR_BIN:-$HOME/.local/bin/omarchy-conductor}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_CONDUCTOR_BIN:-$REPO/local-bin/omarchy-conductor}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

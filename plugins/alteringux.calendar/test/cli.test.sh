@@ -9,7 +9,8 @@
 #   bash test/cli.test.sh
 set -uo pipefail
 
-CLI="${OMARCHY_CALENDAR_BIN:-$HOME/.local/bin/omarchy-calendar}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_CALENDAR_BIN:-$REPO/local-bin/omarchy-calendar}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"
@@ -179,7 +180,7 @@ grep -q "OnCalendar=\*-\*-\* 08:00:00" "$FAKEHOME/.config/systemd/user/omarchy-c
 grep -q "enable --now omarchy-calendar-digest.timer omarchy-calendar-refresh.timer" "$CALLS" \
   && ok "install-timers enables both timers" || bad "enable call missing" "$(cat "$CALLS")"
 # ── Ask AI helper: success and backend failure stay observable ───────────
-AI="${OMARCHY_CALENDAR_AI_BIN:-$HOME/.config/omarchy/local-bin/omarchy-calendar-ai}"
+AI="${OMARCHY_CALENDAR_AI_BIN:-$REPO/local-bin/omarchy-calendar-ai}"
 cat > "$BIN/hermes" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" > "${AI_CALLS:?}"

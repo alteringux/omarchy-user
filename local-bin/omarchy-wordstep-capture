@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Capture a screen region and send its OCR text straight to Wordstep.
+set -euo pipefail
+umask 077
+
+notify_error() {
+  notify-send "Wordstep" "$1" 2>/dev/null || true
+}
+
+for dependency in slurp grim tesseract jq omarchy flock timeout; do
+  if ! command -v "$dependency" >/dev/null 2>&1; then
+    notify_error "Region reading needs $dependency installed."
+    exit 1
+  fi
+done
+
+# A second press must not launch another region selector over the first.
+exec 9>"${XDG_RUNTIME_DIR:-/tmp}/omarchy-wordstep-capture-${UID}.lock"
+flock -n 9 || exit 0
+capture_dir=$(mktemp -d "${TMPDIR:-/tmp}/wordstep-capture.XXXXXXXX")
+trap 'rm -rf -- "$capture_dir"' EXIT
+trap 'exit 130' INT TERM
+
+# Esc cancels slurp. Capture after the selector exits; no frozen overlay is
+# kept alive during OCR or playback.
+if ! region=$(slurp 2>/dev/null); then
+  exit 0
+fi
+[[ -n "$region" ]] || exit 0
+if ! grim -g "$region" "$capture_dir/region.png" 2>/dev/null; then
+  notify_error "Could not capture the selected region."
+  exit 1
+fi
+if ! timeout 30 tesseract "$capture_dir/region.png" "$capture_dir/text" \
+    --oem 1 --psm 6 -l "${OMARCHY_OCR_LANGS:-eng}" --dpi 300 \
+    -c preserve_interword_spaces=1 2>/dev/null; then
+  notify_error "Text recognition failed. Check the OCR language setting."
+  exit 1
+fi
+if ! LC_ALL=C grep -q '[^[:space:]]' "$capture_dir/text.txt"; then
+  notify_error "No text found. Select a region containing readable text."
+  exit 0
+fi
+payload=$(jq -cn --rawfile text "$capture_dir/text.txt" '{text: $text}')
+if ! omarchy shell shell summon alteringux.wordstep "$payload"; then
+  notify_error "Could not open Wordstep. Check that the Omarchy shell is running."
+  exit 1
+fi

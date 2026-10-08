@@ -340,11 +340,11 @@ test("moodLabel: ecstatic requires both happiness and fullness to be high", () =
 })
 
 test("moodFace: one face per mood, blank for asleep and unknown", () => {
-  assert.equal(Model.moodFace("ecstatic"), "🙂")
-  assert.equal(Model.moodFace("content"), "🙂")
-  assert.equal(Model.moodFace("meh"), "😐")
-  assert.equal(Model.moodFace("hungry"), "😋")
-  assert.equal(Model.moodFace("grumpy"), "🙁")
+  assert.equal(Model.moodFace("ecstatic"), "󰱱")
+  assert.equal(Model.moodFace("content"), "󰱱")
+  assert.equal(Model.moodFace("meh"), "󰱴")
+  assert.equal(Model.moodFace("hungry"), "󰇹")
+  assert.equal(Model.moodFace("grumpy"), "󰱶")
   assert.equal(Model.moodFace("asleep"), "")
   assert.equal(Model.moodFace("nonsense"), "")
 })

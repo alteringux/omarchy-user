@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The intrusion surface. One window, two intensities, chosen by the daemon:
 //   checkin   — a centred card over a light scrim, keyboard focus on demand.
@@ -15,6 +16,7 @@ import "../alteringux.kit" as Kit
 // It renders straight from the host widget's watched stores and turns every
 // button into an omarchy-grip verb via the host. It never writes state itself.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -82,11 +84,11 @@ Item {
           : Math.min(parent.width - Style.space(60), Style.space(440))
         height: Math.min(parent.height - Style.space(60), cardCol.implicitHeight + Style.space(48))
         radius: Style.cornerRadius
-        color: Color.bar.background
+        color: _webPalette.barBackground
         border.width: 1
         border.color: root.takeover
-          ? Kit.Palette.negative
-          : Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.25)
+          ? _webPalette.negative
+          : Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.25)
 
         MouseArea { anchors.fill: parent }   // swallow clicks so the scrim handler doesn't fire
 
@@ -102,10 +104,30 @@ Item {
             width: parent.width
             text: root.headline
             wrapMode: Text.WordWrap
-            color: Color.bar.text
+            color: _webPalette.barForeground
             font.family: Style.font.family
             font.pixelSize: root.takeover ? Style.font.title : Style.font.heading
             font.bold: true
+          }
+          Text {
+            id: actionFeedbackText
+            width: parent.width
+            visible: !!(root.hostWidget && root.hostWidget.actionStatus)
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onActionFeedback(message) {
+                if (win.visible && actionFeedbackText.visible) actionFeedbackText.Accessible.announce(message)
+              }
+            }
           }
 
           Text {
@@ -113,7 +135,7 @@ Item {
             text: Qt.formatDateTime(new Date(), "dddd HH:mm")
               + " · " + root.stateValue.dismissStreak + " dismissed in a row"
             visible: root.takeover
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
           }
@@ -122,7 +144,7 @@ Item {
             width: parent.width
             visible: root.rows.length === 0
             text: "Nothing open right now — dismiss this."
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.body
           }
@@ -140,7 +162,7 @@ Item {
                 width: parent.width
                 height: Style.space(38)
                 radius: Style.cornerRadius
-                color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, hov.containsMouse ? 0.10 : 0.05)
+                color: Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, hov.containsMouse ? 0.10 : 0.05)
 
                 required property var modelData
                 readonly property var task: modelData
@@ -155,33 +177,29 @@ Item {
                   anchors.rightMargin: Style.space(12)
                   spacing: Style.space(10)
 
-                  Rectangle {
+                  Kit.ActionButton {
                     id: box
-                    width: Style.space(18)
-                    height: Style.space(18)
+                    width: Style.space(24)
+                    height: Style.space(24)
                     anchors.verticalCenter: parent.verticalCenter
-                    radius: Style.space(4)
-                    color: "transparent"
-                    border.width: 1
-                    border.color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.6)
-
-                    MouseArea {
-                      anchors.fill: parent
-                      anchors.margins: -Style.space(6)
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.tickTask(prow.task.id)
-                    }
+                    text: "✓"
+                    focusable: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: (root.takeover ? "Complete task: " : "Confirm you handled: ") + prow.task.text
+                    foreground: _webPalette.barForeground
+                    bordered: false
+                    onClicked: root.tickTask(prow.task.id)
                   }
 
-                  Text {
+                  MarqueeText {
                     width: parent.width - box.width - rowDue.width - parent.spacing * 2
                     anchors.verticalCenter: parent.verticalCenter
                     text: (prow.task.hard ? "! " : "") + prow.task.text
-                    elide: Text.ElideRight
-                    color: Color.bar.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    font.bold: prow.task.hard
+                    requestedElide: Text.ElideRight
+                    color: _webPalette.barForeground
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.body
+                    textFont.bold: prow.task.hard
                   }
 
                   Text {
@@ -189,7 +207,7 @@ Item {
                     anchors.verticalCenter: parent.verticalCenter
                     visible: prow.task.due != null || prow.task.source !== "typed"
                     text: prow.task.due != null ? Model.formatDue(prow.dueDelta, root.nowMs) : prow.task.source
-                    color: prow.overdue ? Kit.Palette.negative : Kit.Palette.faint
+                    color: prow.overdue ? _webPalette.negative : _webPalette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -203,30 +221,42 @@ Item {
             width: parent.width
             spacing: Style.space(8)
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: root.takeover
               text: "I hear you — 10 min"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               onClicked: if (root.hostWidget) root.hostWidget.ackHear()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: !root.takeover
               text: "Not now"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               onClicked: if (root.hostWidget) root.hostWidget.ackDismiss()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: !root.takeover
               text: "15 min"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               onClicked: if (root.hostWidget) root.hostWidget.ackSnooze(15)
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: root.takeover ? "Snooze 1h" : "1 hour"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               onClicked: if (root.hostWidget) root.hostWidget.ackSnooze(60)
             }

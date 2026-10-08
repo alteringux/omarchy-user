@@ -6,8 +6,10 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.score"
   ipcTarget: "alteringux.score"
@@ -45,7 +47,7 @@ Panel {
     return false
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -56,9 +58,10 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(contentColumn.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       id: keyCatcher
       anchors.fill: parent
+      sectionNavigation: true
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
 
@@ -67,36 +70,54 @@ Panel {
         width: parent.width
         spacing: Style.space(16)
 
+        Kit.PanelHead {
+          title: "Score"
+          foreground: _webPalette.barTextColorFor(root.bar.foreground)
+        }
+
         // Score display
         Row {
+          id: scoreRow
           width: parent.width
           spacing: Style.space(12)
 
           Text {
+            id: scoreIcon
             text: root.config.icon || ""
-            color: root.bar.foreground
+            color: _webPalette.barTextColorFor(root.bar.foreground)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.fontPx(4)
             anchors.verticalCenter: parent.verticalCenter
           }
 
           Column {
+            width: Math.max(0, scoreRow.width - scoreIcon.implicitWidth - scoreRow.spacing)
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.space(4)
 
-            Kit.MetaText {
-              width: implicitWidth   // parent Column is shrink-wrapped, not width-bound
-              content: "Score"
-              foreground: root.bar.foreground
-            }
-            Text {
+            MarqueeText {
+              width: parent.width
               text: String(root.score)
-              color: root.bar.foreground
-              font.family: root.bar.fontFamily
-              font.pixelSize: Style.font.display
-              font.bold: true
+              requestedElide: Text.ElideRight
+              color: _webPalette.barTextColorFor(root.bar.foreground)
+              textFont.family: root.bar.fontFamily
+              textFont.pixelSize: Style.font.display
+              textFont.bold: true
+              Accessible.role: Accessible.StaticText
+              Accessible.name: text
             }
           }
+        }
+
+        Text {
+          width: parent.width
+          text: "F6: controls/shortcuts  ·  Esc: close"
+            + "\nTab/Shift+Tab: panels in shortcut focus; controls in control focus"
+          textFormat: Text.PlainText
+          color: _webPalette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
         }
 
         // Controls -- minus / undo / reset / plus
@@ -112,39 +133,32 @@ Panel {
               { key: "inc",   label: "+ " + (root.config.step || 1),     enabled: true }
             ]
 
-            delegate: Rectangle {
+            delegate: Kit.ActionButton {
               required property var modelData
               width: (parent.width - Style.space(24)) / 4
               height: Style.space(36)
-              radius: Style.cornerRadius
+              Accessible.name: modelData.key === "dec" ? "Decrease score by " + (root.config.step || 1)
+                : modelData.key === "inc" ? "Increase score by " + (root.config.step || 1)
+                : modelData.key === "undo" ? "Undo last score change" : "Reset score"
+              Accessible.description: modelData.enabled ? "" : "Unavailable: there is no score change to undo"
+              enabled: modelData.enabled
+              focusable: true
               opacity: modelData.enabled ? 1.0 : 0.4
-              color: (btnArea.containsMouse && modelData.enabled)
-                ? Style.hoverFillFor(root.bar.foreground, Color.accent)
-                : Util.alpha(root.bar.foreground, 0.1)
+              text: modelData.label
+              fontFamily: root.bar.fontFamily
+              fontSize: Style.font.body
+              foreground: _webPalette.barTextColorFor(root.bar.foreground)
+              background: Util.alpha(_webPalette.barTextColorFor(root.bar.foreground), 0.1)
 
-              Text {
-                anchors.centerIn: parent
-                text: modelData.label
-                color: root.bar.foreground
-                font.family: root.bar.fontFamily
-                font.pixelSize: Style.font.body
+              function activate() {
+                if (!modelData.enabled || !root.hostWidget) return
+                if (modelData.key === "dec") root.hostWidget.decrement()
+                else if (modelData.key === "undo") root.hostWidget.undo()
+                else if (modelData.key === "reset") root.hostWidget.resetScore()
+                else root.hostWidget.increment()
               }
 
-              MouseArea {
-                id: btnArea
-                anchors.fill: parent
-                hoverEnabled: true
-                enabled: modelData.enabled
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  if (root.hostWidget) {
-                    if (modelData.key === "dec") root.hostWidget.decrement()
-                    else if (modelData.key === "undo") root.hostWidget.undo()
-                    else if (modelData.key === "reset") root.hostWidget.resetScore()
-                    else root.hostWidget.increment()
-                  }
-                }
-              }
+              onClicked: activate()
             }
           }
         }
@@ -153,7 +167,7 @@ Panel {
         Rectangle {
           width: parent.width
           height: Style.spacing.hairline
-          color: root.bar.foreground
+          color: _webPalette.barTextColorFor(root.bar.foreground)
           opacity: 0.12
         }
 
@@ -174,7 +188,7 @@ Panel {
               // row and pushing the tally off past the edge.
               width: implicitWidth
               content: "History"
-              foreground: root.bar.foreground
+              foreground: _webPalette.barTextColorFor(root.bar.foreground)
             }
 
             // Small same-day tally, purely derived from the history array
@@ -183,7 +197,7 @@ Panel {
               readonly property int todayCount: Model.countToday(root.history)
               visible: todayCount > 0
               text: todayCount + " today"
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: root.bar.fontFamily
               font.pixelSize: Style.font.caption
             }
@@ -201,9 +215,9 @@ Panel {
                 text: modelData.action === "increment" ? "+" + modelData.value
                   : modelData.action === "decrement" ? "−" + modelData.value
                   : "-reset"
-                color: modelData.action === "increment" ? Kit.Palette.positive
-                  : modelData.action === "decrement" ? Kit.Palette.negative
-                  : Kit.Palette.warning
+                color: modelData.action === "increment" ? _webPalette.positive
+                  : modelData.action === "decrement" ? _webPalette.negative
+                  : _webPalette.warning
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 Layout.preferredWidth: Style.space(40)
@@ -213,7 +227,7 @@ Panel {
                 text: modelData.action === "reset"
                   ? String(modelData.from) + " → " + String(modelData.to)
                   : String(modelData.action)
-                color: Qt.darker(root.bar.foreground, 1.5)
+                color: _webPalette.faint
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }
@@ -233,7 +247,7 @@ Panel {
                   var d = new Date(modelData.timestamp)
                   return Qt.formatTime(d, "HH:mm")
                 }
-                color: Qt.darker(root.bar.foreground, 1.5)
+                color: _webPalette.faint
                 font.family: root.bar.fontFamily
                 font.pixelSize: Style.font.bodySmall
               }
@@ -244,7 +258,7 @@ Panel {
             visible: root.history.length === 0
             text: "No history yet"
             hint: "Use the + / \u2212 buttons or scroll the bar widget."
-            foreground: root.bar.foreground
+            foreground: _webPalette.barTextColorFor(root.bar.foreground)
           }
         }
       }

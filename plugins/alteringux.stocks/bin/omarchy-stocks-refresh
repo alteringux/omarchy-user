@@ -12,7 +12,7 @@
 # The screener's region-scoped POST form needs a session cookie + crumb
 # (Yahoo's newer anti-scraping gate); see ensure_crumb below. That crumb is
 # cached to disk and reused across refreshes rather than re-fetched every
-# run, to keep this frequent (default 30s) poll light.
+# run, to keep this frequent (5m default, 2m minimum) poll light.
 #
 # Usage: omarchy-stocks-refresh   (no args — this is no longer per-ticker)
 

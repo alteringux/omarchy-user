@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -u
+
+
+marker="$HOME/.local/state/omarchy/fullscreen-bars-hidden"
+bar_off="$HOME/.local/state/omarchy/toggles/bar-off"
+
+fullscreen_state=$(hyprctl activewindow -j 2>/dev/null \
+  | jq -r 'if ((.fullscreen // 0) == 2 and (.fullscreenClient // 0) == 2) then "1" else "0" end' \
+  2>/dev/null || printf '0')
+
+if [[ "$fullscreen_state" == "0" ]]; then
+  hyprctl eval 'hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen" }))' >/dev/null || exit 1
+  sleep 0.05
+
+  entered_fullscreen=$(hyprctl activewindow -j 2>/dev/null \
+    | jq -r 'if ((.fullscreen // 0) == 2 and (.fullscreenClient // 0) == 2) then "1" else "0" end' \
+    2>/dev/null || printf '0')
+  if [[ "$entered_fullscreen" != "1" ]]; then
+    exit 1
+  fi
+
+  if [[ ! -e "$bar_off" ]]; then
+    mkdir -p "$(dirname "$marker")"
+    : > "$marker"
+    omarchy-toggle-bar on >/dev/null 2>&1 || true
+  fi
+else
+  hyprctl eval 'hl.dispatch(hl.dsp.window.fullscreen({ mode = "fullscreen" }))' >/dev/null || exit 1
+  if [[ -e "$marker" ]]; then
+    rm -f "$marker"
+    omarchy-toggle-bar off >/dev/null 2>&1 || true
+  fi
+fi

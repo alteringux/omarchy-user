@@ -1,5 +1,7 @@
 import QtQuick
+import "." as Kit
 import qs.Commons
+import "../shared"
 
 // Kit.MetaText — the dim, tracked caption sub-line that sits under a title or
 // section header: the "DRAINING WATTS" line beneath the battery overlay's
@@ -18,22 +20,23 @@ import qs.Commons
 // For a full explanatory sentence, don't use this at all — Style.font.caption
 // + Kit.Palette.faint at regular weight is the hint role
 // (see ../../docs/adr/0005-panel-text-hierarchy.md).
-Text {
+MarqueeText {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string content: ""
-  property color foreground: Color.foreground
+  property color foreground: _webPalette.foreground
   property bool uppercase: true
 
-  textFormat: Text.PlainText
+  requestedTextFormat: Text.PlainText
   text: root.uppercase ? root.content.toUpperCase() : root.content
   visible: root.content.length > 0
-  color: Qt.darker(root.foreground, 1.4)
-  font.family: Style.font.family
-  font.pixelSize: Style.font.caption
-  font.bold: true
-  font.letterSpacing: 1.2
-  elide: Text.ElideRight
+  color: _webPalette.muted
+  textFont.family: Style.font.family
+  textFont.pixelSize: Style.font.caption
+  textFont.bold: true
+  textFont.letterSpacing: 1.2
+  requestedElide: Text.ElideRight
   width: parent ? parent.width : implicitWidth
 
   // Nerd-font outlines run ~10-15% of the em past the box Text reserves; a

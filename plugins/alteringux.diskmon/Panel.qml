@@ -6,6 +6,7 @@ import qs.Ui
 import "Model.js" as Model
 import "../alteringux.sysmon" as Sysmon
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Detail popup for disk usage: the watched mount's gauge, every real mount's
 // usage, a 10-minute trend sparkline with min/avg/max (borrowing the
@@ -16,6 +17,7 @@ import "../alteringux.kit" as Kit
 // widget's watched store; never writes except the on-demand sample/largest
 // calls a user action triggers.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.diskmon"
   ipcTarget: "alteringux.diskmon"
@@ -33,11 +35,20 @@ Panel {
   readonly property var stats: Model.historyStats(root.history, "pct")
 
   property var largestRows: []
+  property string largestError: ""
+  property bool largestFeedbackSent: false
+  signal largestFeedback(string message)
+  function reportLargestError(message) {
+    if (root.largestFeedbackSent) return
+    root.largestFeedbackSent = true
+    root.largestError = message
+    root.largestFeedback(message)
+  }
 
   function levelColor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.positive
+    if (level === "critical") return _webPalette.negative
+    if (level === "warning") return _webPalette.warning
+    return _webPalette.positive
   }
 
   function open() { root.controller.show(); refreshLargest() }
@@ -53,6 +64,8 @@ Panel {
   function refreshLargest() {
     guard.run("refreshLargest", function () {
       if (largestProc.running) return
+      root.largestError = ""
+      root.largestFeedbackSent = false
       largestProc.command = [Quickshell.env("HOME") + "/.local/bin/omarchy-diskmon", "largest", "--json"]
       largestProc.running = true
     })
@@ -60,23 +73,40 @@ Panel {
 
   Process {
     id: largestProc
+    property bool started: false
+    property bool attempted: false
     running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportLargestError("Largest directories unavailable. Check ~/.local/bin/omarchy-diskmon.")
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportLargestError("Largest directories failed (exit " + code + ").")
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         guard.run("largestProc.onStreamFinished", function () {
           try {
             var d = JSON.parse(text || "[]")
-            root.largestRows = Array.isArray(d) ? d : []
+            if (!Array.isArray(d)) throw new Error("expected array")
+            root.largestRows = d
           } catch (e) {
             root.largestRows = []
+            root.reportLargestError("Largest directories could not be read.")
           }
         })
       }
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -87,12 +117,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
+      sectionNavigation: true
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshLargest() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh disk usage and largest items", context: "Disk monitor · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -102,6 +136,33 @@ Panel {
           id: body
           width: parent.width
           spacing: Style.space(16)
+
+          Text {
+            width: body.width
+            height: visible ? implicitHeight : 0
+            visible: !!(root.largestError || (root.hostWidget && root.hostWidget.sampleError))
+            text: (root.hostWidget && root.hostWidget.sampleError ? root.hostWidget.sampleError : "")
+              + (root.hostWidget && root.hostWidget.sampleError && root.largestError ? "\n" : "") + root.largestError
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onSampleFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+            Connections {
+              target: root
+              function onLargestFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.PanelHead {
             width: parent.width
@@ -150,7 +211,7 @@ Panel {
 
             Text {
               text: Model.formatGb(root.stat.primary.usedKb) + " used of " + Model.formatGb(root.stat.primary.totalKb)
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -193,19 +254,19 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.target
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: Style.space(150)
                 }
                 Item { width: parent.width - x - mountPct.width; height: 1 }
                 Text {
                   id: mountPct
                   text: Model.formatPct(modelData.pct)
-                  color: Qt.darker(root.barForeground, 1.3)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.3), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
@@ -236,19 +297,19 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.path
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideMiddle
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideMiddle
                   width: Style.space(220)
                 }
                 Item { width: parent.width - x - sizeVal.width; height: 1 }
                 Text {
                   id: sizeVal
                   text: Model.formatGb(modelData.kb)
-                  color: Qt.darker(root.barForeground, 1.3)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.3), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true

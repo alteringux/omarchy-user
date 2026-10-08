@@ -4,7 +4,7 @@
   "name": "News Bar",
   "version": "1.0.0",
   "author": "AlteringUX",
-  "description": "A second bar along the bottom of every monitor: a marquee of world/general-news headlines from configurable RSS/Atom sources (click to open in the browser). Hover any item for a one-line summary.",
+  "description": "A second bar along the bottom of every monitor, split in two: world/general-news headlines from configurable RSS/Atom sources on the right (click to open in the browser), and a switchable story feed on the left — Literotica, Confessions, or any listing page you add (one NanoGPT call derives the scrape recipe, then it's cached). Click a title to have the full text read aloud with Piper TTS; click again to stop. A dropdown at the bottom-left switches sources or opens a modal to add one.",
   "kinds": [
     "service"
   ],

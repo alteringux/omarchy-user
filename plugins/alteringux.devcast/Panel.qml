@@ -5,10 +5,12 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Devcast overlay: build a replay from the latest Claude Code session, browse
 // past devcasts, open their replay.html / exported video.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.devcast"
   ipcTarget: "alteringux.devcast"
@@ -46,7 +48,7 @@ Panel {
     if (p && p.length) Quickshell.execDetached(["xdg-open", p])
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -57,12 +59,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(400))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
+      sectionNavigation: true
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.buildLatest(true) }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Build the latest project", context: "Devcast · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -84,30 +90,31 @@ Panel {
           }
 
           // ── build from latest session ──────────────────────────────
-          Rectangle {
+          Kit.ActionButton {
             width: parent.width
             height: Style.space(38)
-            radius: Style.cornerRadius
-            color: buildArea.containsMouse
-              ? Style.hoverFillFor(root.barForeground, Color.accent)
-              : Util.alpha(root.barForeground, 0.1)
             opacity: root.building ? 0.5 : 1.0
+            enabled: !root.building
+            focusable: true
+            background: Util.alpha(root.barForeground, 0.1)
+            foreground: root.barForeground
+            Accessible.name: root.building ? "Building replay" : "Build replay from latest session"
+            Accessible.description: root.building ? "Replay build in progress" : "Create and open a replay from the latest session"
+            onClicked: if (root.hostWidget) root.hostWidget.buildLatest(true)
 
-            Text {
-              anchors.centerIn: parent
+            MarqueeText {
+              anchors { fill: parent; leftMargin: Style.space(10); rightMargin: Style.space(10) }
               text: root.building ? "Building replay…" : "Build replay from latest session"
               color: root.barForeground
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              font.bold: true
-            }
-            MouseArea {
-              id: buildArea
-              anchors.fill: parent
-              hoverEnabled: true
-              enabled: !root.building
-              cursorShape: Qt.PointingHandCursor
-              onClicked: { if (root.hostWidget) root.hostWidget.buildLatest(true) }
+              textFont.family: Style.font.family
+              textFont.pixelSize: Style.font.body
+              textFont.bold: true
+              horizontalAlignment: Text.AlignHCenter
+              verticalAlignment: Text.AlignVCenter
+              requestedElide: Text.ElideRight
+              focusableOnOverflow: false
+              active: parent.activeFocus
+              Accessible.ignored: true
             }
           }
 
@@ -115,7 +122,7 @@ Panel {
             width: parent.width
             text: "Also: /devcast in Claude Code, or `omarchy-devcast build <session-id>`. "
                 + "Secrets are auto-redacted; replays stay under ~/.local/state/omarchy/devcasts/."
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -125,7 +132,7 @@ Panel {
             width: parent.width
             visible: root.lastError.length > 0
             text: root.lastError
-            color: Kit.Palette.negative
+            color: _webPalette.negative
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -139,19 +146,12 @@ Panel {
             model: root.casts
 
             delegate: Rectangle {
+              id: castDelegate
               required property var modelData
               width: parent.width
               height: rowCol.implicitHeight + Style.space(16)
               radius: Style.cornerRadius
-              color: rowArea.containsMouse ? Util.alpha(root.barForeground, 0.08) : Util.alpha(root.barForeground, 0.04)
-
-              MouseArea {
-                id: rowArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.openPath(modelData.html)
-              }
+              color: Util.alpha(root.barForeground, 0.04)
 
               Column {
                 id: rowCol
@@ -161,22 +161,22 @@ Panel {
                 anchors.margins: Style.space(10)
                 spacing: Style.space(3)
 
-                Text {
+                MarqueeText {
                   width: parent.width
                   text: modelData.title || "session"
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.body
+                  textFont.bold: true
+                  requestedElide: Text.ElideRight
                 }
-                Text {
+                MarqueeText {
                   width: parent.width
                   text: modelData.summary || ""
-                  color: Kit.Palette.faint
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
+                  color: _webPalette.faint
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.caption
+                  requestedElide: Text.ElideRight
                 }
                 Row {
                   spacing: Style.space(8)
@@ -185,28 +185,22 @@ Panel {
                       { t: "Watch", p: modelData.html, on: (modelData.html || "").length > 0 },
                       { t: "Video", p: modelData.video, on: (modelData.video || "").length > 0 }
                     ]
-                    delegate: Rectangle {
+                    delegate: Kit.ActionButton {
                       required property var modelData
                       visible: modelData.on
-                      width: chip.implicitWidth + Style.space(16)
-                      height: Style.space(22)
+                      height: Style.spacing.controlHeight
                       radius: height / 2
-                      color: chipArea.containsMouse ? Util.alpha(Color.accent, 0.28) : Util.alpha(root.barForeground, 0.1)
-                      Text {
-                        id: chip
-                        anchors.centerIn: parent
-                        text: parent.modelData.t
-                        color: root.barForeground
-                        font.family: Style.font.family
-                        font.pixelSize: Style.font.caption
-                      }
-                      MouseArea {
-                        id: chipArea
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: root.openPath(parent.modelData.p)
-                      }
+                      text: modelData.t
+                      fontSize: Style.font.caption
+                      foreground: root.barForeground
+                      background: Util.alpha(root.barForeground, 0.1)
+                      horizontalPadding: Style.space(8)
+                      verticalPadding: 0
+                      focusable: true
+                      Accessible.name: modelData.t === "Watch"
+                        ? "Watch replay: " + (castDelegate.modelData.title || "session")
+                        : "Open video: " + (castDelegate.modelData.title || "session")
+                      onClicked: root.openPath(modelData.p)
                     }
                   }
                 }
@@ -239,7 +233,7 @@ Panel {
                 ? (root.catalog.totalSessions + " sessions · " + root.catalog.built + " replays"
                    + (root.catalog.stale > 0 ? " · " + root.catalog.stale + " stale" : ""))
                 : (root.scanning ? "scanning…" : "—")
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -253,33 +247,25 @@ Panel {
                 { t: root.importing ? "Importing…" : "Import recent", act: "import", on: !root.importing && !!root.catalog && root.catalog.unbuilt > 0 },
                 { t: root.scanning ? "Scanning…" : "Rescan", act: "scan", on: !root.scanning }
               ]
-              delegate: Rectangle {
+              delegate: Kit.ActionButton {
                 required property var modelData
                 width: (parent.width - Style.space(8)) / 2
                 height: Style.space(30)
-                radius: Style.cornerRadius
                 opacity: modelData.on ? 1.0 : 0.5
-                color: rowA.containsMouse && modelData.on
-                  ? Style.hoverFillFor(root.barForeground, Color.accent)
-                  : Util.alpha(root.barForeground, 0.08)
-                Text {
-                  anchors.centerIn: parent
-                  text: modelData.t
-                  color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                }
-                MouseArea {
-                  id: rowA
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  enabled: modelData.on
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: {
-                    if (!root.hostWidget) return
-                    if (modelData.act === "import") root.hostWidget.importRecent()
-                    else root.hostWidget.refreshCatalog()
-                  }
+                text: modelData.t
+                fontSize: Style.font.bodySmall
+                foreground: root.barForeground
+                background: Util.alpha(root.barForeground, 0.08)
+                enabled: modelData.on
+                focusable: true
+                Accessible.name: modelData.t
+                Accessible.description: modelData.act === "import"
+                  ? "Import recent sessions that do not have a replay yet"
+                  : "Rescan the session library"
+                onClicked: {
+                  if (!root.hostWidget) return
+                  if (modelData.act === "import") root.hostWidget.importRecent()
+                  else root.hostWidget.refreshCatalog()
                 }
               }
             }
@@ -288,22 +274,28 @@ Panel {
           Repeater {
             model: root.sessions
 
-            delegate: Rectangle {
+            delegate: Kit.ActionButton {
+              id: sessionButton
               required property var modelData
               width: parent.width
               height: sCol.implicitHeight + Style.space(14)
-              radius: Style.cornerRadius
-              color: sArea.containsMouse ? Util.alpha(root.barForeground, 0.08) : Util.alpha(root.barForeground, 0.03)
-
-              MouseArea {
-                id: sArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  if (modelData.built) root.openPath(root.castPathFor(modelData.built))
-                  else if (root.hostWidget) root.hostWidget.buildSession(modelData.sourcePath, true)
-                }
+              text: ""
+              background: Util.alpha(root.barForeground, 0.03)
+              foreground: root.barForeground
+              horizontalPadding: Style.space(9)
+              verticalPadding: Style.space(6)
+              leftAlign: true
+              focusable: true
+              Accessible.name: (modelData.built ? "Open replay: " : "Build replay: ") + (modelData.title || "session")
+              Accessible.description: {
+                var project = (modelData.project || "").replace(/^\/home\/[^/]+/, "~")
+                var when = modelData.endedAt ? Qt.formatDateTime(new Date(modelData.endedAt), "MMM d") : ""
+                return when + " · " + modelData.toolUses + " tools · " + project
+                  + (modelData.stale ? " · replay stale" : "")
+              }
+              onClicked: {
+                if (modelData.built) root.openPath(root.castPathFor(modelData.built))
+                else if (root.hostWidget) root.hostWidget.buildSession(modelData.sourcePath, true)
               }
 
               Column {
@@ -319,23 +311,27 @@ Panel {
                   spacing: Style.space(6)
                   Text {
                     text: modelData.built ? "▶" : (modelData.stale ? "~" : "·")
-                    color: modelData.built ? Kit.Palette.positive
-                      : (modelData.stale ? Kit.Palette.warning : Kit.Palette.faint)
+                    color: modelData.built ? _webPalette.positive
+                      : (modelData.stale ? _webPalette.warning : _webPalette.faint)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                     width: Style.space(12)
+                    Accessible.ignored: true
                   }
-                  Text {
+                  MarqueeText {
                     width: parent.width - x
                     text: modelData.title || "session"
                     color: root.barForeground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: !!modelData.built
-                    elide: Text.ElideRight
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.bodySmall
+                    textFont.bold: !!modelData.built
+                    requestedElide: Text.ElideRight
+                    focusableOnOverflow: false
+                    active: sessionButton.activeFocus
+                    Accessible.ignored: true
                   }
                 }
-                Text {
+                MarqueeText {
                   width: parent.width
                   text: {
                     var proj = (modelData.project || "").replace(/^\/home\/[^/]+/, "~")
@@ -343,10 +339,13 @@ Panel {
                     return when + "  ·  " + modelData.toolUses + " tools  ·  " + proj
                       + (modelData.stale ? "  ·  replay stale" : "")
                   }
-                  color: Kit.Palette.faint
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
+                  color: _webPalette.faint
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.caption
+                  requestedElide: Text.ElideRight
+                  focusableOnOverflow: false
+                  active: sessionButton.activeFocus
+                  Accessible.ignored: true
                 }
               }
             }

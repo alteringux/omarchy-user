@@ -14,6 +14,7 @@ import "../alteringux.kit" as Kit
 // session — which is how the "notes" card gets outside content. Left-click
 // opens the card overlay; middle-click forces an immediate refresh.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.dashboard"
 
@@ -69,6 +70,8 @@ BarWidget {
       refreshProc.running = true
     })
   }
+
+  function reloadState() { stateStore.reload() }
 
   Timer {
     id: refreshTimer
@@ -169,7 +172,7 @@ BarWidget {
       width: Style.space(6)
       height: Style.space(6)
       radius: width / 2
-      color: Color.urgent
+      color: _webPalette.barUrgent
       anchors.top: parent.top
       anchors.right: parent.right
       anchors.topMargin: Style.space(3)

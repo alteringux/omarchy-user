@@ -4,12 +4,14 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Pulse's feed popup: what the alteringux.* plugins have been doing, the ones
 // waiting on you pulled to the top with their action, and a single "do this
 // next" pick. Every control calls the same hostWidget function so there's one
 // implementation shared with the IPC path.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.pulse"
   ipcTarget: ""
@@ -28,6 +30,9 @@ Panel {
   readonly property var summary: Model.summary(root.activityValue, root.attentionValue, root.readValue, root.usageValue)
   readonly property var attentionRows: Model.attentionList(root.attentionValue)
   readonly property var events: (root.activityValue.events || []).slice(0, 40)
+  readonly property string activityDescription: Model.activityDescription(
+    root.activityValue, root.readValue, root.attentionValue, root.events.length)
+  readonly property string activityMessageSummary: Model.activityMessageSummary(root.activityValue)
   readonly property double lastReadTs: root.readValue.lastReadTs || 0
   readonly property string metaLine: {
     var bits = []
@@ -38,10 +43,10 @@ Panel {
   }
 
   function toneFor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "urgent") return Kit.Palette.urgent
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.info
+    if (level === "critical") return _webPalette.negative
+    if (level === "urgent") return _webPalette.urgent
+    if (level === "warning" || level === "warn") return _webPalette.warning
+    return _webPalette.info
   }
 
   // toneFor(level) at a given alpha, without every call site re-destructuring
@@ -52,18 +57,27 @@ Panel {
     return Qt.rgba(c.r, c.g, c.b, alpha)
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
     bar: root.bar
     open: root.opened && root.anchorItem !== null
-    contentWidth: panel.fittedContentWidth(Style.space(360))
+    contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
+    focusTarget: pulseKeys
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
+      id: pulseKeys
       anchors.fill: parent
+      recoveryPilot: true
+      recoveryPilotVerified: true
+      shortcutSource: root.moduleName
       onCloseRequested: root.close()
+
+      Kit.PanelScroll {
+        anchors.fill: parent
+        contentHeight: content.implicitHeight
 
       Column {
         id: content
@@ -79,12 +93,34 @@ Panel {
           foreground: root.barForeground
         }
 
+        Text {
+          id: feedbackText
+          width: parent.width
+          visible: text.length > 0
+          text: root.hostWidget && typeof root.hostWidget.actionStatus === "string"
+            ? root.hostWidget.actionStatus : ""
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          Accessible.role: Accessible.StaticText
+          Accessible.name: text
+          Connections {
+            target: root.hostWidget
+            ignoreUnknownSignals: true
+            function onActionFeedback(message) {
+              if (root.opened && feedbackText.visible) feedbackText.Accessible.announce(message)
+            }
+          }
+        }
+
         // ---- do this next -------------------------------------------
         Rectangle {
           width: parent.width
           visible: root.summary.nextAction !== null
           radius: Style.cornerRadius
-          color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
+          color: _webPalette.cardBackgroundFor(root.barForeground)
           border.width: 1
           border.color: root.summary.nextAction
             ? root.toneRgba(root.summary.nextAction.level, 0.5)
@@ -101,32 +137,34 @@ Panel {
             spacing: Style.space(10)
 
             Column {
-              width: parent.width - nextBtn.width - parent.spacing
+              width: Math.max(0, parent.width - (nextBtn.visible ? nextBtn.width + parent.spacing : 0))
               anchors.verticalCenter: parent.verticalCenter
               spacing: Style.space(2)
 
               Kit.MetaText {
                 width: implicitWidth
                 content: "DO THIS NEXT"
-                foreground: root.summary.nextAction ? root.toneFor(root.summary.nextAction.level) : Kit.Palette.faint
+                foreground: root.summary.nextAction ? root.toneFor(root.summary.nextAction.level) : _webPalette.faint
               }
-              Text {
+              MarqueeText {
                 width: parent.width
                 text: root.summary.nextAction
                   ? (root.summary.nextAction.plugin.replace(/^alteringux\./, "") + " — " + root.summary.nextAction.label)
                   : ""
-                elide: Text.ElideRight
+                requestedElide: Text.ElideRight
                 color: root.barForeground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.body
+                textFont.family: Style.font.family
+                textFont.pixelSize: Style.font.body
               }
             }
 
-            Button {
+            Kit.ActionButton {
               id: nextBtn
               anchors.verticalCenter: parent.verticalCenter
               visible: root.summary.nextAction && root.summary.nextAction.action.length > 0
               text: root.summary.nextAction ? root.summary.nextAction.actionLabel : ""
+              focusable: true
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: if (root.hostWidget) root.hostWidget.runNextAction()
@@ -157,7 +195,9 @@ Panel {
               readonly property var item: modelData
               implicitHeight: attRow.implicitHeight + Style.space(14)
               radius: Style.cornerRadius
-              color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.05)
+              color: _webPalette.cardBackgroundFor(root.barForeground)
+              border.width: 1
+              border.color: _webPalette.cardBorderFor(root.barForeground)
 
               Rectangle {
                 width: Style.space(3)
@@ -177,7 +217,8 @@ Panel {
                 spacing: Style.space(8)
 
                 Column {
-                  width: parent.width - attActBtn.width - attDismiss.width - parent.spacing * 2
+                  width: Math.max(0, parent.width - (attActBtn.visible ? attActBtn.width + parent.spacing : 0)
+                    - attDismiss.width - parent.spacing)
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(2)
 
@@ -199,21 +240,25 @@ Panel {
                   }
                 }
 
-                Button {
+                Kit.ActionButton {
                   id: attActBtn
                   anchors.verticalCenter: parent.verticalCenter
                   visible: attDel.item.action.length > 0
                   text: attDel.item.actionLabel.length ? attDel.item.actionLabel : "Do it"
+                  focusable: true
+                  Accessible.name: text + " for " + attDel.item.plugin.replace(/^alteringux\./, "")
                   foreground: root.barForeground
                   bordered: true
                   onClicked: if (root.hostWidget) root.hostWidget.actOn(attDel.item.plugin)
                 }
 
-                Button {
+                Kit.ActionButton {
                   id: attDismiss
                   anchors.verticalCenter: parent.verticalCenter
                   text: "✕"
-                  foreground: Kit.Palette.faint
+                  focusable: true
+                  Accessible.name: "Dismiss alert for " + attDel.item.plugin.replace(/^alteringux\./, "")
+                  foreground: _webPalette.faint
                   bordered: false
                   onClicked: if (root.hostWidget) root.hostWidget.clearOne(attDel.item.plugin)
                 }
@@ -256,6 +301,32 @@ Panel {
         PanelSeparator {}
         PanelSectionHeader { text: "ACTIVITY"; foreground: root.barForeground }
 
+        Text {
+          objectName: "pulse-activity-summary"
+          width: parent.width
+          visible: root.activityDescription.length > 0
+          text: root.activityDescription
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: root.barForeground
+          font.family: Style.font.family
+          font.pixelSize: Style.font.bodySmall
+          font.bold: true
+          Accessible.role: Accessible.StaticText
+          Accessible.name: text
+        }
+
+        MarqueeText {
+          objectName: "pulse-activity-message-summary"
+          visible: root.activityMessageSummary.length > 0
+          width: parent.width
+          text: "Highlights: " + root.activityMessageSummary
+          requestedTextFormat: Text.PlainText
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.bodySmall
+          color: _webPalette.faint
+        }
+
         Kit.EmptyState {
           visible: root.events.length === 0
           width: parent.width
@@ -264,101 +335,24 @@ Panel {
           hint: "Plugins report here with:  omarchy-pulse log <plugin> \"…\""
         }
 
-        Kit.PanelScroll {
+        Column {
+          id: feedColumn
           width: parent.width
           visible: root.events.length > 0
-          height: Math.min(Style.space(260), feedColumn.implicitHeight)
-          contentHeight: feedColumn.implicitHeight
+          spacing: Style.space(6)
 
-          Column {
-            id: feedColumn
-            width: parent.width
-            spacing: Style.space(2)
+          Repeater {
+            model: root.events
 
-            Repeater {
-              model: root.events
-
-              Rectangle {
-                id: evDel
-                width: feedColumn.width
-                required property var modelData
-                readonly property var ev: modelData
-                readonly property bool unread: ev.ts > root.lastReadTs
-                implicitHeight: evRow.implicitHeight + Style.space(10)
-                radius: Style.cornerRadius
-                color: evHover.containsMouse
-                  ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
-                  : "transparent"
-
-                MouseArea { id: evHover; anchors.fill: parent; hoverEnabled: true }
-
-                Rectangle {
-                  width: Style.space(5); height: width; radius: width / 2
-                  anchors.left: parent.left
-                  anchors.leftMargin: Style.space(3)
-                  anchors.verticalCenter: parent.verticalCenter
-                  visible: evDel.unread
-                  color: root.toneFor(evDel.ev.level)
-                }
-
-                Row {
-                  id: evRow
-                  anchors.left: parent.left
-                  anchors.right: parent.right
-                  anchors.verticalCenter: parent.verticalCenter
-                  anchors.leftMargin: Style.space(14)
-                  anchors.rightMargin: Style.space(6)
-                  spacing: Style.space(8)
-
-                  Text {
-                    width: Style.space(64)
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: evDel.ev.plugin.replace(/^alteringux\./, "")
-                    elide: Text.ElideRight
-                    color: Kit.Palette.faint
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Text {
-                    // evOpen only shows on hover, and a Row skips an
-                    // invisible child's gap along with the child itself --
-                    // unconditionally subtracting its width AND a flat 3
-                    // gaps' worth of spacing (right for the 4-child hovered
-                    // case) starved this label by one phantom button-width
-                    // and one phantom gap for the far more common unhovered,
-                    // 3-child case, eliding messages more than it needed to.
-                    width: evRow.width - Style.space(64) - timeLabel.width
-                      - (evOpen.visible ? evOpen.width + parent.spacing : 0)
-                      - parent.spacing * 2
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: evDel.ev.message
-                    elide: Text.ElideRight
-                    color: root.barForeground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: evDel.unread
-                  }
-
-                  Text {
-                    id: timeLabel
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: Model.relTime(root.nowMs - evDel.ev.ts)
-                    color: Kit.Palette.faint
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Button {
-                    id: evOpen
-                    anchors.verticalCenter: parent.verticalCenter
-                    visible: evDel.ev.action.length > 0 && evHover.containsMouse
-                    text: evDel.ev.actionLabel.length ? evDel.ev.actionLabel : "Open"
-                    foreground: root.barForeground
-                    bordered: true
-                    onClicked: if (root.hostWidget) root.hostWidget.runAction(evDel.ev.action)
-                  }
-                }
+            ActivityRow {
+              width: feedColumn.width
+              nowMs: root.nowMs
+              lastReadTs: root.lastReadTs
+              barForeground: root.barForeground
+              faintForeground: _webPalette.faint
+              unreadColor: root.toneFor(modelData.level)
+              onOpenRequested: action => {
+                if (root.hostWidget) root.hostWidget.runAction(action)
               }
             }
           }
@@ -370,21 +364,26 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
             text: "Mark all read"
+            focusable: true
+            Accessible.name: text
             foreground: root.barForeground
             bordered: true
             enabled: root.summary.unread > 0
             onClicked: if (root.hostWidget) root.hostWidget.markRead()
           }
-          Button {
+          Kit.ActionButton {
             text: "Clear alerts"
+            focusable: true
+            Accessible.name: text
             foreground: root.barForeground
             bordered: true
             enabled: root.summary.needAction > 0
             onClicked: if (root.hostWidget) root.hostWidget.clearAll()
           }
         }
+      }
       }
     }
   }

@@ -4,11 +4,13 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Pool browser + stats for the Glimpse widget: start a drill round, see which
 // scheduled scenes are due, and drive the daemon (on/off, pause, check-in,
 // fetch). Every control calls the same hostWidget function the IPC path calls.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.glimpse"
   ipcTarget: ""
@@ -37,7 +39,7 @@ Panel {
     return bits
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -46,7 +48,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       onCloseRequested: root.close()
 
@@ -58,7 +60,7 @@ Panel {
         spacing: Style.space(12)
 
         Kit.PanelHead {
-          glyph: "👁"
+          glyph: "󰈈"
           title: "Glimpse"
           meta: root.metaLine
           foreground: root.barForeground
@@ -71,7 +73,7 @@ Panel {
           width: parent.width
           text: "Study a scene, then click what changed in the altered copy. Drill picks fresh scenes and ramps the difficulty; scheduled scenes resurface on a spacing interval."
           wrapMode: Text.WordWrap
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -80,14 +82,20 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Drill now"
             foreground: root.barForeground
             bordered: true
             enabled: !root.roundActive && root.promptKind === ""
             onClicked: { if (root.hostWidget) root.hostWidget.startDrill(); root.close() }
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Review a due scene"
             foreground: root.barForeground
             bordered: true
@@ -130,6 +138,20 @@ Panel {
                 width: dueColumn.width
                 height: Style.space(30)
                 radius: Style.cornerRadius
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Review scene " + drow.card.sceneId + ", level " + drow.card.level
+                Accessible.description: drow.card.changeCount + " changes, "
+                  + (drow.card.reps > 0 ? Model.formatPct(drow.card.bestAccuracy) + " best accuracy" : "not reviewed yet")
+                Accessible.focusable: true
+                Accessible.onPressAction: {
+                  if (root.hostWidget && !root.roundActive && root.promptKind === "") {
+                    root.hostWidget.startScheduled(drow.card.id)
+                    root.close()
+                  }
+                }
+                border.width: activeFocus ? 1 : 0
+                border.color: _webPalette.accent
                 color: rowHover.containsMouse
                   ? Util.alpha(root.barForeground, 0.06)
                   : "transparent"
@@ -142,7 +164,13 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: { if (root.hostWidget && !root.roundActive && root.promptKind === "") { root.hostWidget.startScheduled(drow.card.id); root.close() } }
+                  onClicked: {
+                    drow.forceActiveFocus()
+                    if (root.hostWidget && !root.roundActive && root.promptKind === "") {
+                      root.hostWidget.startScheduled(drow.card.id)
+                      root.close()
+                    }
+                  }
                 }
 
                 Row {
@@ -153,14 +181,15 @@ Panel {
                   anchors.rightMargin: Style.space(6)
                   spacing: Style.space(8)
 
-                  Text {
+                  MarqueeText {
                     width: drow.width - dropBtn.width - metaCol.width - parent.spacing * 3
                     anchors.verticalCenter: parent.verticalCenter
                     text: "scene " + drow.card.sceneId
-                    elide: Text.ElideRight
+                    focusableOnOverflow: false
+                    requestedElide: Text.ElideRight
                     color: root.barForeground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.bodySmall
                   }
 
                   Text {
@@ -168,23 +197,23 @@ Panel {
                     anchors.verticalCenter: parent.verticalCenter
                     text: "L" + drow.card.level + " · " + drow.card.changeCount + "△"
                       + (drow.card.reps > 0 ? " · " + Model.formatPct(drow.card.bestAccuracy) : " · new")
-                    color: Kit.Palette.faint
+                    color: _webPalette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
 
-                  Text {
+                  Kit.ActionButton {
                     id: dropBtn
                     anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(24)
+                    height: Style.space(24)
                     text: "✕"
-                    color: Kit.Palette.faint
-                    font.pixelSize: Style.font.bodySmall
-                    MouseArea {
-                      anchors.fill: parent
-                      anchors.margins: -Style.space(6)
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: if (root.hostWidget) root.hostWidget.dropCard(drow.card.id)
-                    }
+                    focusable: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Remove scheduled scene " + drow.card.sceneId
+                    foreground: _webPalette.faint
+                    bordered: false
+                    onClicked: if (root.hostWidget) root.hostWidget.dropCard(drow.card.id)
                   }
                 }
               }
@@ -204,7 +233,7 @@ Panel {
             + (root.poolStats.lifetimeAccuracy != null ? " · " + Model.formatPct(root.poolStats.lifetimeAccuracy) + " avg" : "")
             + " · " + root.poolStats.roundsToday + " today"
           wrapMode: Text.WordWrap
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -218,33 +247,48 @@ Panel {
           width: parent.width
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: root.configValue.enabled ? "Turn off" : "Turn on"
             foreground: root.barForeground
             bordered: true
             onClicked: if (root.hostWidget) root.hostWidget.setEnabled(!root.configValue.enabled)
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Check in now"
             foreground: root.barForeground
             bordered: true
             enabled: root.configValue.enabled && root.promptKind === "" && !root.roundActive
             onClicked: if (root.hostWidget) root.hostWidget.forceCheckin()
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Fetch scenes"
             foreground: root.barForeground
             bordered: true
             onClicked: if (root.hostWidget) root.hostWidget.fetchScenes(4)
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Pause 2h"
             foreground: root.barForeground
             bordered: true
             enabled: root.configValue.enabled
             onClicked: if (root.hostWidget) root.hostWidget.pauseFor(120)
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Resume"
             foreground: root.barForeground
             bordered: true

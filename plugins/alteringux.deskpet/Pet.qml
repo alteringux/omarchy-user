@@ -18,6 +18,7 @@ import "../alteringux.kit" as Kit
 // monitor size loads it. Everything it says comes from Model.js's phrase
 // banks; this file only decides *when* to ask for a line.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -192,7 +193,7 @@ Item {
         spawnParticles("sparkle")
         bounceAnim.restart()
       } else if (unlocked.length > 0) {
-        root.say("🏆 " + unlocked[0].name + " — " + unlocked[0].description, 7000)
+        root.say("󰔸 " + unlocked[0].name + " — " + unlocked[0].description, 7000)
         spawnParticles("sparkle")
       } else if (Model.didLevelUp(prev, next)) {
         root.say(Model.pickLevelUpLine(root.pet, Model.levelInfo(next).level), 7000)
@@ -429,9 +430,9 @@ Item {
         width: Math.min(Style.space(220), bubbleLabel.implicitWidth + Style.space(24))
         height: bubbleLabel.implicitHeight + Style.space(16)
         radius: Style.cornerRadius
-        color: Color.bar.background
+        color: _webPalette.barBackground
         border.width: 1
-        border.color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.25)
+        border.color: Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.25)
 
         Text {
           id: bubbleLabel
@@ -439,7 +440,7 @@ Item {
           anchors.margins: Style.space(8)
           text: root.bubbleText
           wrapMode: Text.WordWrap
-          color: Color.bar.text
+          color: _webPalette.barForeground
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
           horizontalAlignment: Text.AlignHCenter
@@ -470,16 +471,13 @@ Item {
         property real walkOffset: 0
         property real blinkScale: 1
 
-        // The idle bob is the one thing that kept this always-on-top overlay's
-        // render loop from ever parking. A 60fps NumberAnimation for a slow 6px
-        // sine is overkill: drive it from a 30fps timer instead (halves the
-        // surface's frames) and let it stop dead when the pet sleeps. A poke
-        // still overrides bobOffset directly via bounceAnim.
+        // A 20fps tick is enough for this slow 6px idle bob; stop it when the
+        // pet sleeps. A poke still overrides bobOffset via bounceAnim.
         Timer {
           id: bobTick
           running: !root.liveState.asleep && !bounceAnim.running
           repeat: true
-          interval: 33
+          interval: 50
           onTriggered: {
             var period = petContainer.roamMode === "gallop" ? 440 : 1800
             hitBox.bobOffset = -3 + 3 * Math.cos(2 * Math.PI * (Date.now() % period) / period)
@@ -544,7 +542,6 @@ Item {
             Behavior on xScale { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
             Behavior on yScale { NumberAnimation { duration: 150; easing.type: Easing.OutQuad } }
           }
-          opacity: root.liveState.asleep ? 0.6 : 1.0
           Behavior on opacity { NumberAnimation { duration: 400 } }
         }
 
@@ -587,7 +584,7 @@ Item {
             width: parent.width * 0.68 + Style.space(3)
             height: Math.max(5, Style.space(6))
             radius: height / 2
-            color: "#8a5a2c"
+            color: "#996633"
           }
           Rectangle {
             anchors.verticalCenter: parent.verticalCenter
@@ -595,7 +592,7 @@ Item {
             width: Math.max(3, Style.space(3.5))
             height: parent.height * 0.44
             radius: 2
-            color: "#7c3f36"
+            color: "#663333"
           }
           Canvas {
             id: broomHead
@@ -608,7 +605,7 @@ Item {
             onPaint: {
               var ctx = getContext("2d"); ctx.reset()
               var w = width, h = height
-              ctx.fillStyle = "#d7a63e"
+              ctx.fillStyle = "#CC9933"
               ctx.beginPath()
               ctx.moveTo(0, h * 0.30)
               ctx.lineTo(w * 0.97, h * 0.02)
@@ -642,7 +639,8 @@ Item {
         // A slow twinkle in the corner marks the rare shiny variant.
         Text {
           visible: root.state.shiny === true
-          text: "✨"
+          text: "󰫨"
+          font.family: Style.font.family
           font.pixelSize: Style.space(14)
           anchors.left: parent.left
           anchors.bottom: parent.bottom
@@ -659,9 +657,9 @@ Item {
 
         Text {
           visible: root.liveState.asleep
-          opacity: root.liveState.asleep ? 1 : 0
           Behavior on opacity { NumberAnimation { duration: 400 } }
-          text: "💤"
+          text: "󰒲"
+          font.family: Style.font.family
           font.pixelSize: Style.space(18)
           anchors.right: parent.right
           anchors.top: parent.top

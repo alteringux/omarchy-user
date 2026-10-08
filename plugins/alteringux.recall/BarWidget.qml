@@ -17,11 +17,27 @@ import "../alteringux.kit" as Kit
 // widget watches those files, renders the current prompt through Prompt.qml,
 // and turns every user action back into an omarchy-recall verb.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.recall"
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-recall"
   readonly property var guard: Kit.BugGuard.create("alteringux.recall", function (argv) { Quickshell.execDetached(argv) })
+  property string actionStatus: ""
+  property bool actionFailed: false
+  property int actionGeneration: 0
+  property string choicesError: ""
+  signal actionFeedback(string message)
+  signal choicesFeedback(string message)
+  function reportActionStatus(message, failed) {
+    actionStatus = message
+    actionFailed = failed === true
+    actionFeedback(message)
+  }
+  function reportChoicesError(message) {
+    choicesError = message
+    choicesFeedback(message)
+  }
 
   // ---- state, all written by omarchy-recall ---------------------------
   Kit.Store {
@@ -58,31 +74,65 @@ BarWidget {
   readonly property string promptKind: (root.stateValue.prompt && root.stateValue.prompt.kind) ? root.stateValue.prompt.kind : ""
 
   readonly property string displayText: {
-    if (!root.configValue.enabled) return "🧠"
-    if (root.nowMs < root.stateValue.pauseUntilMs) return "🧠 ⏸"
-    if (root.promptKind === "lesson") return "🧠 📖"
-    if (root.dueCount === 0) return "🧠 ✓"
-    return "🧠 " + root.dueCount
+    if (!root.configValue.enabled) return "󰧑"
+    if (root.nowMs < root.stateValue.pauseUntilMs) return "󰧑 󰏤"
+    if (root.promptKind === "lesson") return "󰧑 󰂽"
+    if (root.dueCount === 0) return "󰧑 ✓"
+    return "󰧑 " + root.dueCount
   }
 
   readonly property color displayColor: {
-    if (root.promptKind === "takeover") return Kit.Palette.negative
-    if (root.promptKind !== "") return Kit.Palette.urgent
-    if (!root.configValue.enabled || root.nowMs < root.stateValue.pauseUntilMs) return Kit.Palette.faint
-    return root.bar ? Color.bar.text : "#ffffff"
+    if (root.promptKind === "takeover") return _webPalette.barNegative
+    if (root.promptKind !== "") return _webPalette.barUrgent
+    if (!root.configValue.enabled || root.nowMs < root.stateValue.pauseUntilMs) return _webPalette.barMuted
+    return root.bar ? _webPalette.barForeground : _webPalette.foreground
   }
 
   // ---- the CLI bridge -----------------------------------------------
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: { stateStore.reload(); cardsStore.reload(); configStore.reload() }
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Recall helper unavailable. Check ~/.local/bin/omarchy-recall is installed and executable.", true)
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload(); cardsStore.reload(); configStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Recall command completed."
+        : "Recall command failed (exit " + code + "). Try again; check the Recall helper if it persists.", code !== 0 || status !== 0)
+    }
   }
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
-      if (actionProc.running) { Quickshell.execDetached([root.scriptPath].concat(args)); return }
-      actionProc.command = [root.scriptPath].concat(args)
-      actionProc.running = true
+      root.actionGeneration++
+      try {
+        var cmd = [root.scriptPath].concat(args)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(cmd)
+          root.reportActionStatus("Request sent. Completion cannot be confirmed while another Recall command is running.", false)
+          return
+        }
+        actionProc.feedbackGeneration = root.actionGeneration
+        actionProc.feedbackStarted = false
+        actionProc.command = cmd
+        root.actionFailed = false
+        root.actionStatus = "Working…"
+        root.actionFeedback(root.actionStatus)
+        actionProc.running = true
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        root.reportActionStatus("Recall request could not be sent. Try again; check the Recall helper if it persists.", true)
+        throw error
+      }
     })
   }
 
@@ -92,13 +142,36 @@ BarWidget {
 
   Process {
     id: choicesProc
+    property bool started: false
+    property bool attempted: false
     running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportChoicesError("Clue options unavailable. Check ~/.local/bin/omarchy-recall is installed and executable.")
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0)
+        root.reportChoicesError("Clue options unavailable (exit " + code + ").")
+    }
     property string forId: ""
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         var data
-        try { data = JSON.parse(text || "{}") } catch (e) { data = {} }
+        try { data = JSON.parse(text || "{}") } catch (e) {
+          root.reportChoicesError("Clue options could not be read. Try again.")
+          return
+        }
+        if (!data || !Array.isArray(data.options)) {
+          root.reportChoicesError("No clue options are available for this card.")
+          return
+        }
         // forId must land before lastChoices: Prompt.qml's onLastChoicesChanged
         // fires synchronously off the assignment below and reads forId in the
         // same tick, so the old order left it comparing against the stale id.
@@ -109,6 +182,7 @@ BarWidget {
   }
   function fetchChoices(id) {
     if (!id || choicesProc.running) return
+    root.choicesError = ""
     choicesProc.forId = String(id)
     choicesProc.command = [root.scriptPath, "choices", String(id), "4"]
     choicesProc.running = true

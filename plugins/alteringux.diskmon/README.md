@@ -55,9 +55,9 @@ on the bar widget's sampling timer.
 
 ## Widget behaviour
 
-- Bar glyph + `watchMount`'s percent-full, sampled every 30s (disk usage moves
+- Bar glyph + `watchMount`'s percent-full, sampled every 60s (disk usage moves
   slowly compared to CPU/memory, so this ticks far less often than cpumon's
-  2s).
+  4s).
 - An `AttentionDot` lights up warning/critical per the configured thresholds.
 - Panel: watched-mount gauge, a 10-minute trend sparkline + min/avg/max
   (reusing the cpumon/memmon/tempmon family's `Sysmon.TrendChart` /

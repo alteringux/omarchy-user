@@ -1,55 +1,110 @@
-pragma Singleton
 import QtQuick
 import qs.Commons
+import "PaletteLogic.js" as Logic
 
-// Kit.Palette — semantic status colors + shared surface tokens for the
-// alteringux.* plugins.
+// Kit.Palette — web-safe, contrast-aware semantic colors for alteringux.*.
 //
-// The shell palette (Color) carries foreground / background / accent /
-// urgent and nothing for "this number went up" green or "past its estimate"
-// amber, so every plugin grew its own hardcoded hex (timers' #d29922,
-// score's #4CAF50 / #F44336 / #FF9800, stocks' up/down greens). This
-// singleton is the one place those live, so a restyle is one edit.
+// The shell palette carries the theme roles; this component normalizes those
+// and supplies shared semantic status colors to each plugin component.
 //
-//   import "../alteringux.kit" as Kit
-//   color: rising ? Kit.Palette.positive : Kit.Palette.negative
-//   color: Kit.Palette.signColor(delta)        // +ve green / -ve red / 0 faint
-//   color: Kit.Palette.toneColor(card.tone)    // "accent"|"positive"|…
+//   Kit.Palette { id: palette }
+//   color: rising ? palette.positive : palette.negative
+//   color: palette.signColor(delta)        // +ve green / -ve red / 0 faint
+//   color: palette.toneColor(card.tone)    // "accent"|"positive"|…
 //
-// `info` / `urgent` track the active theme; `positive` / `negative` /
-// `warning` are fixed values chosen to stay legible on both light and dark
-// omarchy themes (the theme system has no role for them).
+// Theme colors are snapped to the classic 216 RGB values. Text roles choose
+// the nearest safe color that keeps 4.5:1 contrast against their surface.
+// Alpha remains available for overlays; the underlying RGB channels stay safe.
 //
 // The `card*` / `hairline` tokens are the translucent-card look every panel
 // hand-copied as `Util.alpha(fg, 0.05)` / `0.14`; they back Kit.Card.
 QtObject {
   id: pal
 
-  readonly property color positive: "#3fb950"
-  readonly property color negative: "#f85149"
-  readonly property color warning:  "#d29922"
-  readonly property color info:     Color.accent
-  readonly property color urgent:   Color.urgent
+  readonly property color background: webSafeColor(Color.background)
+  readonly property color foreground: contrastColorFor(Color.foreground, background)
+  readonly property color accent: contrastColorFor(Color.accent, background)
+  readonly property color urgent: contrastColorFor(Color.urgent, background)
+  readonly property color muted: contrastColorFor(Color.muted, background)
+  readonly property color faint: muted
 
-  // Pre-dimmed foreground for secondary text / hairline borders. Callers
-  // that need a different alpha should still use Util.alpha on Color.foreground.
-  readonly property color faint: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.55)
-  // Tertiary text (source citations, timestamps) — the theme's own muted role.
-  readonly property color muted: Color.muted
+  readonly property color barBackground: webSafeColor(Color.bar.background)
+  readonly property color barForeground: contrastColorFor(Color.bar.text, barBackground)
+  readonly property color barActive: contrastColorFor(Color.bar.active, barBackground, 3)
+  readonly property color barMuted: contrastColorFor(Color.muted, barBackground)
+  readonly property color barAccent: contrastColorFor(Color.accent, barBackground)
+  readonly property color barUrgent: contrastColorFor(Color.urgent, barBackground)
+
+  readonly property color menuBackground: webSafeColor(Color.menu.background)
+  readonly property color menuText: contrastColorFor(Color.menu.text, menuBackground)
+  readonly property color menuBorder: contrastColorFor(Color.menu.border, menuBackground, 3)
+  readonly property color menuScrim: webSafeColor(Color.menu.scrim)
+  readonly property color menuSelectedBackground: webSafeColor(Color.menu.selectedBackground)
+  readonly property color menuSelectedText: contrastColorFor(Color.menu.selectedText, menuSelectedBackground, undefined, menuBackground)
+
+  readonly property color popupBackground: webSafeColor(Color.popups.background)
+  readonly property color popupText: contrastColorFor(Color.popups.text, popupBackground)
+  readonly property color popupBorder: contrastColorFor(Color.popups.border, popupBackground, 3)
+
+  readonly property color notificationBackground: webSafeColor(Color.notifications.background)
+  readonly property color notificationText: contrastColorFor(Color.notifications.text, notificationBackground)
+  readonly property color notificationBorder: contrastColorFor(Color.notifications.border, notificationBackground, 3)
+  readonly property color notificationCountdown: contrastColorFor(Color.notifications.countdown, notificationBackground)
+
+  readonly property color positive: statusColorFor("positive", background)
+  readonly property color negative: statusColorFor("negative", background)
+  readonly property color warning: statusColorFor("warning", background)
+  readonly property color barPositive: statusColorFor("positive", barBackground)
+  readonly property color barNegative: statusColorFor("negative", barBackground)
+  readonly property color barWarning: statusColorFor("warning", barBackground)
+  readonly property color info: accent
 
   // ---- shared card surface (see Kit.Card) ---------------------------------
-  readonly property color cardBg:     Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.05)
-  readonly property color cardBorder: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.14)
-  readonly property color hairline:   Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.16)
+  readonly property color cardBg:     cardBackgroundFor(foreground)
+  readonly property color cardBorder: cardBorderFor(foreground)
+  readonly property color hairline:   Logic.alphaColor(Qt.color(webSafeColor(foreground)), 0.16)
+
+  function cardBackgroundFor(foreground) { return Logic.alphaColor(Qt.color(pal.webSafeColor(foreground)), 0.05) }
+  function cardBorderFor(foreground) { return Logic.alphaColor(Qt.color(pal.webSafeColor(foreground)), 0.14) }
+
+  function webSafeColor(color) {
+    var value = typeof color === "string" ? Qt.color(color) : color
+    return Logic.webSafeColor(value)
+  }
+
+  function contrastRatio(foreground, surface, backdrop) {
+    var first = typeof foreground === "string" ? Qt.color(foreground) : foreground
+    var second = typeof surface === "string" ? Qt.color(surface) : surface
+    var base = backdrop === undefined ? Color.background : (typeof backdrop === "string" ? Qt.color(backdrop) : backdrop)
+    return Logic.contrastRatio(first, second, base)
+  }
+
+  function contrastColorFor(preferred, surface, minimum, backdrop) {
+    var target = typeof preferred === "string" ? Qt.color(preferred) : preferred
+    var face = typeof surface === "string" ? Qt.color(surface) : surface
+    var base = backdrop === undefined ? Color.background : (typeof backdrop === "string" ? Qt.color(backdrop) : backdrop)
+    return Logic.contrastColorFor(target, face, minimum, base)
+  }
+
+  function statusColorFor(tone, surface, minimum, backdrop) {
+    var preferred = tone === "positive" ? "#00ff00"
+      : tone === "negative" ? "#ff0000"
+      : tone === "warning" ? "#cc9900"
+      : "#ffffff"
+    var face = surface === undefined ? background : surface
+    return contrastColorFor(preferred, face, minimum, backdrop)
+  }
+
+  function barTextColorFor(preferred) { return contrastColorFor(preferred, barBackground) }
 
   // ---- semantic helpers --------------------------------------------------
   // A card / heading "tone" -> its accent color. "neutral" == no emphasis.
-  function toneColor(tone) {
-    if (tone === "positive") return pal.positive
-    if (tone === "negative") return pal.negative
-    if (tone === "warning")  return pal.warning
-    if (tone === "accent")   return Color.accent
-    return pal.faint
+  function toneColor(tone, surface, minimum, backdrop) {
+    var face = surface === undefined ? pal.background : surface
+    if (tone === "positive" || tone === "negative" || tone === "warning")
+      return pal.statusColorFor(tone, face, minimum, backdrop)
+    if (tone === "accent") return pal.contrastColorFor(Color.accent, face, minimum, backdrop)
+    return pal.contrastColorFor(Color.muted, face, minimum, backdrop)
   }
 
   // A signed number -> green above 0, red below, faint at (near) 0.

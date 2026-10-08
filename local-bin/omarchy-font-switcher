@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+
+# Open the Omarchy image selector with a rendered preview for every installed
+# monospace family. The selected filename is the family name consumed by
+# omarchy-font-set, matching the theme switcher's print-name handoff.
+set -euo pipefail
+
+preload=false
+case "${1:-}" in
+  --preload) preload=true ;;
+  "") ;;
+  *) echo "Usage: omarchy-font-switcher [--preload]" >&2; exit 2 ;;
+esac
+
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/font-showcase"
+preview_dir="$cache_root/previews"
+signature_file="$cache_root/signature"
+mkdir -p "$preview_dir"
+
+if ! command -v magick >/dev/null 2>&1; then
+  echo "ImageMagick is required to render font previews (install imagemagick)." >&2
+  exit 1
+fi
+
+mapfile -t font_names < <(omarchy-font-list)
+if ((${#font_names[@]} == 0)); then
+  echo "No monospace fonts are available." >&2
+  exit 1
+fi
+
+signature=$'v1\n'
+for font_name in "${font_names[@]}"; do
+  [[ -n $font_name ]] || continue
+  font_file=$(fc-match -f '%{file}' "$font_name" 2>/dev/null || true)
+  if [[ -n $font_file && -f $font_file ]]; then
+    font_stat=$(stat -Lc '%s:%Y' "$font_file")
+    signature+="$font_name:$font_file:$font_stat"$'\n'
+  else
+    signature+="$font_name:missing"$'\n'
+  fi
+done
+
+exec {lock_fd}>"$cache_root/render.lock"
+flock "$lock_fd"
+
+if [[ ! -f $signature_file ]] || ! cmp -s "$signature_file" <(printf '%s' "$signature"); then
+  temp_dir=$(mktemp -d "$cache_root/.previews.XXXXXX")
+  trap 'rm -rf "$temp_dir"' EXIT
+
+  for font_name in "${font_names[@]}"; do
+    [[ -n $font_name ]] || continue
+    font_file=$(fc-match -f '%{file}' "$font_name" 2>/dev/null || true)
+    [[ -n $font_file && -f $font_file ]] || continue
+
+    # A restrained slate preview keeps the font samples readable while the
+    # existing image selector supplies filtering, labels, and current choice.
+    magick -size 1536x864 xc:'#111720' \
+      -fill '#8b9bb4' -font "$font_file" -pointsize 20 \
+      -annotate +72+78 'OMARCHY  /  FONT SHOWCASE' \
+      -fill '#73daca' -pointsize 18 \
+      -annotate +72+122 'CODE  •  PUNCTUATION  •  SYMBOLS' \
+      -fill '#f0f3f8' -pointsize 45 \
+      -annotate +72+218 "$font_name" \
+      -stroke '#334154' -strokewidth 2 -draw 'line 72,264 1464,264' -stroke none \
+      -fill '#8b9bb4' -pointsize 18 \
+      -annotate +72+322 'SAMPLE  /  JAVASCRIPT' \
+      -fill '#dce5f2' -pointsize 29 \
+      -annotate +72+386 'const ready = items.filter(item => item.active);' \
+      -annotate +72+436 'const count = ready.length >= 2 ? ready.length : 0;' \
+      -annotate +72+486 'return ready.map(item => ({ id: item.id, ok: true }));' \
+      -fill '#73daca' -pointsize 25 \
+      -annotate +72+582 '0123456789  Il1  {} [] ()  <>  =>  !=  ===  &&  ::' \
+      "$temp_dir/$font_name.png"
+
+    if [[ $font_name == *'Nerd Font'* ]]; then
+      magick "$temp_dir/$font_name.png" \
+        -fill '#e9b872' -font "$font_file" -pointsize 36 \
+        -annotate +72+690 $'\uf120  \uf121  \uf013  \uf1b2' \
+        "$temp_dir/$font_name.png.tmp.png"
+      mv -f "$temp_dir/$font_name.png.tmp.png" "$temp_dir/$font_name.png"
+    fi
+  done
+
+  if ! compgen -G "$temp_dir/*.png" >/dev/null; then
+    echo "Could not render any font previews." >&2
+    exit 1
+  fi
+
+  find "$preview_dir" -maxdepth 1 -type f -name '*.png' -delete
+  mv "$temp_dir"/*.png "$preview_dir/"
+  rmdir "$temp_dir"
+  trap - EXIT
+  printf '%s' "$signature" >"$signature_file.tmp"
+  mv -f "$signature_file.tmp" "$signature_file"
+fi
+
+exec {lock_fd}>&-
+
+current_font=$(omarchy-font-current 2>/dev/null || true)
+selected_image="$preview_dir/$current_font.png"
+[[ -f $selected_image ]] || selected_image=""
+
+menu_args=(--print-name --show-labels --filterable --lazy-thumbnails)
+[[ -n $selected_image ]] && menu_args+=(--selected "$selected_image")
+[[ $preload == true ]] && menu_args+=(--preload)
+exec omarchy-menu-images "${menu_args[@]}" "$preview_dir"

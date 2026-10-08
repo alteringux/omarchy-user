@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.agentglass",
+  "name": "Agentglass",
+  "version": "0.1.0",
+  "author": "AlteringUX",
+  "description": "Native Omarchy bar surface for every local coding-agent workflow",
+  "kinds": ["bar-widget"],
+  "entryPoints": {"barWidget": "BarWidget.qml"},
+  "barWidget": {
+    "displayName": "Agentglass",
+    "description": "All local agent workflows and the full cockpit",
+    "category": "Development",
+    "allowMultiple": false
+  }
+}

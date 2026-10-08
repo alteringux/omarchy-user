@@ -1,4 +1,5 @@
 import QtQuick
+import "../shared"
 import QtQuick.Layouts
 import Quickshell
 import qs.Commons
@@ -11,6 +12,7 @@ import "../alteringux.kit" as Kit
 // with the label, its live count-up elapsed time (amber once it passes that
 // label's typical run time), and a × to remove it permanently.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.timers"
   ipcTarget: ""
@@ -20,7 +22,7 @@ Panel {
 
   // "running long" tint — a warning amber, not urgent red. From Kit.Palette
   // now (the shell theme palette still has no dedicated warning role).
-  readonly property color longColor: Kit.Palette.warning
+  readonly property color longColor: _webPalette.statusColorFor("warning", _webPalette.cardBackgroundFor(root.barForeground))
 
   // How many card labels are being edited in place. While > 0 the panel
   // forwards keystrokes to the field (Esc to cancel especially). See
@@ -41,13 +43,29 @@ Panel {
   // re-evaluates while the panel is open.
   readonly property double nowMs: hostWidget ? hostWidget.nowMs : Date.now()
 
+  property int submittedGeneration: -1
+  property string submittedText: ""
+  readonly property bool submissionPending: hostWidget && hostWidget.actionPending && submittedGeneration === hostWidget.actionGeneration
+
+  Connections {
+    target: root.hostWidget
+    ignoreUnknownSignals: true
+    function onActionFeedback(message, generation, success) {
+      if (generation === root.submittedGeneration) {
+        if (success && addField.text === root.submittedText) addField.text = ""
+        root.submittedGeneration = -1
+      }
+      if (root.opened && feedbackText.visible) feedbackText.Accessible.announce(message)
+    }
+  }
+
   function submit() {
     guard.run("submit", function() {
-      if (!hostWidget) return
+      if (!hostWidget || root.submissionPending) return
       var text = addField.text
       if (!text || text.trim().length === 0) return
-      hostWidget.addEntry(text)
-      addField.text = ""
+      root.submittedText = text
+      root.submittedGeneration = hostWidget.addEntry(text)
       addField.forceActiveFocus()
     })
   }
@@ -62,7 +80,7 @@ Panel {
     }, "")
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -72,8 +90,15 @@ Panel {
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(520)))
     focusTarget: addField
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
+      recoveryPilot: true
+      recoveryPilotVerified: true
+      recoveryActivationBinding: true
+      shortcutSource: root.moduleName
+      additionalShortcutDescriptions: [{ keys: "Enter / Space",
+        description: "Start a timer from the current input", source: root.moduleName,
+        context: "Timers · shortcut focus" }]
       // While the input is focused, or a card label is being edited in place,
       // let every keystroke (space, x, hjkl, Esc) reach the field instead of
       // being intercepted as a panel shortcut.
@@ -98,6 +123,20 @@ Panel {
             foreground: root.barForeground
           }
 
+          Text {
+            id: feedbackText
+            width: parent.width
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            visible: text.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+          }
+
 // One bordered pill per remembered label (freq + recency ranked, from
   // the rolling completion log): tap the label to start a timer, tap its
   // × to forget just that label. The label text tail-elides with '…' so a
@@ -110,72 +149,19 @@ Panel {
 
     Repeater {
       model: root.chips
-      delegate: Rectangle {
-        id: chip
+      delegate: TimerHistoryChip {
+        id: historyChip
         required property var modelData
-        readonly property string fullText: modelData
-
-        width: chipRow.implicitWidth + Style.space(16)
-        height: chipRow.implicitHeight + Style.space(8)
-        radius: Style.cornerRadius
-        color: chipMouse.containsMouse ? Util.alpha(root.barForeground, 0.10) : "transparent"
-        border.width: 1
-        border.color: Util.alpha(root.barForeground, 0.25)
-
-        // Start a timer from the label. Sits below the × handler in the
-        // stack, so clicks on the × don't reach this.
-        MouseArea {
-          id: chipMouse
-          anchors.fill: parent
-          hoverEnabled: true
-          cursorShape: Qt.PointingHandCursor
-          onClicked: if (hostWidget) {
-            hostWidget.addEntry(modelData)
-            hostWidget.recordChipUse()
-          }
+        label: modelData
+        foreground: root.barForeground
+        accent: root._webPalette.accent
+        maxWidth: parent.width
+        maxTextWidth: Math.max(Style.space(56), Math.min(Style.space(180), parent.width - Style.space(64)))
+        onStartRequested: if (root.hostWidget) {
+          root.hostWidget.addEntry(historyChip.label)
+          root.hostWidget.recordChipUse()
         }
-
-        Row {
-          id: chipRow
-          anchors.centerIn: parent
-          spacing: Style.space(6)
-
-          Text {
-            text: chipMetrics.elidedText
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-            anchors.verticalCenter: parent.verticalCenter
-
-            TextMetrics {
-              id: chipMetrics
-              text: chip.fullText
-              font.family: Style.font.family
-              font.pixelSize: Style.font.body
-              elide: Qt.ElideRight
-              // panel width minus this pill's padding, the × and its gap
-              elideWidth: content.width - Style.space(48)
-            }
-          }
-
-          Text {
-            text: "×"
-            color: root.barForeground
-            opacity: forgetMouse.containsMouse ? 1 : 0.45
-            font.family: Style.font.family
-            font.pixelSize: Style.font.body
-            anchors.verticalCenter: parent.verticalCenter
-
-            MouseArea {
-              id: forgetMouse
-              anchors.fill: parent
-              anchors.margins: -4
-              hoverEnabled: true
-              cursorShape: Qt.PointingHandCursor
-              onClicked: if (hostWidget) hostWidget.forgetLabel(modelData)
-            }
-          }
-        }
+        onForgetRequested: if (root.hostWidget) root.hostWidget.forgetLabel(historyChip.label)
       }
     }
   }
@@ -191,12 +177,15 @@ Panel {
               foreground: root.barForeground
               onAccepted: root.submit()
             }
-            Button {
+            Kit.ActionButton {
               id: addButton
               text: "Add"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Add timer"
               foreground: root.barForeground
               bordered: true
-              enabled: addField.text.trim().length > 0
+              enabled: addField.text.trim().length > 0 && !root.submissionPending
               onClicked: root.submit()
             }
           }
@@ -227,10 +216,10 @@ Panel {
               height: cardCol.implicitHeight + Style.space(24)
               radius: Style.cornerRadius
               clip: true
-              color: Util.alpha(root.barForeground, 0.05)
+              color: _webPalette.cardBackgroundFor(root.barForeground)
               border.width: 1
               border.color: card.runningLong ? Util.alpha(root.longColor, 0.55)
-                                             : Util.alpha(root.barForeground, 0.14)
+                                             : _webPalette.cardBorderFor(root.barForeground)
 
               Column {
                 id: cardCol
@@ -256,22 +245,33 @@ Panel {
                 Text {
                   id: elapsedText
                   width: parent.width
+                  activeFocusOnTab: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: card.showCreatedAt
+                    ? "Show elapsed time for " + card.modelData.label
+                    : "Show creation time for " + card.modelData.label
+                  Accessible.onPressAction: activate()
                   wrapMode: Text.WordWrap
                   text: card.showCreatedAt
                     ? root.formatCreatedAt(card.modelData.createdAt)
                     : (Model.formatElapsed(card.elapsedMs) + (card.paused ? "  \u00b7  paused" : ""))
-                  color: card.showCreatedAt ? root.barForeground
-                    : card.paused ? Kit.Palette.faint
-                    : (card.runningLong ? root.longColor : Color.accent)
-                  opacity: card.showCreatedAt ? 0.8 : 1.0
+                  color: activeFocus ? _webPalette.accent : card.showCreatedAt ? root.barForeground
+                    : card.paused ? _webPalette.faint
+                    : (card.runningLong ? root.longColor : _webPalette.accent)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   font.bold: !card.showCreatedAt
+                  font.underline: activeFocus
+
+                  function activate() { card.showCreatedAt = !card.showCreatedAt }
+                  Keys.onReturnPressed: activate()
+                  Keys.onEnterPressed: activate()
+                  Keys.onSpacePressed: activate()
 
                   MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: card.showCreatedAt = !card.showCreatedAt
+                    onClicked: { elapsedText.forceActiveFocus(); elapsedText.activate() }
                   }
                 }
                 // Hint line — Kit.Palette.faint per docs/adr/0005 in the
@@ -283,8 +283,7 @@ Panel {
                   text: card.labelBaseline
                     ? ((card.runningLong ? "over its usual ~" : "usually ~") + Model.formatElapsed(card.labelBaseline.median))
                     : ""
-                  color: card.runningLong ? root.longColor : Kit.Palette.faint
-                  opacity: card.runningLong ? 0.9 : 1.0
+                  color: card.runningLong ? root.longColor : _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -298,29 +297,47 @@ Panel {
                 spacing: Style.space(6)
 
                 Text {
+                  id: pauseAction
                   text: card.paused ? "\u25b6" : "\u23f8"
-                  color: card.paused ? Color.accent : root.barForeground
-                  opacity: card.paused ? 1.0 : 0.5
+                  activeFocusOnTab: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: (card.paused ? "Resume " : "Pause ") + card.modelData.label
+                  Accessible.onPressAction: activate()
+                  color: activeFocus || card.paused ? _webPalette.accent : root.barForeground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
+                  font.underline: activeFocus
+                  function activate() { if (hostWidget) hostWidget.togglePauseEntry(card.modelData.id) }
+                  Keys.onReturnPressed: activate()
+                  Keys.onEnterPressed: activate()
+                  Keys.onSpacePressed: activate()
                   MouseArea {
                     anchors.fill: parent
                     anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: if (hostWidget) hostWidget.togglePauseEntry(card.modelData.id)
+                    onClicked: { pauseAction.forceActiveFocus(); pauseAction.activate() }
                   }
                 }
                 Text {
+                  id: removeAction
                   text: "\u00d7"
-                  color: root.barForeground
-                  opacity: 0.5
+                  activeFocusOnTab: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Remove timer " + card.modelData.label
+                  Accessible.onPressAction: activate()
+                  color: activeFocus ? _webPalette.accent : root.barForeground
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
+                  font.underline: activeFocus
+                  function activate() { if (hostWidget) hostWidget.removeEntry(card.modelData.id) }
+                  Keys.onReturnPressed: activate()
+                  Keys.onEnterPressed: activate()
+                  Keys.onSpacePressed: activate()
                   MouseArea {
                     anchors.fill: parent
                     anchors.margins: -6
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: if (hostWidget) hostWidget.removeEntry(card.modelData.id)
+                    onClicked: { removeAction.forceActiveFocus(); removeAction.activate() }
                   }
                 }
               }
@@ -333,7 +350,7 @@ Panel {
             visible: root.totalsText.length > 0
             width: content.width
             text: root.totalsText
-            color: Color.accent
+            color: _webPalette.accent
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.bold: true
@@ -342,8 +359,8 @@ Panel {
           PanelSeparator {}
 
           Text {
-            text: "Enter: add  ·  ⏸ pause/resume  ·  click a time for its start date  ·  Esc: close"
-            color: Kit.Palette.faint
+            text: "Enter: add  ·  󰏤 pause/resume  ·  click a time for its start date  ·  Esc: close"
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }

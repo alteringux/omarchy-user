@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Popup for alteringux.flow. Two tabs:
 //   OUTPUT  — the flow's latest envelopes drawn by shape (markdown / series /
@@ -17,6 +18,7 @@ import "../alteringux.kit" as Kit
 // All editing goes through hostWidget.* which mutates the parsed doc and lets
 // Kit.Store write it back in the on-disk shape (Model.serializeDoc).
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.flow"
   ipcTarget: ""
@@ -88,20 +90,20 @@ Panel {
     return root.guard.call("bulletHtml", function () {
       var esc = Model.escapeHtml
       var lead = b.lead
-        ? ("<b><font color=\"" + Color.accent + "\">" + esc(b.lead) + "</font></b>  ")
+        ? ("<b><font color=\"" + _webPalette.accent + "\">" + esc(b.lead) + "</font></b>  ")
         : ""
       var src = b.source
-        ? ("  <font color=\"" + Color.muted + "\">" + esc(b.source) + "</font>")
+        ? ("  <font color=\"" + _webPalette.muted + "\">" + esc(b.source) + "</font>")
         : ""
       return lead + esc(b.text) + src
     }, (b && b.text) || "")
   }
 
   function roleColor(role) {
-    if (role === "positive") return Kit.Palette.positive
-    if (role === "negative") return Kit.Palette.negative
-    if (role === "warning") return Kit.Palette.warning
-    return Kit.Palette.faint
+    if (role === "positive") return _webPalette.positive
+    if (role === "negative") return _webPalette.negative
+    if (role === "warning") return _webPalette.warning
+    return _webPalette.faint
   }
   function nodeRole(id) {
     var rn = root.runState && root.runState.nodes ? root.runState.nodes[id] : null
@@ -112,7 +114,20 @@ Panel {
     return rn && rn.error ? rn.error : ""
   }
 
-  KeyboardPanel {
+  function announceDocSaveStatus(message) {
+    if (root.opened && docSaveStatusText.visible && message)
+      docSaveStatusText.Accessible.announce(message)
+  }
+
+  Connections {
+    target: root.hostWidget
+    function onDocSaveStatusChanged() {
+      var message = root.hostWidget ? String(root.hostWidget.docSaveStatus || "") : ""
+      root.announceDocSaveStatus(message)
+    }
+  }
+
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -121,10 +136,13 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(600))
     contentHeight: panel.fittedContentHeight(Style.space(540))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: root.inlineEditors > 0 || bodyField.activeFocus
       onCloseRequested: root.close()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Return / Space", description: "Select the focused canvas node to edit it", context: "Flow canvas · control focus" }
+      ]
 
       Column {
         id: content
@@ -151,21 +169,30 @@ Panel {
             foreground: root.barForeground
             Layout.fillWidth: true
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Output"
             foreground: root.barForeground
             bordered: true
             enabled: root.tab !== "output"
             onClicked: root.tab = "output"
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Canvas"
             foreground: root.barForeground
             bordered: true
             enabled: root.tab !== "canvas"
             onClicked: root.tab = "canvas"
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "▶ Run"
             foreground: root.barForeground
             bordered: true
@@ -177,7 +204,7 @@ Panel {
           visible: !!root.runState.error
           width: content.width
           text: "last run: " + root.runState.error
-          color: Kit.Palette.negative
+          color: _webPalette.negative
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -189,9 +216,52 @@ Panel {
           visible: !root.runState.error && !!root.runState.finishedAt
           width: content.width
           text: "last run: " + root.runState.finishedAt
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
+        }
+
+        Column {
+          visible: !!(root.hostWidget && root.hostWidget.docSaveStatus)
+          width: content.width
+          spacing: Style.space(6)
+
+          Text {
+            id: docSaveStatusText
+            width: parent.width
+            text: root.hostWidget ? root.hostWidget.docSaveStatus : ""
+            color: text.indexOf("Could not") === 0 || text.indexOf("The flow file changed") === 0
+              ? _webPalette.negative
+              : (text === "Canvas edits saved." || text === "Canvas edits discarded."
+                ? _webPalette.positive : _webPalette.faint)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+            Accessible.role: Accessible.StaticText
+          }
+
+          Row {
+            visible: !!root.hostWidget && root.hostWidget.localDoc !== null
+            spacing: Style.space(6)
+            Kit.ActionButton {
+              text: "Retry save"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Retry saving flow canvas edits"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (root.hostWidget) root.hostWidget.retryDocSave()
+            }
+            Kit.ActionButton {
+              text: "Discard edits"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Discard unsaved flow canvas edits and reload the file"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (root.hostWidget) root.hostWidget.discardDocEdits()
+            }
+          }
         }
 
         // ================= OUTPUT =========================================
@@ -217,13 +287,19 @@ Panel {
                 spacing: Style.space(8)
                 visible: root.hasBriefText
 
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "▶ Speak brief"
                   foreground: root.barForeground
                   bordered: true
                   onClicked: root.speakBrief()
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "■ Stop"
                   foreground: root.barForeground
                   bordered: true
@@ -232,7 +308,7 @@ Panel {
                 Item { Layout.fillWidth: true }
                 Text {
                   text: root.focusSector ? ("focus: " + root.focusSector) : "focus: all sectors"
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -243,7 +319,10 @@ Panel {
                 spacing: Style.space(6)
                 visible: root.isBrief && root.sectorLabels.length > 0
 
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "★ All"
                   foreground: root.barForeground
                   bordered: true
@@ -252,7 +331,10 @@ Panel {
                 }
                 Repeater {
                   model: root.sectorLabels
-                  delegate: Button {
+                  delegate: Kit.ActionButton {
+                    focusable: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Focus sector " + modelData
                     required property var modelData
                     text: modelData + root.scoreSuffix(modelData)
                     foreground: root.barForeground
@@ -267,7 +349,7 @@ Panel {
                 width: parent.width
                 visible: root.isBrief && root.sectorLabels.length > 0
                 text: "Pick a sector to re-run the brief focused on it · ★ All restores every sector"
-                color: Qt.darker(root.barForeground, 1.4)
+                color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 wrapMode: Text.WordWrap
@@ -305,14 +387,14 @@ Panel {
                   : env.shape === "table" ? "warning"
                   : env.shape === "series" ? "positive"
                   : "accent"
-                readonly property color accentColor: Kit.Palette.toneColor(envCard.tone)
+                readonly property color accentColor: _webPalette.toneColor(envCard.tone)
                 width: outCol.width
                 height: card.implicitHeight + Style.space(20)
                 radius: Style.cornerRadius
                 clip: true
-                color: Kit.Palette.cardBg
+                color: _webPalette.cardBg
                 border.width: 1
-                border.color: Kit.Palette.cardBorder
+                border.color: _webPalette.cardBorder
 
                 // coloured spine so each card reads as its own block at a glance
                 Rectangle {
@@ -341,21 +423,17 @@ Panel {
                     pixelSize: Style.font.caption
                   }
 
-                  // Non-sectioned: every shape drawn as monospace text
-                  // (Model.renderEnvelopeText), same as `flow view` in a
-                  // terminal. Markdown/text wrap; series/table/log stay in a
-                  // fixed-pitch block.
-                  Text {
+                  // Non-sectioned: every shape uses the same rendered output
+                  // as `flow view`; prose wraps and fixed-pitch output stays
+                  // aligned until its complete source is read or hovered.
+                  FlowOutputText {
                     visible: !envCard.sectioned && !envCard.isTable
                     width: parent.width
-                    wrapMode: (env.shape === "markdown" || env.shape === "text") ? Text.WordWrap : Text.NoWrap
-                    textFormat: Text.PlainText
-                    text: envCard.rendered
-                    color: root.barForeground
-                    font.family: (env.shape === "markdown" || env.shape === "text")
-                      ? Style.font.family
-                      : "monospace"
-                    font.pixelSize: Style.font.bodySmall
+                    sourceText: envCard.rendered
+                    prose: env.shape === "markdown" || env.shape === "text"
+                    outputColor: root.barForeground
+                    outputFontFamily: prose ? Style.font.family : "monospace"
+                    outputFontSize: Style.font.bodySmall
                   }
 
                   // Tables (the "Sector mood" grid) get real cells so the
@@ -391,8 +469,8 @@ Panel {
                           && ["Today", "Δ prev", "7d avg"].indexOf(colName) >= 0
                         readonly property real n: numeric ? parseFloat(String(cell).replace("+", "")) : 0
                         text: (cell === undefined || cell === null) ? "" : String(cell)
-                        color: numeric ? Kit.Palette.signColor(n)
-                          : (col === 0 ? root.barForeground : Kit.Palette.faint)
+                        color: numeric ? _webPalette.signColor(n)
+                          : (col === 0 ? root.barForeground : _webPalette.faint)
                         font.family: (colName === "Trend") ? "monospace" : Style.font.family
                         font.pixelSize: Style.font.bodySmall
                         font.bold: col === 0 || (numeric && n !== 0)
@@ -401,7 +479,7 @@ Panel {
                   }
 
                   // Sectioned brief: per "## Sector" — an accent heading with a
-                  // 🔊 button + mood badge, a hairline rule, then styled bullets
+                  // Speaker button + mood badge, a hairline rule, then styled bullets
                   // (bold accent hook · detail · muted source). The leading
                   // dateline (heading "") is a small italic accent line.
                   Repeater {
@@ -421,7 +499,7 @@ Panel {
                         visible: !modelData.heading
                         width: parent.width
                         text: modelData.body.replace(/^_+|_+$/g, "").replace(/\*/g, "")
-                        color: Color.accent
+                        color: _webPalette.accent
                         font.family: Style.font.family
                         font.pixelSize: Style.font.caption
                         font.italic: true
@@ -434,8 +512,11 @@ Panel {
                         width: parent.width
                         spacing: Style.space(6)
                         visible: !!modelData.heading
-                        Button {
-                          text: "🔊"
+                        Kit.ActionButton {
+                          focusable: true
+                          Accessible.role: Accessible.Button
+                          Accessible.name: "Speak this text aloud"
+                          text: "󰕾"
                           foreground: root.barForeground
                           bordered: true
                           onClicked: root.speakText(modelData.speakText)
@@ -461,7 +542,7 @@ Panel {
                         visible: !!modelData.heading
                         width: parent.width
                         height: 1
-                        color: Kit.Palette.hairline
+                        color: _webPalette.hairline
                       }
 
                       // ---- bullets ---- (skip for the dateline section)
@@ -472,7 +553,7 @@ Panel {
                           width: card.width - Style.space(4)
                           styled: true
                           glyph: modelData.kind === "bullet" ? "▪" : ""
-                          foreground: modelData.kind === "note" ? Kit.Palette.faint : root.barForeground
+                          foreground: modelData.kind === "note" ? _webPalette.faint : root.barForeground
                           text: modelData.kind === "note"
                             ? ("<i>" + Kit.Str.escapeHtml(modelData.text) + "</i>")
                             : root.bulletHtml(modelData)
@@ -499,7 +580,10 @@ Panel {
             spacing: Style.space(6)
             Repeater {
               model: ["input", "tool", "transform", "prompt", "route", "reduce", "memory", "view"]
-              delegate: Button {
+              delegate: Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Add node: " + modelData
                 required property var modelData
                 text: "+ " + modelData
                 foreground: root.barForeground
@@ -543,7 +627,7 @@ Panel {
                   height: modelData.kind === "gate" ? 1 : 2
                   color: modelData.kind === "gate"
                     ? Util.alpha(root.barForeground, 0.3)
-                    : Util.alpha(Color.accent, 0.6)
+                    : Util.alpha(_webPalette.accent, 0.6)
                   transformOrigin: Item.TopLeft
                   rotation: Math.atan2(parent.by - parent.ay, parent.bx - parent.ax) * 180 / Math.PI
                 }
@@ -564,17 +648,28 @@ Panel {
                 height: Model.NODE_H
                 radius: Style.cornerRadius
                 color: root.selectedId === nd.id
-                  ? Util.alpha(Color.accent, 0.16)
+                  ? Util.alpha(_webPalette.accent, 0.16)
                   : Util.alpha(root.barForeground, 0.08)
-                border.width: root.selectedId === nd.id ? 2 : 1
-                border.color: root.roleColor(nodeRect.role)
+                border.width: root.selectedId === nd.id || activeFocus ? 2 : 1
+                border.color: activeFocus ? _webPalette.accent : root.roleColor(nodeRect.role)
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: (nd.label || nd.id) + ", " + nd.type + " node"
+                Accessible.description: root.nodeError(nd.id).length
+                  ? "Select to edit. Error: " + root.nodeError(nd.id) + ". Drag to reposition."
+                  : "Select to edit. Drag to reposition."
+                Accessible.focusable: true
+                Accessible.onPressAction: root.selectedId = nodeRect.nd.id
+                Keys.onReturnPressed: { root.selectedId = nodeRect.nd.id; event.accepted = true }
+                Keys.onEnterPressed: { root.selectedId = nodeRect.nd.id; event.accepted = true }
+                Keys.onSpacePressed: { root.selectedId = nodeRect.nd.id; event.accepted = true }
 
                 MouseArea {
                   anchors.fill: parent
                   drag.target: nodeRect
                   drag.threshold: 4
                   cursorShape: Qt.OpenHandCursor
-                  onClicked: root.selectedId = nodeRect.nd.id
+                  onClicked: { nodeRect.forceActiveFocus(); root.selectedId = nodeRect.nd.id }
                   onReleased: {
                     if (root.hostWidget && (nodeRect.x !== nodeRect.nd.x || nodeRect.y !== nodeRect.nd.y))
                       root.hostWidget.moveNode(nodeRect.nd.id, nodeRect.x, nodeRect.y)
@@ -599,18 +694,19 @@ Panel {
                   }
                   Text {
                     text: nodeRect.nd.type + (nodeRect.nd.agent ? " · agent" : "")
-                    color: Kit.Palette.faint
+                    color: _webPalette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                   }
-                  Text {
+                  MarqueeText {
                     width: parent.width
-                    elide: Text.ElideRight
+                    focusableOnOverflow: false
+                    requestedElide: Text.ElideRight
                     visible: root.nodeError(nodeRect.nd.id).length > 0
                     text: root.nodeError(nodeRect.nd.id)
-                    color: Kit.Palette.negative
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
+                    color: _webPalette.negative
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.caption
                   }
                 }
               }
@@ -624,9 +720,9 @@ Panel {
             visible: !!root.selectedNode
             height: visible ? editCol.implicitHeight + Style.space(20) : 0
             radius: Style.cornerRadius
-            color: Util.alpha(root.barForeground, 0.05)
+            color: _webPalette.cardBackgroundFor(root.barForeground)
             border.width: 1
-            border.color: Util.alpha(root.barForeground, 0.14)
+            border.color: _webPalette.cardBorderFor(root.barForeground)
 
             Column {
               id: editCol
@@ -649,13 +745,16 @@ Panel {
                 spacing: Style.space(8)
                 Text {
                   text: (root.selectedNode ? root.selectedNode.id : "") + "  —  " + editCol.fieldKey
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   font.bold: true
                   Layout.fillWidth: true
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "agent"
                   foreground: root.barForeground
                   bordered: true
@@ -663,7 +762,10 @@ Panel {
                   onClicked: if (root.hostWidget && root.selectedNode)
                     root.hostWidget.setNodeField(root.selectedNode.id, "agent", !root.selectedNode.agent)
                 }
-                Button {
+                Kit.ActionButton {
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: text
                   text: "✕ delete"
                   foreground: root.barForeground
                   bordered: true
@@ -688,7 +790,7 @@ Panel {
               Text {
                 width: parent.width
                 text: "Enter to save this field · drag a node to move (snaps + saves) · click a label to rename"
-                color: Qt.darker(root.barForeground, 1.4)
+                color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }

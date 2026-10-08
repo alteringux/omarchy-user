@@ -212,10 +212,9 @@ BarWidget {
   }
 
   // The CLI owns $XDG_RUNTIME_DIR/omarchy-stopwatch/state: it creates it on
-  // start, rm's it on cancel, recreates it on the next start. watch + a 2 s
-  // idle poll (only while we think nothing's running — FileView's inode watch
-  // is dead against the recreated file) tracks all of that. parse() returns
-  // null for "no state", which applyState() reads as idle.
+  // start, rm's it on cancel, recreates it on the next start. A 60 s Store
+  // poll backs up the inode watch. parse() returns null for "no state", which
+  // applyState() reads as idle.
   Kit.Store {
     id: stateStore
     dir: root.runtimeDir + "/omarchy-stopwatch/"

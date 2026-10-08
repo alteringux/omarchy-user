@@ -2,10 +2,10 @@
 # omarchy-reframe -- SUPER+SHIFT+ALT+N
 #
 # Grab the highlighted text (primary selection, else clipboard), send it to an
-# uncensored Featherless model for a short bulleted explanation: what it says,
+# uncensored NanoGPT model for a short bulleted explanation: what it says,
 # the main idea, how it works, why it matters, its limits, something it is like,
 # plus "seen differently" reframes, then speak the whole thing aloud with Piper
-# TTS. The selection leaves the machine (Featherless); only the TTS is local.
+# TTS. The selection leaves the machine (NanoGPT); only the TTS is local.
 #
 # For accuracy the passage's topic is first looked up on the local SearXNG
 # (127.0.0.1:8080, the searxng.service user unit) and the top snippets are
@@ -23,7 +23,7 @@
 set -uo pipefail
 
 # Model fallback chain, tried in order until one returns a non-empty completion.
-# The abliterated (uncensored) models are low-traffic on Featherless and cold-503
+# The abliterated (uncensored) models are low-traffic on NanoGPT and cold-503
 # ("temporarily at capacity") when nothing keeps them warm -- llm-blurb now
 # retries that on the SAME model (a few seconds, usually enough), and only if it
 # still fails do we switch. Keep the chain SHORT: the plan caps model switching
@@ -131,7 +131,7 @@ if [[ "$AGENT" != 0 ]]; then
   [[ -n "${OUT// }" ]] || { note "Reframe (agent) failed." "${ERR:-all models unavailable}"; exit 1; }
 else
   # Walk the chain. Accept the first answer that looks complete (>= 6 bullet
-  # lines -- Featherless sometimes ends a stream early under load); otherwise
+  # lines -- NanoGPT sometimes ends a stream early under load); otherwise
   # keep the first non-empty answer as a fallback and try the next model.
   BEST=""
   for m in "${MODELS[@]}"; do
@@ -148,7 +148,7 @@ else
     OUT=""
   done
   [[ -n "${OUT// }" ]] || OUT="$BEST"
-  [[ -n "${OUT// }" ]] || { note "Featherless request failed." "${ERR:-all models unavailable}"; exit 1; }
+  [[ -n "${OUT// }" ]] || { note "NanoGPT request failed." "${ERR:-all models unavailable}"; exit 1; }
 fi
 
 # Drop any <think>…</think> reasoning block a thinking-variant override might emit.

@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import "../alteringux.kit" as Kit
 
 // Single-line label that plays a vertical "split-flap" slide + crossfade
 // whenever `text` changes: the outgoing line lifts up and fades while the
@@ -14,10 +15,11 @@ import qs.Commons
 // Quickshell's QML compiler, which disallows outer-id access from inline
 // components.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string text: ""
-  property color color: Color.foreground
+  property color color: _webPalette.foreground
   property string fontFamily: Style.font.family
   property int fontSize: Style.font.body
   property int slideDuration: 340

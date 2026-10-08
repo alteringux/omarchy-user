@@ -7,12 +7,14 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Sports dashboard popup: sport picker pills, then one of six bodies —
 // Live, Upcoming, Results, Players, Standings, Predict — plus an Ask AI row
 // and the local-shortcuts hint row (ADR 0001). Data comes from the watched
 // state file; predictions and AI answers shell out through bin/.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.sports"
   ipcTarget: ""
@@ -35,10 +37,18 @@ Panel {
   readonly property var teamMap: state.teams || {}
   readonly property var standingsMap: state.standings || {}
 
+  function displayDataTime(value) {
+    var timestamp = Date.parse(value || "")
+    return isFinite(timestamp) ? Qt.formatDateTime(new Date(timestamp), "hh:mm") : "time unavailable"
+  }
+
   property var selectedMatch: null
   property var matchDetails: null
   property bool loadingDetails: false
   property string detailsError: ""
+  property string detailsStatus: ""
+  property string detailsOutput: ""
+  property string detailsStderr: ""
   readonly property var configuredSports: hostWidget ? ((hostWidget.config && hostWidget.config.activeSports) || []) : []
 
   // ---- sport filter ---------------------------------------------------
@@ -83,21 +93,50 @@ Panel {
   property bool predicting: false
   property string predictHome: ""
   property string predictAway: ""
+  property string predictionError: ""
+  property string predictionStatus: ""
+  property string predictionOutput: ""
+  property string predictionStderr: ""
 
   // ---- AI row -----------------------------------------------------------
   property string aiAnswer: ""
+  property string aiError: ""
+  property string aiStatus: ""
+  property string aiOutput: ""
+  property string aiStderr: ""
   property bool aiBusy: false
+
+  function processError(label, code, stderr) {
+    var detail = String(stderr || "").trim().split(/\r?\n/)[0].slice(0, 180)
+    return label + " failed: " + (detail || ("process exited with code " + code))
+  }
+
+  function announceAsyncStatus(target, message) {
+    if (!root.opened || !message) return
+    Qt.callLater(function() {
+      if (root.opened && target && target.visible) target.Accessible.announce(message)
+    })
+  }
 
   Process {
     id: predictProc
     running: false
-    stdout: StdioCollector {
-      onStreamFinished: {
-        root.predicting = false
-        root.prediction = Model.parsePrediction(this.text)
+    stdout: StdioCollector { onStreamFinished: root.predictionOutput = this.text }
+    stderr: StdioCollector { onStreamFinished: root.predictionStderr = this.text }
+    onExited: function (code) {
+      root.predicting = false
+      if (code !== 0) {
+        root.prediction = null
+        root.predictionError = root.processError("Prediction", code, root.predictionStderr)
+      } else {
+        root.prediction = Model.parsePrediction(root.predictionOutput)
+        root.predictionError = root.prediction
+          ? ""
+          : (root.predictionOutput.trim() ? "Could not read prediction output." : "No prediction was returned.")
       }
+      root.predictionStatus = root.predictionError || (root.prediction ? "Prediction ready." : "No prediction was returned.")
+      root.announceAsyncStatus(predictionFeedbackText, root.predictionStatus)
     }
-    stderr: StdioCollector { }
   }
 
   function runPrediction(homeTeam, awayTeam) {
@@ -106,6 +145,11 @@ Panel {
     root.predictAway = awayTeam
     root.predicting = true
     root.prediction = null
+    root.predictionError = ""
+    root.predictionStatus = "Generating prediction…"
+    root.predictionOutput = ""
+    root.predictionStderr = ""
+    root.announceAsyncStatus(predictionFeedbackText, root.predictionStatus)
     predictProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-sports-predict",
                            "--sport", root.selectedSport === "All" ? (firstAvailableSport() || "") : root.selectedSport,
                            "--home", homeTeam, "--away", awayTeam,
@@ -123,20 +167,30 @@ Panel {
   Process {
     id: detailsProc
     running: false
-    stdout: StdioCollector {
-      onStreamFinished: {
-        root.loadingDetails = false
-        try {
-          var payload = JSON.parse(this.text)
-          root.matchDetails = payload
-          root.detailsError = payload.error || ""
-        } catch (e) {
-          root.matchDetails = null
-          root.detailsError = "Could not read match details"
-        }
+    stdout: StdioCollector { onStreamFinished: root.detailsOutput = this.text }
+    stderr: StdioCollector { onStreamFinished: root.detailsStderr = this.text }
+    onExited: function (code) {
+      root.loadingDetails = false
+      if (code !== 0) {
+        root.matchDetails = null
+        root.detailsError = root.processError("Match details", code, root.detailsStderr)
+        root.detailsStatus = root.detailsError
+        root.announceAsyncStatus(detailsFeedbackText, root.detailsStatus)
+        return
       }
+      try {
+        var payload = JSON.parse(root.detailsOutput)
+        root.matchDetails = payload
+        root.detailsError = payload.error || (Object.keys(payload).length ? "" : "No match details were returned.")
+      } catch (e) {
+        root.matchDetails = null
+        root.detailsError = root.detailsOutput.trim()
+          ? "Could not read match details"
+          : "No match details were returned."
+      }
+      root.detailsStatus = root.detailsError || "Match details loaded."
+      root.announceAsyncStatus(detailsFeedbackText, root.detailsStatus)
     }
-    stderr: StdioCollector { }
   }
 
   function openMatchDetails(match) {
@@ -144,8 +198,12 @@ Panel {
     root.selectedMatch = match
     root.matchDetails = null
     root.detailsError = ""
+    root.detailsStatus = "Loading match details…"
+    root.detailsOutput = ""
+    root.detailsStderr = ""
     root.loadingDetails = true
     root.activeTab = "Details"
+    root.announceAsyncStatus(detailsFeedbackText, root.detailsStatus)
     detailsProc.command = ["bash", hostWidget.pluginDir + "/bin/omarchy-sports-event",
                            "--id", String(match.id)]
     detailsProc.running = true
@@ -155,25 +213,39 @@ Panel {
     root.selectedMatch = null
     root.matchDetails = null
     root.detailsError = ""
+    root.detailsStatus = ""
     if (root.activeTab === "Details") root.activeTab = "Results"
   }
 
   Process {
     id: aiProc
     running: false
-    stdout: StdioCollector {
-      onStreamFinished: {
-        root.aiBusy = false
-        root.aiAnswer = this.text.trim()
+    stdout: StdioCollector { onStreamFinished: root.aiOutput = this.text }
+    stderr: StdioCollector { onStreamFinished: root.aiStderr = this.text }
+    onExited: function (code) {
+      root.aiBusy = false
+      if (code !== 0) {
+        root.aiAnswer = ""
+        root.aiError = root.processError("Analyst request", code, root.aiStderr)
+      } else {
+        root.aiError = ""
+        root.aiAnswer = root.aiOutput.trim() || "No answer was returned."
       }
+      root.aiStatus = root.aiError || (root.aiAnswer === "No answer was returned."
+        ? root.aiAnswer : "Analyst response received.")
+      root.announceAsyncStatus(aiFeedbackText, root.aiStatus)
     }
-    stderr: StdioCollector { }
   }
 
   function askAi(question) {
     if (!question || !hostWidget) return
     root.aiBusy = true
     root.aiAnswer = ""
+    root.aiError = ""
+    root.aiStatus = "Asking the analyst…"
+    root.aiOutput = ""
+    root.aiStderr = ""
+    root.announceAsyncStatus(aiFeedbackText, root.aiStatus)
     var argv = ["bash", hostWidget.pluginDir + "/bin/omarchy-sports-ai",
                 "--state", Quickshell.env("HOME") + "/.local/state/omarchy/sports.json"]
     if (root.selectedSport !== "All") argv.push("--sport", root.selectedSport)
@@ -186,6 +258,11 @@ Panel {
     var clean = String(url || "").trim()
     if (/^https?:\/\//i.test(clean))
       Quickshell.execDetached(["xdg-open", clean])
+  }
+
+  function clearPlayerSearch() {
+    root.playerFilter = ""
+    searchInput.text = ""
   }
 
   // ---- searchable player list ------------------------------------------
@@ -219,14 +296,14 @@ Panel {
     return team && /^https?:\/\//i.test(String(team.badge || "")) ? team.badge : ""
   }
   // ---- panel chrome ------------------------------------------------------
-  readonly property color fg: root.bar ? root.bar.barForeground : Color.foreground
+  readonly property color fg: root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.foreground
 
   function openRosterTeam(teamName) {
     root.playerFilter = teamName || ""
     root.activeTab = "Players"
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -235,11 +312,14 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(680))
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(620)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
 
       onCloseRequested: root.close()
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh sports results", context: "Sports · shortcut focus" }
+      ]
 
 
       }
@@ -256,11 +336,27 @@ Panel {
         Kit.PanelHead {
           glyph: "󰜺"
           title: "Sports"
-          meta: root.refreshing ? "refreshing…" : (root.liveMatches.length ? root.liveMatches.length + " LIVE NOW" : "no live matches")
+          meta: {
+            var health = root.state.refreshHealth || {}
+            if (health.usedCachedMatches || health.usedCachedArticles) {
+              var cached = []
+              if (health.usedCachedMatches)
+                cached.push("matches " + root.displayDataTime(root.state.matchDataUpdatedAt || root.state.updatedAt))
+              if (health.usedCachedArticles)
+                cached.push("articles " + root.displayDataTime(root.state.articleDataUpdatedAt || root.state.updatedAt))
+              return "showing cached " + cached.join(" · ")
+            }
+            if (root.refreshing) return "refreshing…"
+            return (root.liveMatches.length ? root.liveMatches.length + " LIVE NOW" : "no live matches")
+              + (root.state.updatedAt ? " · updated " + root.displayDataTime(root.state.updatedAt) : "")
+          }
           foreground: root.fg
           trailingControl: Component {
-            Button {
+            Kit.ActionButton {
               text: "Refresh"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Refresh sports data"
               foreground: root.fg
               bordered: true
               onClicked: if (hostWidget) hostWidget.runRefresh()
@@ -274,11 +370,16 @@ Panel {
 
           Repeater {
             model: root.sportOptions
-            delegate: Button {
+            delegate: Kit.ActionButton {
               required property string modelData
-              text: modelData === "All" ? "🏆 All" : (Model.sportEmoji(modelData) + " " + Model.sportLabel(modelData))
+              text: Model.sportGlyph(modelData) + " " + (modelData === "All" ? "All" : Model.sportLabel(modelData))
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: modelData === "All" ? "All sports" : Model.sportLabel(modelData)
               bordered: true
-              foreground: root.selectedSport === modelData ? Model.sportColor(modelData) : root.fg
+              foreground: root.selectedSport === modelData
+                ? _webPalette.contrastColorFor(Model.sportColor(modelData), _webPalette.barBackground)
+                : root.fg
               onClicked: root.selectedSport = modelData
             }
           }
@@ -290,11 +391,14 @@ Panel {
 
           Repeater {
             model: root.tabs
-            delegate: Button {
+            delegate: Kit.ActionButton {
               required property string modelData
               text: modelData
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: modelData + " tab"
               bordered: false
-              foreground: root.activeTab === modelData ? Color.accent : root.fg
+              foreground: root.activeTab === modelData ? _webPalette.accent : root.fg
               onClicked: root.activeTab = modelData
             }
           }
@@ -327,7 +431,7 @@ Panel {
                 isLive: true
                 favouriteNames: root.favouriteNames
                 barForeground: root.fg
-                accentColor: Model.sportColor(modelData.sport)
+                accentColor: _webPalette.contrastColorFor(Model.sportColor(modelData.sport), Color.popups.background)
                 onOpenRequested: root.openArticle(url)
                 onDetailsRequested: root.openMatchDetails(match)
               }
@@ -368,7 +472,7 @@ Panel {
                 onOpenRequested: root.openArticle(url)
                 onDetailsRequested: root.openMatchDetails(match)
                 barForeground: root.fg
-                accentColor: Model.sportColor(modelData.sport)
+                accentColor: _webPalette.contrastColorFor(Model.sportColor(modelData.sport), Color.popups.background)
               }
             }
           }
@@ -406,7 +510,7 @@ Panel {
                 isResult: true
                 favouriteNames: root.favouriteNames
                 barForeground: root.fg
-                accentColor: Model.sportColor(modelData.sport)
+                accentColor: _webPalette.contrastColorFor(Model.sportColor(modelData.sport), Color.popups.background)
                 onOpenRequested: root.openArticle(url)
                 onDetailsRequested: root.openMatchDetails(match)
               }
@@ -433,17 +537,21 @@ Panel {
             details: root.matchDetails
             loading: root.loadingDetails
             barForeground: root.fg
-            accentColor: Model.sportColor((root.selectedMatch || {}).sport)
+            accentColor: _webPalette.contrastColorFor(Model.sportColor((root.selectedMatch || {}).sport), Color.popups.background)
             onOpenRequested: root.openArticle(url)
             onCloseRequested: root.closeMatchDetails()
           }
 
           Text {
-            visible: !!root.detailsError
-            text: root.detailsError
-            color: Kit.Palette.negative
+            id: detailsFeedbackText
+            visible: !!root.detailsStatus
+            text: root.detailsStatus
+            Accessible.role: Accessible.StaticText
+            width: parent.width
+            color: root.detailsError ? _webPalette.negative : _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
         }
 
@@ -454,9 +562,8 @@ Panel {
           visible: root.activeTab === "Articles"
 
           Text {
-            text: "📰  Latest stories from your configured sport feeds"
+            text: "󰎕  Latest stories from your configured sport feeds"
             color: root.fg
-            opacity: 0.7
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -503,9 +610,8 @@ Panel {
               spacing: Style.space(6)
 
               Text {
-                text: "🔍"
+                text: "󰍉"
                 color: root.fg
-                opacity: 0.6
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
                 anchors.verticalCenter: parent.verticalCenter
@@ -523,8 +629,7 @@ Panel {
                 Text {
                   visible: searchInput.text === ""
                   text: "search players, positions, teams…"
-                  color: root.fg
-                  opacity: 0.4
+                  color: _webPalette.muted
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   anchors.verticalCenter: parent.verticalCenter
@@ -533,8 +638,7 @@ Panel {
               Text {
                 id: hintText
                 text: root.filteredPlayerRows.length + " players"
-                color: root.fg
-                opacity: 0.4
+                color: _webPalette.muted
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 anchors.verticalCenter: parent.verticalCenter
@@ -543,16 +647,26 @@ Panel {
                 id: searchClear
                 visible: root.playerFilter !== ""
                 text: "✕"
-                color: root.fg
-                opacity: 0.7
+                Accessible.role: Accessible.Button
+                Accessible.name: "Clear player search"
+                Accessible.onPressAction: root.clearPlayerSearch()
+                color: activeFocus ? _webPalette.accent : root.fg
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
+                font.underline: activeFocus
+                activeFocusOnTab: true
                 anchors.verticalCenter: parent.verticalCenter
+
+                Keys.onReturnPressed: root.clearPlayerSearch()
+                Keys.onSpacePressed: root.clearPlayerSearch()
 
                 MouseArea {
                   anchors.fill: parent
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: { root.playerFilter = ""; searchInput.text = "" }
+                  onClicked: {
+                    parent.forceActiveFocus()
+                    root.clearPlayerSearch()
+                  }
                 }
               }
             }
@@ -563,7 +677,7 @@ Panel {
             text: "No rosters yet. Add favourite teams (with idTeam) to sports-config.json, then Refresh — their squads load into this tab."
             width: parent.width
             wrapMode: Text.WordWrap
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -575,7 +689,8 @@ Panel {
               width: parent.width
               player: modelData
               barForeground: root.fg
-              accentColor: root.selectedSport === "All" ? Color.accent : Model.sportColor(root.selectedSport)
+              accentColor: root.selectedSport === "All" ? _webPalette.accent
+                : _webPalette.contrastColorFor(Model.sportColor(root.selectedSport), Color.popups.background)
             }
           }
         }
@@ -593,7 +708,7 @@ Panel {
               : "No standings cached for " + root.selectedSport + " yet — tableSports in sports-config.json controls which sports fetch tables."
             width: parent.width
             wrapMode: Text.WordWrap
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -610,24 +725,22 @@ Panel {
                 width: Style.space(18)
                 horizontalAlignment: Text.AlignRight
                 color: root.fg
-                opacity: 0.5
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
-              Text {
+              MarqueeText {
                 text: modelData.team || ""
                 width: parent.width - parent.spacing * 5 - Style.space(18) - ptsText.width - formText.width - playedText.width
-                elide: Text.ElideRight
+                requestedElide: Text.ElideRight
                 color: root.fg
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-                font.bold: parseInt(modelData.rank, 10) <= 4
+                textFont.family: Style.font.family
+                textFont.pixelSize: Style.font.bodySmall
+                textFont.bold: parseInt(modelData.rank, 10) <= 4
               }
               Text {
                 id: playedText
                 text: (modelData.played || "") + "P"
                 color: root.fg
-                opacity: 0.45
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -635,7 +748,6 @@ Panel {
                 id: formText
                 text: modelData.form || ""
                 color: root.fg
-                opacity: 0.6
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -661,7 +773,7 @@ Panel {
             text: "Compare two sides' form, head-to-head record, home advantage and league position. The predictor reads the matches already cached on this machine."
             width: parent.width
             wrapMode: Text.WordWrap
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -686,12 +798,27 @@ Panel {
             }
           }
 
-          Button {
+          Kit.ActionButton {
             text: root.predicting ? "Predicting…" : "Run prediction"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: root.predicting ? "Prediction in progress" : "Run match prediction"
             enabled: !root.predicting && root.predictHome !== "" && root.predictAway !== ""
             foreground: root.fg
             bordered: true
             onClicked: root.runPrediction(root.predictHome, root.predictAway)
+          }
+
+          Text {
+            id: predictionFeedbackText
+            visible: !!root.predictionStatus
+            text: root.predictionStatus
+            Accessible.role: Accessible.StaticText
+            width: parent.width
+            wrapMode: Text.WordWrap
+            color: root.predictionError ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
           }
 
           PredictionCard {
@@ -699,7 +826,8 @@ Panel {
             width: parent.width
             prediction: root.prediction
             barForeground: root.fg
-            accentColor: root.selectedSport === "All" ? Color.accent : Model.sportColor(root.selectedSport)
+            accentColor: root.selectedSport === "All" ? _webPalette.accent
+              : _webPalette.contrastColorFor(Model.sportColor(root.selectedSport), Color.popups.background)
           }
         }
 
@@ -712,7 +840,7 @@ Panel {
 
           Text {
             text: "ASK THE ANALYST"
-            color: Qt.darker(root.fg, 1.4)
+            color: _webPalette.contrastColorFor(Qt.darker(root.fg, 1.4), _webPalette.barBackground)
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             font.bold: true
@@ -746,7 +874,6 @@ Panel {
                   visible: aiInput.text === ""
                   text: "e.g. how did the favourites do today?"
                   color: root.fg
-                  opacity: 0.4
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   anchors.verticalCenter: parent.verticalCenter
@@ -754,9 +881,12 @@ Panel {
               }
             }
 
-            Button {
+            Kit.ActionButton {
               id: aiButton
               text: root.aiBusy ? "…" : "Ask"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: root.aiBusy ? "Analyst response in progress" : "Ask the sports analyst"
               enabled: !root.aiBusy
               foreground: root.fg
               bordered: true
@@ -765,11 +895,13 @@ Panel {
           }
 
           Text {
-            visible: root.aiAnswer !== ""
-            text: root.aiAnswer
+            id: aiFeedbackText
+            visible: root.aiStatus !== "" || root.aiAnswer !== "" || root.aiError !== ""
+            text: root.aiError || root.aiAnswer || root.aiStatus
+            Accessible.role: Accessible.StaticText
             width: parent.width
             wrapMode: Text.WordWrap
-            color: root.fg
+            color: root.aiError ? _webPalette.negative : root.fg
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -779,7 +911,7 @@ Panel {
 
         Text {
           text: "Enter: refresh now  ·  Esc: close"
-          color: Qt.darker(root.fg, 1.4)
+          color: _webPalette.contrastColorFor(Qt.darker(root.fg, 1.4), _webPalette.barBackground)
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

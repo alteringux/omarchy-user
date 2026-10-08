@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import "." as Kit
 import qs.Commons
 
 // Kit.Bullet — one row of a prose list: a glyph in the margin + a wrapping
@@ -11,13 +12,14 @@ import qs.Commons
 //   Kit.Bullet { styled: true; text: "<b>Hook:</b> detail" }   // caller escapes
 //                                                                // via Kit.Str
 RowLayout {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string text: ""
   property string glyph: "▪"
   property bool styled: false
-  property color foreground: Color.foreground
-  property color glyphColor: Color.accent
+  property color foreground: _webPalette.foreground
+  property color glyphColor: _webPalette.accent
   property real pixelSize: Style.font.bodySmall
 
   width: parent ? parent.width : implicitWidth

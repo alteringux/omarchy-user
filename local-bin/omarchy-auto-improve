@@ -78,6 +78,12 @@ run_plugin() {
   local summary_file="$STATE_DIR/summary-$id"
   rm -f "$summary_file"
 
+  local target="plugins/$id"
+  if [[ -n "$(status_snapshot)" ]]; then
+    log "[$id] skipped (existing local changes under plugins/)"
+    return 0
+  fi
+
   local before
   before="$(status_snapshot)"
 
@@ -101,15 +107,27 @@ Write your one-line summary to $summary_file as instructed." \
   after="$(status_snapshot)"
   delta="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") || true)"
 
+  if [[ -z "$delta" ]]; then
+    log "[$id] no file changes"
+    return 0
+  fi
+
+  if (( rc != 0 )); then
+    log "[$id] agent failed; reverting its changes"
+    local failed_paths=()
+    local failed_line
+    while IFS= read -r failed_line; do
+      failed_paths+=("${failed_line:3}")
+    done <<<"$delta"
+    revert_paths "${failed_paths[@]}"
+    return 0
+  fi
+
   local summary=""
   if [[ -f "$summary_file" ]]; then
     summary="$(head -n1 "$summary_file" | tr -d '\r' | sed 's/^- *//' | cut -c1-120)"
   fi
 
-  if [[ -z "$delta" ]]; then
-    log "[$id] no file changes; summary: ${summary:-none}"
-    return 0
-  fi
 
   [[ -n "$summary" ]] || summary="improved (no agent summary)"
 
@@ -118,6 +136,16 @@ Write your one-line summary to $summary_file as instructed." \
   while IFS= read -r line; do
     paths+=("${line:3}")
   done <<<"$delta"
+
+  local bad=0 p
+  for p in "${paths[@]}"; do
+    [[ "$p" == "$target/"* ]] || bad=1
+  done
+  if (( bad )); then
+    log "[$id] agent touched files outside scope; reverting"
+    revert_paths "${paths[@]}"
+    return 0
+  fi
 
   log "[$id] committing ${#paths[@]} changed path(s): ${paths[*]}"
   if git -C "$REPO" add -- "${paths[@]}" \
@@ -176,6 +204,10 @@ shell_smoke_errors() {
 run_rice_pass() {
   if (( SKIP_RICE )); then
     log "[rice] skipped (--skip-rice)"
+    return 0
+  fi
+  if [[ -n "$(status_snapshot)" ]]; then
+    log "[rice] skipped (existing local changes under plugins/)"
     return 0
   fi
   [[ -f "$RICE_PROMPT_FILE" ]] || { log "[rice] prompt file missing: $RICE_PROMPT_FILE; skipping"; return 0; }

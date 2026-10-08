@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Open the Wordstep reader with the current Wayland text selection.
+set -uo pipefail
+
+selection=$(wl-paste --primary --type text --no-newline 2>/dev/null || true)
+if [[ -z "${selection//[[:space:]]/}" ]]; then
+  notify-send "Wordstep" "No active text selection found. In a terminal, drag-select the text first, then use the shortcut. Wordstep will not reuse old clipboard text." 2>/dev/null || true
+  exit 0
+fi
+
+payload=$(jq -n --arg text "$selection" '{text: $text}')
+omarchy shell shell summon alteringux.wordstep "$payload"

@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The intrusion surface. One window, three shapes, chosen by the daemon:
 //   lesson    — the whole screen, a short paginated technique lesson, no
@@ -18,6 +19,7 @@ import "../alteringux.kit" as Kit
 // button into an omarchy-recall verb via the host. It never writes state
 // itself.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -76,11 +78,13 @@ Item {
 
   // ---- multiple-choice clue, for when you need a nudge before Reveal ----
   property bool clueLoading: false
+  property string clueError: ""
   property var clueOptions: []
   readonly property bool clueShown: root.clueOptions.length > 0
 
   function requestClue() {
     if (!root.hostWidget || !root.reviewCard || root.clueLoading || root.clueShown) return
+    root.clueError = ""
     root.clueLoading = true
     root.hostWidget.fetchChoices(root.reviewCard.id)
   }
@@ -94,6 +98,10 @@ Item {
       if (root.hostWidget.lastChoicesForId !== root.reviewCard.id) return
       root.clueOptions = root.hostWidget.lastChoices
       root.clueLoading = false
+    }
+    function onChoicesFeedback(message) {
+      root.clueLoading = false
+      root.clueError = message
     }
   }
 
@@ -162,11 +170,11 @@ Item {
           : Math.min(parent.width - Style.space(60), Style.space(460))
         height: Math.min(parent.height - Style.space(60), cardCol.implicitHeight + Style.space(48))
         radius: Style.cornerRadius
-        color: Color.bar.background
+        color: _webPalette.barBackground
         border.width: 1
         border.color: root.takeover
-          ? Kit.Palette.negative
-          : (root.isLesson ? Kit.Palette.info : Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.25))
+          ? _webPalette.negative
+          : (root.isLesson ? _webPalette.info : Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.25))
 
         MouseArea { anchors.fill: parent }   // swallow clicks so the scrim handler doesn't fire
 
@@ -178,6 +186,27 @@ Item {
           anchors.margins: Style.space(24)
           spacing: Style.space(14)
 
+          Text {
+            id: actionFeedbackText
+            width: parent.width
+            visible: !!(root.hostWidget && root.hostWidget.actionStatus)
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onActionFeedback(message) {
+                if (win.visible && actionFeedbackText.visible) actionFeedbackText.Accessible.announce(message)
+              }
+            }
+          }
+
           // ---- lesson view ---------------------------------------------
           Column {
             width: parent.width
@@ -188,7 +217,7 @@ Item {
               width: parent.width
               text: root.lessonCard ? root.lessonCard.title : "Lesson unavailable"
               wrapMode: Text.WordWrap
-              color: Color.bar.text
+              color: _webPalette.barForeground
               font.family: Style.font.family
               font.pixelSize: Style.font.title
               font.bold: true
@@ -197,7 +226,7 @@ Item {
               width: parent.width
               visible: root.slideCount > 0
               text: "Technique lesson · slide " + (root.slideIndex + 1) + " of " + root.slideCount
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -206,16 +235,16 @@ Item {
               text: (root.lessonCard && root.lessonCard.slides && root.lessonCard.slides.length > root.slideIndex)
                 ? root.lessonCard.slides[root.slideIndex] : "This lesson is no longer available."
               wrapMode: Text.WordWrap
-              color: Color.bar.text
+              color: _webPalette.barForeground
               font.family: Style.font.family
               font.pixelSize: Style.font.heading
             }
             Row {
               width: parent.width
               spacing: Style.space(8)
-              Button {
+              Kit.ActionButton {
                 text: root.lastSlide ? "Got it" : "Next"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.nextSlide()
               }
@@ -223,7 +252,7 @@ Item {
             Text {
               width: parent.width
               text: "You'll be quizzed on this tomorrow — that's the point."
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -238,7 +267,7 @@ Item {
             Text {
               width: parent.width
               text: root.takeover ? "Deal with this." : "Quick review"
-              color: Color.bar.text
+              color: _webPalette.barForeground
               font.family: Style.font.family
               font.pixelSize: root.takeover ? Style.font.title : Style.font.heading
               font.bold: true
@@ -247,7 +276,7 @@ Item {
               width: parent.width
               visible: root.promptCardIds.length > 0
               text: "Card " + Math.min(root.gradedCount + 1, root.promptCardIds.length) + " of " + root.promptCardIds.length
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
             }
@@ -257,7 +286,7 @@ Item {
               visible: root.reviewCard !== null
               text: root.reviewCard ? root.reviewCard.front : ""
               wrapMode: Text.WordWrap
-              color: Color.bar.text
+              color: _webPalette.barForeground
               font.family: Style.font.family
               font.pixelSize: Style.font.heading
             }
@@ -266,7 +295,7 @@ Item {
               visible: root.reviewCard !== null && root.revealed
               text: root.reviewCard ? root.reviewCard.back : ""
               wrapMode: Text.WordWrap
-              color: Kit.Palette.info
+              color: _webPalette.info
               font.family: Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -274,7 +303,7 @@ Item {
               width: parent.width
               visible: root.reviewDone
               text: "All caught up — nicely done."
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -284,9 +313,29 @@ Item {
               width: parent.width
               visible: root.clueLoading
               text: "Fetching a clue…"
-              color: Kit.Palette.faint
+              color: _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
+            }
+            Text {
+              id: clueErrorText
+              width: parent.width
+              visible: root.clueError.length > 0
+              text: root.clueError
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: _webPalette.warning
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              Accessible.role: Accessible.StaticText
+              Accessible.name: text
+              Connections {
+                target: root.hostWidget
+                ignoreUnknownSignals: true
+                function onChoicesFeedback(message) {
+                  if (win.visible && clueErrorText.visible) clueErrorText.Accessible.announce(message)
+                }
+              }
             }
             Column {
               width: parent.width
@@ -301,28 +350,39 @@ Item {
                   required property string modelData
                   width: parent.width
                   height: Style.space(30)
+                  activeFocusOnTab: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Use clue: " + modelData
+                  Accessible.description: "Uses this clue for the current review card."
+                  Accessible.onPressAction: root.pickClue(modelData)
                   radius: Style.cornerRadius
                   color: clueHover.containsMouse
-                    ? Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.12)
-                    : Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.06)
+                    ? Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.12)
+                    : Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.06)
+                  border.width: activeFocus ? 1 : 0
+                  border.color: _webPalette.accent
 
-                  Text {
+                  Keys.onReturnPressed: root.pickClue(modelData)
+                  Keys.onEnterPressed: root.pickClue(modelData)
+                  Keys.onSpacePressed: root.pickClue(modelData)
+
+                  MarqueeText {
                     anchors.fill: parent
                     anchors.leftMargin: Style.space(10)
                     anchors.rightMargin: Style.space(10)
                     verticalAlignment: Text.AlignVCenter
                     text: clueRow.modelData
-                    elide: Text.ElideRight
-                    color: Color.bar.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
+                    requestedElide: Text.ElideRight
+                    color: _webPalette.barForeground
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.bodySmall
                   }
                   MouseArea {
                     id: clueHover
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: root.pickClue(clueRow.modelData)
+                    onClicked: { clueRow.forceActiveFocus(); root.pickClue(clueRow.modelData) }
                   }
                 }
               }
@@ -332,45 +392,45 @@ Item {
               width: parent.width
               spacing: Style.space(8)
 
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && !root.revealed
                 text: "Reveal"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.reveal()
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && !root.revealed && !root.clueShown && !root.clueLoading
                 text: "Clue"
-                foreground: Kit.Palette.info
+                foreground: _webPalette.info
                 bordered: true
                 onClicked: root.requestClue()
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && root.revealed
                 text: "Again"
-                foreground: Kit.Palette.negative
+                foreground: _webPalette.negative
                 bordered: true
                 onClicked: root.gradeCurrent("again")
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && root.revealed
                 text: "Hard"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.gradeCurrent("hard")
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && root.revealed
                 text: "Good"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.gradeCurrent("good")
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewCard !== null && root.revealed
                 text: "Easy"
-                foreground: Kit.Palette.positive
+                foreground: _webPalette.positive
                 bordered: true
                 onClicked: root.gradeCurrent("easy")
               }
@@ -380,31 +440,31 @@ Item {
               width: parent.width
               spacing: Style.space(8)
 
-              Button {
+              Kit.ActionButton {
                 visible: !root.takeover && root.reviewCard !== null
                 text: "Not now"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.skipReview()
               }
-              Button {
+              Kit.ActionButton {
                 visible: !root.takeover && root.reviewCard !== null
                 text: "15 min"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.snoozeReview(15)
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.takeover && root.reviewCard !== null
                 text: "I hear you — 10 min"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.snoozeReview(10)
               }
-              Button {
+              Kit.ActionButton {
                 visible: root.reviewDone
                 text: "Close"
-                foreground: Color.bar.text
+                foreground: _webPalette.barForeground
                 bordered: true
                 onClicked: root.finishReview(true)
               }

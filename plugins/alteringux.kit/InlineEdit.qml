@@ -1,4 +1,5 @@
 import QtQuick
+import "." as Kit
 import qs.Commons
 import qs.Ui
 
@@ -12,15 +13,13 @@ import qs.Ui
 // inlineEditors count) so keystrokes — Esc especially — reach the field.
 // Shared via alteringux.kit; see docs/adr/0003. Used as `Kit.InlineEdit { }`.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string text: ""
-  property color foreground: Color.foreground
+  property color foreground: _webPalette.foreground
   property real pixelSize: Style.font.body
   property bool bold: false
-  // Named `textOpacity`, not `opacity` — Item.opacity is a real render
-  // property we don't want to shadow.
-  property real textOpacity: 1.0
   property string placeholderText: ""
   property bool editable: true
 
@@ -67,7 +66,6 @@ Item {
     width: root.width
     text: root.text
     color: root.foreground
-    opacity: root.textOpacity
     font.family: Style.font.family
     font.pixelSize: root.pixelSize
     font.bold: root.bold

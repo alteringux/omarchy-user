@@ -30,6 +30,15 @@ BarWidget {
     : ""
 
   readonly property var guard: Kit.BugGuard.create("alteringux.conductor", function (argv) { Quickshell.execDetached(argv) })
+  property string actionStatus: ""
+  property bool actionFailed: false
+  property int actionGeneration: 0
+  signal actionFeedback(string message)
+  function reportActionStatus(message, failed) {
+    actionStatus = message
+    actionFailed = failed === true
+    actionFeedback(message)
+  }
   Kit.PulseTint {
     id: pulseTint
     pluginId: "alteringux.conductor"
@@ -58,19 +67,50 @@ BarWidget {
   // ---- verb runner: one serialising Process, execDetached fallback ----
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: {
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Conductor helper unavailable. Check ~/.local/bin/omarchy-conductor is installed and executable.", true)
+      }
+    }
+    onExited: function(code, status) {
       stateStore.reload()
       snapStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Conductor command completed. Ritual progress is shown above."
+        : "Conductor command failed (exit " + code + "). Try again; check the Conductor helper if it persists.", code !== 0 || status !== 0)
     }
   }
 
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
-      var cmd = [root.scriptPath].concat(args)
-      if (actionProc.running) { Quickshell.execDetached(cmd); return }
-      actionProc.command = cmd
-      actionProc.running = true
+      root.actionGeneration++
+      try {
+        var cmd = [root.scriptPath].concat(args)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(cmd)
+          root.reportActionStatus("Request sent. Ritual progress will confirm the outcome.", false)
+          return
+        }
+        actionProc.feedbackGeneration = root.actionGeneration
+        actionProc.feedbackStarted = false
+        actionProc.command = cmd
+        root.actionFailed = false
+        root.actionStatus = "Working…"
+        root.actionFeedback(root.actionStatus)
+        actionProc.running = true
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        root.reportActionStatus("Conductor request could not be sent. Try again; check the helper if it persists.", true)
+        throw error
+      }
     })
   }
 

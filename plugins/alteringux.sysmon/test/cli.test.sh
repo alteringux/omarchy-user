@@ -9,7 +9,8 @@
 # what the CPU happens to be doing right now.
 set -uo pipefail
 
-CLI="${OMARCHY_SYSMON_BIN:-$HOME/.local/bin/omarchy-sysmon}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_SYSMON_BIN:-$REPO/local-bin/omarchy-sysmon}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

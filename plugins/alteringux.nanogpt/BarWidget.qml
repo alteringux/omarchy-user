@@ -7,6 +7,7 @@ import "Model.js" as Model
 import "../alteringux.kit" as Kit
 
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.nanogpt"
 
@@ -51,14 +52,14 @@ BarWidget {
   }
 
   readonly property color barColor: {
-    if (!root.ready) return Kit.Palette.faint
-    if (root.subActive && root.quotaRatio >= 0.9) return Kit.Palette.negative
-    if (root.subActive && root.quotaRatio >= 0.75) return Kit.Palette.warning
+    if (!root.ready) return _webPalette.barMuted
+    if (root.subActive && root.quotaRatio >= 0.9) return _webPalette.barNegative
+    if (root.subActive && root.quotaRatio >= 0.75) return _webPalette.barWarning
     // WidgetButton's own default reads bar.barForeground (the live,
     // transparency-adaptive color every other widget tracks for free) --
     // this widget overrides `foreground` explicitly, so it has to read the
     // same live property itself instead of the static theme constant.
-    return root.bar ? root.bar.barForeground : Color.foreground
+    return root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.foreground
   }
 
   Process {

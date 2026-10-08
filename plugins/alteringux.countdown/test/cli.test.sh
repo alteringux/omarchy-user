@@ -6,7 +6,8 @@
 #   bash test/cli.test.sh
 set -uo pipefail
 
-CLI="${OMARCHY_COUNTDOWNS_BIN:-$HOME/.local/bin/omarchy-countdowns}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_COUNTDOWNS_BIN:-$REPO/local-bin/omarchy-countdowns}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

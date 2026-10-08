@@ -16,6 +16,7 @@ import "../alteringux.kit" as Kit
 // It renders straight from the host widget's watched stores and turns every
 // button into an omarchy-glimpse verb via the host. It never writes state.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -36,6 +37,8 @@ Item {
   property var clicks: []                         // [{x,y}] normalised to image content
   property var scoreResult: null                  // Model.scoreHits output
   property bool comparing: false                  // hold-to-see-original in review
+  property real keyboardCursorX: 0.5
+  property real keyboardCursorY: 0.5
 
   readonly property int changeCount: root.round && root.round.truth ? root.round.truth.length : 1
 
@@ -44,9 +47,16 @@ Item {
     root.clicks = []
     root.scoreResult = null
     root.comparing = false
+    root.keyboardCursorX = 0.5
+    root.keyboardCursorY = 0.5
     countdownFill.fraction = 1.0
     countdownAnim.duration = root.round ? Math.max(500, root.round.exposureMs) : 5000
     countdownAnim.restart()
+  }
+
+  onPhaseChanged: {
+    if (root.phase === "test") Qt.callLater(function () { sceneImg.forceActiveFocus() })
+    else if (root.phase === "review") Qt.callLater(function () { againButton.forceActiveFocus() })
   }
 
   function toTest() { root.phase = "test" }
@@ -118,8 +128,13 @@ Item {
         }
         if (root.round !== null && root.phase !== "review") root.abandonRound()
       }
-      Keys.onSpacePressed: if (root.phase === "review") root.comparing = true
-      Keys.onReleased: function (e) { if (e.key === Qt.Key_Space) { root.comparing = false; e.accepted = true } }
+      Keys.onSpacePressed: if (root.phase === "review" && scrim.activeFocus) root.comparing = true
+      Keys.onReleased: function (e) {
+        if (e.key === Qt.Key_Space && scrim.activeFocus) {
+          root.comparing = false
+          e.accepted = true
+        }
+      }
 
       // ================= INTRO =================
       Rectangle {
@@ -128,9 +143,9 @@ Item {
         width: Math.min(parent.width - Style.space(80), Style.space(520))
         height: introCol.implicitHeight + Style.space(48)
         radius: Style.cornerRadius
-        color: Color.bar.background
+        color: _webPalette.barBackground
         border.width: 1
-        border.color: root.takeover ? Kit.Palette.negative : Kit.Palette.info
+        border.color: root.takeover ? _webPalette.negative : _webPalette.info
 
         MouseArea { anchors.fill: parent }
 
@@ -145,7 +160,7 @@ Item {
           Text {
             width: parent.width
             text: root.takeover ? "Scene review — overdue" : "Scene review ready"
-            color: Color.bar.text
+            color: _webPalette.barForeground
             font.family: Style.font.family
             font.pixelSize: Style.font.title
             font.bold: true
@@ -154,31 +169,40 @@ Item {
             width: parent.width
             text: "You'll get one look at a scene, then spot what changed in an altered copy. Under a minute."
             wrapMode: Text.WordWrap
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.body
           }
           Flow {
             width: parent.width
             spacing: Style.space(8)
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: "Start"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.startFromIntro()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: !root.takeover
               text: "Not now"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.dismissIntro()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: root.takeover ? "10 min" : "Snooze 1h"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.snoozeIntro(root.takeover ? 10 : 60)
@@ -207,6 +231,24 @@ Item {
           asynchronous: true
           cache: true
           smooth: true
+          activeFocusOnTab: root.phase === "test"
+          Accessible.role: Accessible.Button
+          Accessible.name: "Scene, select a changed spot"
+          Accessible.description: "Use arrow keys to move the cursor by 5 percent. Press Space or Enter to mark a spot."
+          Accessible.focusable: root.phase === "test"
+          Accessible.onPressAction: root.addClick(root.keyboardCursorX, root.keyboardCursorY)
+          Keys.onPressed: function (event) {
+            if (root.phase !== "test") return
+            var step = (event.modifiers & Qt.ShiftModifier) ? 0.01 : 0.05
+            if (event.key === Qt.Key_Left) root.keyboardCursorX = Math.max(0, root.keyboardCursorX - step)
+            else if (event.key === Qt.Key_Right) root.keyboardCursorX = Math.min(1, root.keyboardCursorX + step)
+            else if (event.key === Qt.Key_Up) root.keyboardCursorY = Math.max(0, root.keyboardCursorY - step)
+            else if (event.key === Qt.Key_Down) root.keyboardCursorY = Math.min(1, root.keyboardCursorY + step)
+            else if ((event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+                     && !event.isAutoRepeat) root.addClick(root.keyboardCursorX, root.keyboardCursorY)
+            else return
+            event.accepted = true
+          }
 
           readonly property real offX: (width - paintedWidth) / 2
           readonly property real offY: (height - paintedHeight) / 2
@@ -224,6 +266,20 @@ Item {
             }
           }
 
+          Rectangle {
+            visible: root.phase === "test" && sceneImg.activeFocus
+            z: 5
+            width: Style.space(22)
+            height: width
+            radius: width / 2
+            color: Qt.rgba(0, 0, 0, 0.25)
+            border.width: 2
+            border.color: _webPalette.info
+            x: sceneImg.offX + root.keyboardCursorX * sceneImg.paintedWidth - width / 2
+            y: sceneImg.offY + root.keyboardCursorY * sceneImg.paintedHeight - height / 2
+            Accessible.ignored: true
+          }
+
           // ---- user click markers ----
           Repeater {
             model: root.clicks
@@ -236,8 +292,8 @@ Item {
               color: "transparent"
               border.width: 3
               border.color: root.phase === "review"
-                ? (hit ? Kit.Palette.positive : Kit.Palette.negative)
-                : Color.bar.text
+                ? (hit ? _webPalette.positive : _webPalette.negative)
+                : _webPalette.barForeground
               x: sceneImg.offX + modelData.x * sceneImg.paintedWidth - width / 2
               y: sceneImg.offY + modelData.y * sceneImg.paintedHeight - height / 2
               Text {
@@ -258,7 +314,7 @@ Item {
               required property var modelData
               color: "transparent"
               border.width: 2
-              border.color: Kit.Palette.info
+              border.color: _webPalette.info
               radius: Style.cornerRadius
               x: sceneImg.offX + modelData.x * sceneImg.paintedWidth
               y: sceneImg.offY + modelData.y * sceneImg.paintedHeight
@@ -272,7 +328,7 @@ Item {
         Rectangle {
           anchors.fill: parent
           visible: root.phase === "blank"
-          color: Qt.rgba(0.5, 0.5, 0.5, 1)
+          color: Qt.rgba(0.6, 0.6, 0.6, 1)
         }
 
         // ---- study countdown bar ----
@@ -284,14 +340,14 @@ Item {
           height: Style.space(4)
           radius: 2
           visible: root.phase === "study"
-          color: Util.alpha(Color.bar.text, 0.15)
+          color: Util.alpha(_webPalette.barForeground, 0.15)
 
           Rectangle {
             id: countdownFill
             property real fraction: 1.0
             height: parent.height
             radius: parent.radius
-            color: Kit.Palette.info
+            color: _webPalette.info
             width: parent.width * fraction
             NumberAnimation {
               id: countdownAnim
@@ -314,13 +370,13 @@ Item {
           Text {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
-            color: Color.bar.text
+            color: _webPalette.barForeground
             font.family: Style.font.family
             font.pixelSize: Style.font.heading
             text: {
               if (root.phase === "study") return "Look closely…"
               if (root.phase === "blank") return ""
-              if (root.phase === "test") return "Click the " + root.changeCount + " spot" + (root.changeCount > 1 ? "s" : "") + " that changed  (" + root.clicks.length + "/" + root.changeCount + ")"
+              if (root.phase === "test") return "Mark the " + root.changeCount + " changed spot" + (root.changeCount > 1 ? "s" : "") + "  (" + root.clicks.length + "/" + root.changeCount + ")"
               if (root.scoreResult) return "You found " + root.scoreResult.hits + " of " + root.scoreResult.total + "  ·  " + Model.formatPct(root.scoreResult.accuracy)
               return ""
             }
@@ -331,74 +387,83 @@ Item {
             spacing: Style.space(8)
             visible: root.phase === "test" || root.phase === "review"
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              id: submitButton
               visible: root.phase === "test"
               text: "Submit"
-              foreground: Color.bar.text
+              foreground: _webPalette.barForeground
               bordered: true
               enabled: root.clicks.length > 0
               onClicked: root.submitTest()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: root.phase === "test"
               text: "Nothing else"
-              foreground: Kit.Palette.faint
+              foreground: _webPalette.faint
               bordered: true
               onClicked: root.toReview()
             }
 
-            Rectangle {
+            Kit.ActionButton {
+              focusable: true
               visible: root.phase === "review"
-              width: cmpLabel.implicitWidth + Style.space(20)
-              height: Style.space(28)
-              radius: Style.cornerRadius
-              color: root.comparing
-                ? Util.alpha(Kit.Palette.info, 0.25)
-                : Util.alpha(Color.bar.text, 0.08)
-              Text {
-                id: cmpLabel
-                anchors.centerIn: parent
-                text: "Hold to see original"
-                color: Color.bar.text
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
-              MouseArea {
-                anchors.fill: parent
-                onPressed: root.comparing = true
-                onReleased: root.comparing = false
-                onCanceled: root.comparing = false
-              }
+              text: root.comparing ? "Showing original" : "Show original"
+              Accessible.role: Accessible.CheckBox
+              Accessible.name: "Compare with original"
+              Accessible.description: "Shows the original scene. Activate again to return to the altered scene."
+              Accessible.checked: root.comparing
+              foreground: _webPalette.barForeground
+              bordered: true
+              onClicked: root.comparing = !root.comparing
             }
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              id: againButton
               visible: root.phase === "review"
               text: "Again"
-              foreground: root.scoreResult && root.scoreResult.grade === "again" ? Kit.Palette.negative : Color.bar.text
+              foreground: root.scoreResult && root.scoreResult.grade === "again" ? _webPalette.negative : _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.gradeRound("again")
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: root.phase === "review"
               text: "Hard"
-              foreground: root.scoreResult && root.scoreResult.grade === "hard" ? Kit.Palette.warning : Color.bar.text
+              foreground: root.scoreResult && root.scoreResult.grade === "hard" ? _webPalette.warning : _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.gradeRound("hard")
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: root.phase === "review"
               text: "Good"
-              foreground: root.scoreResult && root.scoreResult.grade === "good" ? Kit.Palette.info : Color.bar.text
+              foreground: root.scoreResult && root.scoreResult.grade === "good" ? _webPalette.info : _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.gradeRound("good")
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               visible: root.phase === "review"
               text: "Easy"
-              foreground: root.scoreResult && root.scoreResult.grade === "easy" ? Kit.Palette.positive : Color.bar.text
+              foreground: root.scoreResult && root.scoreResult.grade === "easy" ? _webPalette.positive : _webPalette.barForeground
               bordered: true
               enabled: !root.busy
               onClicked: root.gradeRound("easy")
@@ -409,8 +474,10 @@ Item {
             width: parent.width
             horizontalAlignment: Text.AlignHCenter
             visible: root.phase === "study" || root.phase === "test"
-            text: root.phase === "study" ? "Esc to cancel" : "Blue boxes will show the real changes after you submit"
-            color: Kit.Palette.faint
+            text: root.phase === "study" ? "Esc to cancel"
+              : root.phase === "test" ? "Focus the scene; arrows move 5% (Shift: 1%), Space marks. Tab reaches the buttons."
+              : "Blue boxes show the real changes"
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
           }

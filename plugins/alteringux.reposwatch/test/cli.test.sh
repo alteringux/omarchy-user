@@ -11,7 +11,8 @@
 # ~/Work) can't pick up whatever the machine running this happens to have.
 set -uo pipefail
 
-CLI="${OMARCHY_REPOSWATCH_BIN:-$HOME/.local/bin/omarchy-reposwatch}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_REPOSWATCH_BIN:-$REPO/local-bin/omarchy-reposwatch}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

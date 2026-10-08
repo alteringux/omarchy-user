@@ -4,15 +4,19 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   required property var match
   property var details: null
   property bool loading: false
-  property color barForeground: Color.foreground
-  property color accentColor: Color.accent
+  property color barForeground: _webPalette.foreground
+  property color accentColor: _webPalette.accent
+  readonly property color textForeground: _webPalette.contrastColorFor(barForeground, color, 4.5, Color.popups.background)
+  readonly property color textAccent: _webPalette.contrastColorFor(accentColor, color, 4.5, Color.popups.background)
   signal openRequested(string url)
   signal closeRequested()
 
@@ -36,27 +40,27 @@ Rectangle {
       width: parent.width
       spacing: Style.space(8)
 
-      Text {
-        text: Model.sportEmoji(root.event().sport) + "  " + label(root.event().league, "Match details")
-        width: parent.width - closeText.width
-        elide: Text.ElideRight
-        color: root.accentColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        font.bold: true
+      MarqueeText {
+        text: Model.sportGlyph(root.event().sport) + "  " + label(root.event().league, "Match details")
+        width: parent.width - closeButton.width
+        requestedElide: Text.ElideRight
+        color: root.textAccent
+        textFont.family: Style.font.family
+        textFont.pixelSize: Style.font.bodySmall
+        textFont.bold: true
       }
-      Text {
-        id: closeText
+      Kit.ActionButton {
+        id: closeButton
         text: "×"
-        color: root.barForeground
-        opacity: 0.55
-        font.family: Style.font.family
-        font.pixelSize: Style.font.body
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.closeRequested()
-        }
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Close match details"
+        tooltipText: "Close match details"
+        foreground: root.textForeground
+        fontSize: Style.font.body
+        horizontalPadding: Style.space(4)
+        verticalPadding: 0
+        onClicked: root.closeRequested()
       }
     }
 
@@ -64,7 +68,7 @@ Rectangle {
       text: label(root.event().eventName, Model.formatMatchLabel(root.event()))
       width: parent.width
       wrapMode: Text.WordWrap
-      color: root.barForeground
+      color: root.textForeground
       font.family: Style.font.family
       font.pixelSize: Style.font.title
       font.bold: true
@@ -74,20 +78,20 @@ Rectangle {
       spacing: Style.space(8)
       Text {
         text: root.event().homeTeam || "TBA"
-        color: root.barForeground
+        color: root.textForeground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
       Text {
         text: Model.formatScore(root.event().homeScore, root.event().awayScore)
-        color: root.accentColor
+        color: root.textAccent
         font.family: Style.font.family
         font.pixelSize: Style.font.body
         font.bold: true
       }
       Text {
         text: root.event().awayTeam || (root.event().eventName ? "Fight card" : "TBA")
-        color: root.barForeground
+        color: root.textForeground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -96,8 +100,7 @@ Rectangle {
     Text {
       visible: root.loading
       text: "Loading provider details…"
-      color: root.barForeground
-      opacity: 0.65
+      color: root.textForeground
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -129,8 +132,7 @@ Rectangle {
             id: detailText
             anchors.centerIn: parent
             text: modelData[0] + ": " + modelData[1]
-            color: root.barForeground
-            opacity: 0.78
+            color: root.textForeground
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -145,7 +147,7 @@ Rectangle {
 
       Text {
         text: "Match statistics"
-        color: root.barForeground
+        color: root.textForeground
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
         font.bold: true
@@ -156,21 +158,20 @@ Rectangle {
           required property var modelData
           width: parent.width
           spacing: Style.space(8)
-          Text {
+          MarqueeText {
             text: modelData.name || "Stat"
             width: parent.width - homeValue.width - awayValue.width - parent.spacing * 2
-            elide: Text.ElideRight
-            color: root.barForeground
-            opacity: 0.7
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
+            requestedElide: Text.ElideRight
+            color: root.textForeground
+            textFont.family: Style.font.family
+            textFont.pixelSize: Style.font.caption
           }
           Text {
             id: homeValue
             text: modelData.home || "—"
             width: Style.space(54)
             horizontalAlignment: Text.AlignRight
-            color: root.barForeground
+            color: root.textForeground
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -179,7 +180,7 @@ Rectangle {
             text: modelData.away || "—"
             width: Style.space(54)
             horizontalAlignment: Text.AlignRight
-            color: root.barForeground
+            color: root.textForeground
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -187,44 +188,47 @@ Rectangle {
       }
     }
 
-    Row {
+    Flow {
+      width: parent.width
       spacing: Style.space(8)
       visible: !root.loading
 
-      Text {
+      Kit.ActionButton {
         text: "▶ YouTube highlights"
-        color: root.accentColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(Model.matchHighlightsUrl(root.event()))
-        }
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open YouTube highlights for " + label(root.event().eventName, Model.formatMatchLabel(root.event()))
+        foreground: root.textAccent
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(Model.matchHighlightsUrl(root.event()))
       }
-      Text {
+      Kit.ActionButton {
         visible: !!(root.event().videoUrl)
-        text: "🎬 Official video"
-        color: root.accentColor
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(root.event().videoUrl)
-        }
+        text: "󰕧 Official video"
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open official video for " + label(root.event().eventName, Model.formatMatchLabel(root.event()))
+        foreground: root.textAccent
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(root.event().videoUrl)
       }
-      Text {
-        text: "🔎 Official coverage"
-        color: root.barForeground
-        opacity: 0.7
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.openRequested(Model.matchCoverageUrl(root.event()))
-        }
+      Kit.ActionButton {
+        text: "󰍉 Official coverage"
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: "Open official coverage for " + label(root.event().eventName, Model.formatMatchLabel(root.event()))
+        foreground: root.textForeground
+        fontSize: Style.font.caption
+        horizontalPadding: Style.space(3)
+        verticalPadding: 0
+        bordered: false
+        onClicked: root.openRequested(Model.matchCoverageUrl(root.event()))
       }
     }
 
@@ -232,7 +236,7 @@ Rectangle {
       visible: !root.loading && (!root.details || !root.details.stats || root.details.stats.length === 0)
       text: "No provider statistics returned"
       hint: "The event details above are still available."
-      foreground: root.barForeground
+      foreground: root.textForeground
     }
   }
 }

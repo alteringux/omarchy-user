@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Toggle the Omarchy system-update widget in the bar.
+# shell.json hot-reloads on save, so no restart is needed.
+set -euo pipefail
+
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/shell.json"
+WIDGET_ID="omarchy.system-update"
+UPDATE_ENTRY='{"id":"omarchy.system-update"}'
+
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+
+widget_present() {
+  jq -e --arg id "$WIDGET_ID" '
+    [.bar.layout.left[]?, .bar.layout.center[]?, .bar.layout.right[]?]
+    | any(.[]; (if type == "object" then (.id // "") else . end) == $id)
+  ' "$CONFIG" >/dev/null
+}
+
+if widget_present; then
+  jq --arg id "$WIDGET_ID" '
+    def widget_id: if type == "object" then (.id // "") else . end;
+    .bar.layout.left |= map(select(widget_id != $id))
+    | .bar.layout.center |= map(select(widget_id != $id))
+    | .bar.layout.right |= map(select(widget_id != $id))
+  ' "$CONFIG" >"$tmp"
+  status="OFF"
+else
+  jq --arg id "$WIDGET_ID" --argjson update "$UPDATE_ENTRY" '
+    def widget_id: if type == "object" then (.id // "") else . end;
+    .bar.layout.left |= map(select(widget_id != $id))
+    | .bar.layout.center |= map(select(widget_id != $id))
+    | .bar.layout.right |= map(select(widget_id != $id))
+    | (.bar.layout.right | map(widget_id) | index("alteringux.vpnrotate")) as $anchor
+    | .bar.layout.right = (
+        if $anchor == null then
+          [$update] + .bar.layout.right
+        else
+          .bar.layout.right[0:($anchor + 1)]
+          + [$update]
+          + .bar.layout.right[($anchor + 1):]
+        end
+      )
+  ' "$CONFIG" >"$tmp"
+  status="ON"
+fi
+
+mv "$tmp" "$CONFIG"
+trap - EXIT
+printf 'Omarchy system updates: %s\n' "$status"

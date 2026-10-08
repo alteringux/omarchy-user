@@ -5,8 +5,10 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.nanogpt"
   ipcTarget: ""
@@ -16,12 +18,12 @@ Panel {
 
   readonly property var guard: Kit.BugGuard.create("alteringux.nanogpt", function(argv) { Quickshell.execDetached(argv) })
 
-  readonly property color fg: bar ? bar.barForeground : Color.foreground
-  readonly property color accent: Color.accent
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
-  readonly property color track: Style.selectedFillFor(root.fg, Color.accent)
-  readonly property color surface: Util.alpha(root.fg, 0.05)
-  readonly property color border: Util.alpha(root.fg, 0.14)
+  readonly property color fg: bar ? _webPalette.barTextColorFor(bar.barForeground) : _webPalette.foreground
+  readonly property color accent: _webPalette.accent
+  readonly property color urgent: bar ? bar.urgent : _webPalette.urgent
+  readonly property color track: Style.selectedFillFor(root.fg, _webPalette.accent)
+  readonly property color surface: _webPalette.cardBackgroundFor(root.fg)
+  readonly property color border: _webPalette.cardBorderFor(root.fg)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property bool ready: hostWidget ? hostWidget.ready : false
@@ -35,10 +37,17 @@ Panel {
 
   readonly property real quotaRatio: Model.quotaRatio(root.plan)
   readonly property color quotaTone: root.quotaRatio >= 0.9
-    ? Kit.Palette.negative
-    : (root.quotaRatio >= 0.75 ? Kit.Palette.warning : root.accent)
+    ? _webPalette.negative
+    : (root.quotaRatio >= 0.75 ? _webPalette.warning : root.accent)
 
   readonly property string todayStr: new Date().toISOString().slice(0, 10)
+
+  function snapshotFreshness() {
+    var updatedAt = hostWidget && hostWidget.state ? Date.parse(hostWidget.state.updatedAt || "") : NaN
+    return isFinite(updatedAt)
+      ? "updated " + Qt.formatDateTime(new Date(updatedAt), "hh:mm")
+      : "no successful snapshot yet"
+  }
   readonly property int weekPeak: Model.weekPeak(root.week)
   readonly property int mPeak: Model.modelPeak(root.models)
   readonly property real cPeak: Model.costPeak(root.models)
@@ -73,7 +82,7 @@ Panel {
 
   function alpha(c, a) { return Util.alpha(c, a) }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -82,13 +91,17 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(420))
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(680)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
+      escapeShortcutDescription: root.selectedModelId ? "Clear the selected model" : "Close the panel"
       onCloseRequested: {
         if (root.selectedModelId) root.clearSelection()
         else root.close()
       }
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh model data", context: "NanoGPT · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -106,6 +119,7 @@ Panel {
               if (!root.ready) return root.refreshing ? "refreshing…" : "no data yet"
               var p = root.plan
               var parts = []
+              if (root.refreshing) parts.push("refreshing")
               if (p.active) {
                 parts.push("subscription")
                 parts.push(Model.quotaPctLabel(p) + " weekly")
@@ -113,11 +127,15 @@ Panel {
                 parts.push("pay-as-you-go")
               }
               if (p.routingMode && !p.active) parts.push(p.routingMode)
+              parts.push(root.snapshotFreshness())
               return parts.join(" · ")
             }
             foreground: root.fg
             trailingControl: Component {
-              Button {
+              Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: text
                 text: "Refresh"
                 foreground: root.fg
                 bordered: true
@@ -157,7 +175,7 @@ Panel {
                   spacing: 2
                   Text {
                     text: "TODAY"
-                    color: root.alpha(root.fg, 0.5)
+                    color: _webPalette.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     font.bold: true
@@ -183,7 +201,7 @@ Panel {
                   spacing: 2
                   Text {
                     text: "ALL-TIME"
-                    color: root.alpha(root.fg, 0.5)
+                    color: _webPalette.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                     font.bold: true
@@ -213,7 +231,7 @@ Panel {
 
               PanelSectionHeader {
                 text: "Weekly Quota"
-                color: root.alpha(root.fg, 0.5)
+                color: _webPalette.muted
                 font.family: root.fontFamily
               }
 
@@ -276,7 +294,7 @@ Panel {
                         parts.push("images " + (root.plan.dailyImagesUsed || 0) + "/" + root.plan.dailyImagesLimit + " today")
                       return parts.join("  ·  ")
                     }
-                    color: root.alpha(root.fg, 0.5)
+                    color: _webPalette.muted
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.caption
                   }
@@ -286,7 +304,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Tokens by Day"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 
@@ -357,7 +375,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Tokens by Model"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 
@@ -379,11 +397,22 @@ Panel {
                   readonly property bool isSelected: root.selectedModelId === modelData.id
 
                   Rectangle {
+                    id: modelButton
                     anchors.fill: parent
                     radius: Style.cornerRadius
                     color: isSelected ? root.alpha(root.accent, 0.12) : root.alpha(root.fg, 0.05)
-                    border.width: isSelected ? 1 : 0
-                    border.color: root.alpha(root.accent, 0.3)
+                    border.width: isSelected || activeFocus ? 1 : 0
+                    border.color: activeFocus ? _webPalette.accent : root.alpha(root.accent, 0.3)
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: (modelData.id || "Model") + ", " + Model.formatTokens(modelData.total || 0)
+                      + " tokens, " + Model.formatCost(modelData.cost || 0)
+                    Accessible.description: isSelected ? "Selected model. Activate to view details." : "Activate to view model details."
+                    Accessible.focusable: true
+                    Accessible.onPressAction: root.selectModel(modelData.id)
+                    Keys.onReturnPressed: { root.selectModel(modelData.id); event.accepted = true }
+                    Keys.onEnterPressed: { root.selectModel(modelData.id); event.accepted = true }
+                    Keys.onSpacePressed: { root.selectModel(modelData.id); event.accepted = true }
 
                     Rectangle {
                       anchors.left: parent.left
@@ -396,16 +425,17 @@ Panel {
                       Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                     }
 
-                    Text {
+                    MarqueeText {
                       anchors.left: parent.left
                       anchors.leftMargin: Style.space(10)
                       anchors.verticalCenter: parent.verticalCenter
-                      text: Model.shortModelName(modelData.id || "")
+                      text: modelData.id || ""
+                      focusableOnOverflow: false
                       color: root.fg
-                      font.family: root.fontFamily
-                      font.pixelSize: Style.font.body
-                      font.bold: isSelected
-                      elide: Text.ElideRight
+                      textFont.family: root.fontFamily
+                      textFont.pixelSize: Style.font.body
+                      textFont.bold: isSelected
+                      requestedElide: Text.ElideRight
                       width: parent.width * 0.55
                     }
 
@@ -422,7 +452,7 @@ Panel {
                     MouseArea {
                       anchors.fill: parent
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.selectModel(modelData.id)
+                      onClicked: { modelButton.forceActiveFocus(); root.selectModel(modelData.id) }
                     }
                   }
                 }
@@ -431,7 +461,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Token Composition"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 
@@ -496,7 +526,7 @@ Panel {
 
                     Text {
                       text: (modelData.pct * 100).toFixed(1) + "%"
-                      color: root.alpha(root.fg, 0.5)
+                      color: _webPalette.muted
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                     }
@@ -507,7 +537,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Cost by Model"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
               visible: root.models.length > 0 && root.cPeak > 0
             }
@@ -528,15 +558,15 @@ Panel {
 
                   readonly property real costShare: root.cPeak > 0 ? Model.clamp(Number(modelData.cost || 0) / root.cPeak, 0, 1) : 0
 
-                  Text {
+                  MarqueeText {
                     id: costModelLabel
                     anchors.left: parent.left
                     anchors.verticalCenter: parent.verticalCenter
-                    text: Model.shortModelName(modelData.id || "")
+                    text: modelData.id || ""
                     color: root.alpha(root.fg, 0.7)
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
+                    textFont.family: root.fontFamily
+                    textFont.pixelSize: Style.font.caption
+                    requestedElide: Text.ElideRight
                     width: parent.width * 0.5
                   }
 
@@ -680,7 +710,10 @@ Panel {
             spacing: Style.spacing.panelGap
             visible: root.ready && root.selectedModelId && root.selectedModel !== null
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: "← Back"
               foreground: root.fg
               bordered: true
@@ -701,12 +734,14 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: 2
 
-                Text {
-                  text: Model.shortModelName(root.selectedModel ? root.selectedModel.id : "")
+                MarqueeText {
+                  width: parent.width
+                  text: root.selectedModel ? root.selectedModel.id : ""
                   color: root.fg
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.title
-                  font.bold: true
+                  textFont.family: root.fontFamily
+                  textFont.pixelSize: Style.font.title
+                  textFont.bold: true
+                  requestedElide: Text.ElideRight
                 }
                 Text {
                   text: {
@@ -719,7 +754,7 @@ Panel {
                     if (!parts.length) parts.push(Model.formatNumber(m.messages || 0) + " requests")
                     return parts.join("  ·  ")
                   }
-                  color: root.alpha(root.fg, 0.5)
+                  color: _webPalette.muted
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
                 }
@@ -728,7 +763,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Token Breakdown"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 
@@ -795,7 +830,7 @@ Panel {
 
                     Text {
                       text: Model.formatTokens(modelData.value) + "  (" + (modelData.pct * 100).toFixed(1) + "%)"
-                      color: root.alpha(root.fg, 0.5)
+                      color: _webPalette.muted
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.caption
                     }
@@ -806,7 +841,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Daily Usage (7 days)"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 
@@ -880,7 +915,7 @@ Panel {
 
             PanelSectionHeader {
               text: "Statistics"
-              color: root.alpha(root.fg, 0.5)
+              color: _webPalette.muted
               font.family: root.fontFamily
             }
 

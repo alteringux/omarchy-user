@@ -3,23 +3,26 @@ import QtQuick.Layouts
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "../alteringux.kit" as Kit
+import "../shared"
 
 // One gainer/loser card in the panel's grid: symbol, exchange, price,
 // %change, and a 52-week-range dot. No sparkline — the screener endpoint
 // (unlike the old per-ticker chart endpoint) carries no intraday series.
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   required property var quote
-  property color barForeground: Color.foreground
+  property color barForeground: _webPalette.foreground
   property color accentColor: barForeground
 
   Layout.preferredHeight: cardColumn.implicitHeight + Style.space(20)
   radius: Style.cornerRadius
   clip: true
-  color: Util.alpha(root.barForeground, 0.05)
+  color: _webPalette.cardBackgroundFor(root.barForeground)
   border.width: 1
-  border.color: Util.alpha(root.barForeground, 0.14)
+  border.color: _webPalette.cardBorderFor(root.barForeground)
 
   Column {
     id: cardColumn
@@ -41,21 +44,19 @@ Rectangle {
       Text {
         visible: !!root.quote.exchange
         text: root.quote.exchange || ""
-        color: root.barForeground
-        opacity: 0.5
+        color: _webPalette.muted
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
       }
     }
-    Text {
+    MarqueeText {
       visible: !!root.quote.name
       text: root.quote.name || ""
       width: parent.width
-      elide: Text.ElideRight
-      color: root.barForeground
-      opacity: 0.6
-      font.family: Style.font.family
-      font.pixelSize: Style.font.caption
+      requestedElide: Text.ElideRight
+      color: _webPalette.muted
+      textFont.family: Style.font.family
+      textFont.pixelSize: Style.font.caption
     }
     Text {
       text: Model.formatPrice(root.quote.price, root.quote.currency)
@@ -91,7 +92,7 @@ Rectangle {
         width: Style.space(6)
         height: Style.space(6)
         radius: width / 2
-        color: Color.accent
+        color: _webPalette.accent
       }
     }
   }

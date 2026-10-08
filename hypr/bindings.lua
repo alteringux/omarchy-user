@@ -54,7 +54,7 @@ o.bind("SUPER + SHIFT + ALT + N", "Reframe selection (gist + other perspectives,
 
 -- Prompt Opt: classify the selected/copied rough requirement (code / debug /
 -- research / writing / data), rewrite it with a context-specific system prompt
--- into a lean Task/Constraints/Context/Output prompt via Featherless, copy to
+-- into a lean Task/Constraints/Context/Output prompt via NanoGPT, copy to
 -- the clipboard, toast the detected context + before/after token estimate.
 o.bind("SUPER + SEMICOLON", "Optimize selection into a lean prompt (clipboard)", "omarchy-promptopt")
 
@@ -64,6 +64,9 @@ o.bind("SUPER + ALT + V", "Spoken notifications: toggle", "omarchy-speak-notific
 -- Dictionary: highlight a word then press, or press with nothing selected
 -- to type one.
 o.bind("SUPER + D", "Dictionary lookup", "omarchy-dictionary-hotkey")
+
+-- Wordstep: selected text, one Piper-synchronised word at a time.
+o.bind("SUPER + CTRL + ALT + E", "Read selection word by word", "omarchy-wordstep-hotkey")
 
 -- See current bindings and descriptions:
 --   omarchy menu keybindings --print
@@ -96,7 +99,7 @@ o.bind("SUPER + H", "Voxtype: toggle dictation", "voxtype record toggle")
 -- Voice assistant (~/.local/bin/omarchy-voice): speak a request, it either
 -- performs a system action (brightness, volume, theme, night light, lock,
 -- launch an app) or answers aloud. STT = whisper-cli, intent parsing +
--- chat = Featherless, reply = Piper TTS. Auto-stops on ~1.5s of silence.
+-- chat = NanoGPT, reply = Piper TTS. Auto-stops on ~1.5s of silence.
 -- SUPER+ALT+X = listen & act; a bare press with X again stops it talking.
 o.bind("SUPER + ALT + X", "Voice assistant: listen & act", "omarchy-voice")
 o.bind("SUPER + SHIFT + ALT + V", "Voice assistant: stop talking", "omarchy-voice --stop")
@@ -124,14 +127,14 @@ o.bind("SUPER + ALT + Y", "Speak the time", "omarchy-speak-time")
 o.bind("SUPER + ALT + B", "Speak daily briefing", "omarchy-speak-briefing")
 
 -- AI briefing notification on demand: same script the post-boot hook runs,
--- via the `claude` CLI. Pops a desktop notification, no TTS.
+-- via llm-blurb (hermes -> NanoGPT). Pops a desktop notification, no TTS.
 -- (SUPER + ALT + B is the spoken briefing above; this text one lives on Q.)
 o.bind("SUPER + ALT + Q", "AI briefing notification", "/home/alteringux/.config/omarchy/hooks/post-boot.d/briefing.sh")
 
 -- Speak an AI briefing of how the Australian share market is doing today:
 -- ASX 200 / All Ords / AUDUSD from Yahoo Finance (same keyless API as the
 -- alteringux.stocks plugin), then the day's top 10 gainers and top 10
--- losers each with a one-line reason. Movers colour comes from a Featherless
+-- losers each with a one-line reason. Movers colour comes from a NanoGPT
 -- tool-calling loop (llm-agent) searching the local SearXNG, not Anthropic.
 -- Piper TTS; press again to stop. A re-press within 10 min replays.
 -- Lives on CTRL+ALT+L (pairs with the Stocks panel on SUPER+ALT+L); the
@@ -237,7 +240,7 @@ o.bind("SUPER + SHIFT + L", "Toggle lid-close suspend", "lid-suspend-toggle")
 -- Recall (~/.local/bin/omarchy-recall): opens a terminal running the
 -- interactive review session -- unseen lessons, then due quiz/vocab cards,
 -- self-graded again/hard/good/easy (SM-2 spaced repetition).
-o.bind("SUPER + SHIFT + ALT + R", "Recall: review now", "foot -e omarchy-recall review")
+o.bind("SUPER + SHIFT + ALT + R", "Recall: review now", "omarchy-launch-terminal omarchy-recall review")
 
 -- God's Eye View (~/Work/gods-eye-view): real-time 3D globe intelligence
 -- console. Runs keyless off a gev-server.service --user unit (survives reboot).
@@ -249,3 +252,22 @@ o.bind("SUPER + SHIFT + ALT + G", "God's Eye View: open / focus", "gev-open")
 -- over CDP) drives the globe, Piper speaks the reply. There is no Anthropic
 -- equivalent of GEV's built-in OpenAI Realtime voice, so this is the stand-in.
 o.bind("SUPER + SHIFT + ALT + E", "God's Eye View: voice command (tap twice)", "gev-voice")
+
+-- Wi-Fi + Proton VPN (~/.local/bin/omarchy-wifi-vpn). Networking is opt-in per
+-- session (hypr/autostart.lua kills the Wi-Fi radio on every login). This
+-- brings it back in the right order: radio on -> wait for a real wifi link ->
+-- protonvpn-rotate connect. Toggle -- press again to drop the VPN and radio.
+-- (SUPER+CTRL+ALT+W is Omarchy's "Toggle weather", so this rides N = oNline.)
+o.bind("SUPER + CTRL + ALT + N", "Wi-Fi + Proton VPN: toggle online/offline", "omarchy-wifi-vpn toggle")
+
+-- Breathe plugin (alteringux.breathe): guided breathing. -q so a keybinding
+-- no-ops silently instead of erroring when the shell isn't running.
+-- SUPER + ALT is fully allocated, so these sit in the SUPER + CTRL + ALT space.
+o.bind("SUPER + CTRL + ALT + B", "Breathe: start/pause session", "omarchy-shell -q alteringux.breathe toggle")
+o.bind("SUPER + SHIFT + ALT + B", "Breathe: open panel", "omarchy-shell -q alteringux.breathe panel")
+-- The panic button: one physiological sigh is the fastest way down from a
+-- spike, and it wants to be reachable without picking anything.
+o.bind("SUPER + CTRL + ALT + Q", "Breathe: quick calming sigh", "omarchy-shell -q alteringux.breathe start physiological-sigh")
+
+-- Font showcase: open Omarchy's searchable font preview picker directly.
+o.bind("SUPER + CTRL + SHIFT + F", "Font showcase", "omarchy menu summon style.font")

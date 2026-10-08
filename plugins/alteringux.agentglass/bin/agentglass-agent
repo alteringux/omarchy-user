@@ -1,0 +1,1059 @@
+#!/usr/bin/env python3
+"""Start, prompt, watch and list named agents on agentglass's terminal engine.
+
+The launcher and the liveness a script needs to run unattended agents on this
+machine, over the tmux engine agentglass already owns: seat one by name, hand
+it a message, wait for a state, read its screen, press a key, list, stop.
+Nothing here decides WHAT to work on: your script picks the task, makes the
+worktree, and asks this to seat an agent in it by name.
+
+    agentglass-agent start proj1234 --cwd ~/code/app-wt/proj1234 --yolo \
+        --remote-control proj1234 --timeout 180000
+    agentglass-agent prompt proj1234 "$(cat handoff.md)"
+    agentglass-agent wait proj1234 --until working --timeout 90000
+    agentglass-agent read proj1234 --lines 30
+    agentglass-agent send-keys proj1234 enter
+    agentglass-agent list                     # {"ok":true,"result":{"agents":[{"name":...}]}}
+    agentglass-agent stop proj1234
+
+For a bounded, machine-wide readout (no prompts or transcripts):
+
+    agentglass-agent status                  # counts, scope, attention first
+    agentglass-agent status --json --limit 5  # the same facts for a widget
+    agentglass-agent status --details        # add machine capacity and 24h spend
+    agentglass-agent resources --limit 12    # process CPU, RSS, and parent PID
+    agentglass-agent services --limit 12     # listening services and their context
+    agentglass-agent focus needs-review %42  # focus a still-live waiting pane
+    agentglass-agent workspace --home        # persist home as the scope
+    agentglass-agent workspace --home --discover  # list observed home repositories
+    agentglass-agent setup                  # set home scope, connect installed agents, verify
+    agentglass-agent workspace --all         # clear scope: the whole machine
+    agentglass-agent connections             # configured versus received telemetry
+    agentglass-agent connections --connect all   # wire installed supported agents
+
+And on a clock — "at 08:00 start this agent, with this prompt, in this checkout":
+
+    agentglass-agent schedule nightly --cwd ~/code/app --at 08:00 --file brief.md --yolo
+    agentglass-agent schedule smoke --cwd ~/code/app --at +30m --prompt "run the smoke suite and report"
+    agentglass-agent schedules                # waiting first, then what fired and how
+    agentglass-agent unschedule <id>
+
+Every answer is one JSON object on stdout, in the shape
+{"ok": bool, "result": {...}} or {"ok": false, "error": "..."}; the exit code
+is 0 when ok and 1 otherwise, so a shell can branch on either. `list` prints
+`result.agents`, each with `name`, `cwd`, `paneId`, `state` (working / idle /
+waiting, from the board), `needsYou` when it is stopped on a person, and
+`branch`. An agent is listed while its pane exists on the engine and not a
+second longer — liveness is the pane, not a heartbeat.
+
+`start --keep` keeps the tab when the CLI exits — a one-shot such as
+`qwen -p` or `opencode run` whose answer is read afterwards — under a line
+saying how it exited, for a day; the agent leaves the list all the same, and
+`read <name>` still shows the tab while it is there, and `stop <name>`
+closes it. Never open one with a bare `tmux new-window "cli ..."`: a CLI that
+exits 0 takes that tab and its answer with it.
+
+`start` refuses a name that is still running (exit 1, error "an agent by that
+name is still running", the existing agent under result.agent); pick another
+name or stop it. `--yolo` asks for the CLI's skip-permissions flag and is
+granted only if agentglass's Settings allow it (chatBypass); passing the raw
+flag after `--` is refused for the same reason. The prompt goes to `prompt`
+as text, never on the command line — pass it as one argument, quoted, or from
+a file with `--file`.
+
+Environment:
+    AGENTGLASS_SERVER   base url (default http://localhost:4000)
+    AGENTGLASS_TOKEN    the server's token; read from ~/.config/agentglass/token
+                        when unset, which is where the app keeps it
+"""
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+def _server_or_die(url):
+    """Where the Bearer token goes. It is sent to whatever AGENTGLASS_SERVER
+    names, and over plain http to a remote host it travels in the clear —
+    every hop between here and there reads it. So: https anywhere, http only
+    to this machine (localhost, or a loopback address). Anything else is one
+    line on stderr and exit 2, before a single request is built."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    u = urlsplit(url)
+    host = (u.hostname or "").lower()
+    if u.scheme == "https" and host:
+        return url
+    if u.scheme == "http" and host:
+        loop = host == "localhost"
+        if not loop:
+            try:
+                loop = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loop = False
+        if loop:
+            if host == "localhost":
+                userinfo, separator, hostport = u.netloc.rpartition("@")
+                prefix = userinfo + separator if separator else ""
+                suffix = hostport[len(host):] if hostport[:len(host)].lower() == host else ""
+                return u._replace(netloc=prefix + "127.0.0.1" + suffix).geturl()
+            return url
+        print(f"agentglass: refusing plain http to {host}: the token would travel in the clear. "
+              f"Use https://, or http:// only to localhost/127.0.0.1/::1 (AGENTGLASS_SERVER={url})", file=sys.stderr)
+        sys.exit(2)
+    print(f"agentglass: AGENTGLASS_SERVER must be https://<host> or http://<loopback>, got {url!r}", file=sys.stderr)
+    sys.exit(2)
+
+
+SERVER = _server_or_die(os.environ.get("AGENTGLASS_SERVER", "http://localhost:4000").rstrip("/"))
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    # An API redirect must not forward the Bearer token to a second server.
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+OPENER = urllib.request.build_opener(_NoRedirect())
+
+
+def token():
+    t = os.environ.get("AGENTGLASS_TOKEN", "").strip()
+    if t:
+        return t
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    try:
+        with open(os.path.join(base, "agentglass", "token"), encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def call(path, body=None, method="POST", timeout=630):
+    req = urllib.request.Request(
+        f"{SERVER}{path}",
+        data=None if body is None else json.dumps(body).encode(),
+        method=method,
+        headers={"Content-Type": "application/json", "Origin": SERVER},
+    )
+    t = token()
+    if t:
+        req.add_header("Authorization", f"Bearer {t}")
+    try:
+        with OPENER.open(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read() or b"{}")
+        except json.JSONDecodeError:
+            return {"ok": False, "error": f"server said {e.code}"}
+    except urllib.error.URLError as e:
+        return {"ok": False, "error": f"no agentglass at {SERVER} ({e.reason})"}
+
+
+def text_call(path, timeout=30):
+    """A GET whose answer is meant to be read, not parsed.
+
+    The field readout exists because the thing reading it pays to read: a model
+    that re-reads its whole context every turn should not be handed JSON it has
+    to summarise back to itself. So the server writes the lines and this prints
+    them.
+    """
+    req = urllib.request.Request(f"{SERVER}{path}", method="GET", headers={"Origin": SERVER})
+    t = token()
+    if t:
+        req.add_header("Authorization", f"Bearer {t}")
+    try:
+        with OPENER.open(req, timeout=timeout) as r:
+            return True, r.read().decode("utf-8", "replace").rstrip()
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace").strip()
+        try:
+            return False, json.loads(body).get("error") or f"server said {e.code}"
+        except json.JSONDecodeError:
+            return False, body or f"server said {e.code}"
+    except urllib.error.URLError as e:
+        return False, f"no agentglass at {SERVER} ({e.reason})"
+
+
+def emit(res):
+    print(json.dumps(res))
+    return 0 if res.get("ok") else 1
+
+
+def workspace(home, discover=False):
+    root = os.path.realpath(os.path.expanduser("~")) if home else None
+    answer = call("/workspace", {"root": root}, timeout=180)
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        return answer if isinstance(answer, dict) else {"ok": False, "error": "invalid workspace response"}
+    if answer.get("persisted") is not True:
+        return {"ok": False, "error": "workspace changed only for this process; it was not saved",
+                "result": answer}
+    if not discover:
+        return answer
+    data = call("/git/repos?all=1&scan=1", method="GET", timeout=30)
+    if not isinstance(data, dict) or not isinstance(data.get("repos"), list) or not isinstance(data.get("roots"), list):
+        return {"ok": False, "error": "workspace saved, but repository discovery failed"}
+    def covers(base, path):
+        return os.path.commonpath((base, path)) == base
+    roots = [os.path.realpath(p) for p in data["roots"] if isinstance(p, str) and os.path.isabs(p)]
+    candidates = sorted({os.path.realpath(r["root"]) for r in data["repos"]
+                         if isinstance(r, dict) and isinstance(r.get("root"), str)
+                         and os.path.isabs(r["root"]) and covers(root, os.path.realpath(r["root"]))})
+    # ponytail: observed repos only, at most 200 writes; never crawl home here.
+    if len(candidates) > 200:
+        return {"ok": False, "error": "workspace saved; over 200 observed projects need explicit project folders"}
+    added, covered, errors = 0, 0, []
+    for path in candidates:
+        if any(covers(base, path) for base in roots):
+            covered += 1
+            continue
+        saved = call("/projects/roots", {"path": path, "added": True}, timeout=10)
+        if not isinstance(saved, dict) or saved.get("ok") is not True or saved.get("persisted") is not True:
+            why = saved.get("error") or saved.get("note") if isinstance(saved, dict) else "invalid response"
+            errors.append({"path": path[:240], "error": str(why or "project folder was not saved")[:180]})
+            continue
+        active = saved.get("roots")
+        if not isinstance(active, list) or not any(isinstance(p, str) and os.path.isabs(p)
+                                                  and covers(os.path.realpath(p), path) for p in active):
+            errors.append({"path": path[:240], "error": "folder saved, but active discovery roots do not include it; check AGENTGLASS_REPO_DIRS"})
+            continue
+        roots = [os.path.realpath(p) for p in active if isinstance(p, str) and os.path.isabs(p)]
+        added += 1
+    result = {"workspace": answer.get("workspace"), "persisted": True, "observed": len(candidates),
+              "added": added, "alreadyCovered": covered, "failed": len(errors), "errors": errors[:12],
+              "note": answer.get("note"), "coverage": "observed repositories only; uninstrumented workflows remain unknown"}
+    return {"ok": not errors, "result": result, **({"error": "some project folders were not registered"} if errors else {})}
+
+
+def connections(connect=None):
+    data = call("/agents", method="GET", timeout=10)
+    if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
+        return {"ok": False, "error": data.get("error", "invalid agent roster") if isinstance(data, dict) else "invalid agent roster"}
+    rows = [r for r in data["agents"] if isinstance(r, dict)]
+    # ponytail: the connector roster has four agents; refuse unbounded actions.
+    if len(rows) > 32:
+        return {"ok": False, "error": "agent roster exceeds 32 entries"}
+    errors, attempted = [], []
+    if connect:
+        selected = rows if connect == "all" else [r for r in rows if r.get("id") == connect]
+        if not selected:
+            return {"ok": False, "error": "no such agent in the connector roster"}
+        for row in selected:
+            if row.get("found") is not True:
+                if connect != "all":
+                    errors.append({"id": str(row.get("id"))[:80], "error": "agent is not installed"})
+                continue
+            if row.get("connected") is True or row.get("via") == "chat":
+                continue
+            if row.get("via") not in ("hooks", "otel", "opencode"):
+                errors.append({"id": str(row.get("id"))[:80], "error": "unsupported connection method"})
+                continue
+            attempted.append(row.get("id"))
+            answer = call("/agents/connect", {"id": row.get("id")}, timeout=30)
+            if not isinstance(answer, dict) or answer.get("ok") is not True:
+                errors.append({"id": str(row.get("id"))[:80], "error": str(answer.get("error", "connection failed") if isinstance(answer, dict) else "invalid connection response")[:180]})
+        if attempted:
+            data = call("/agents", method="GET", timeout=10)
+            if not isinstance(data, dict) or not isinstance(data.get("agents"), list):
+                return {"ok": False, "error": "connection actions ran, but verification failed"}
+            rows = [r for r in data["agents"] if isinstance(r, dict)]
+            for agent_id in attempted:
+                if not any(r.get("id") == agent_id and r.get("connected") is True for r in rows):
+                    if not any(e["id"] == agent_id for e in errors):
+                        errors.append({"id": str(agent_id)[:80], "error": "connector finished, but agent configuration is still not connected"})
+    agents = [{"id": str(r.get("id", ""))[:80], "via": str(r.get("via", ""))[:16],
+               "installed": r.get("found") is True, "configured": r.get("connected") is True,
+               "lastReceivedAt": r.get("seenAt") if isinstance(r.get("seenAt"), (int, float))
+               and not isinstance(r.get("seenAt"), bool) and 0 < r["seenAt"] < 2 ** 53 else None} for r in rows[:32]]
+    result = {"agents": agents, "errors": errors, "omitted": max(0, len(rows) - 32),
+              "coverage": "connector roster only; a recorded event is not proof of current liveness"}
+    return {"ok": not errors, "result": result, **({"error": "some agents could not be connected"} if errors else {})}
+
+
+def setup():
+    """Explicitly set home scope, connect supported installed agents, and verify scope."""
+    outcomes = {}
+    for name, action in (("workspace", lambda: workspace(True, True)),
+                         ("connections", lambda: connections("all")),
+                         ("verification", lambda: status(0))):
+        try:
+            outcomes[name] = action()
+        except (OSError, ValueError) as exc:
+            outcomes[name] = {"ok": False, "error": str(exc)[:180] or "operation failed"}
+    verified = outcomes["verification"]
+    actual = verified.get("result", {}).get("workspace") if isinstance(verified, dict) else None
+    expected = os.path.realpath(os.path.expanduser("~"))
+    scope_ok = isinstance(actual, str) and os.path.realpath(actual) == expected
+    outcomes["verification"] = {"ok": bool(verified.get("ok")) and scope_ok,
+                                "workspace": actual, "homeScope": scope_ok}
+    ok = all(isinstance(outcomes[key], dict) and outcomes[key].get("ok") is True
+             for key in ("workspace", "connections", "verification"))
+    return {"ok": ok, "result": outcomes,
+            **({"error": "setup was partial; inspect each result"} if not ok else {})}
+
+
+def focus_agent(name, pane_id):
+    """Recheck the board-to-pane mapping immediately before focusing it."""
+    if not isinstance(pane_id, str) or not re.fullmatch(r"%[0-9]+", pane_id):
+        return {"ok": False, "error": "invalid pane id"}
+    try:
+        board = call("/agents/board", method="GET", timeout=10)
+        if not isinstance(board, dict) or not isinstance(board.get("agents"), list):
+            return {"ok": False, "error": "agent board is unavailable"}
+        matches = [r for r in board["agents"] if isinstance(r, dict)
+                   and r.get("name") == name and r.get("paneId") == pane_id
+                   and r.get("gone") is not True]
+        if len(matches) != 1:
+            return {"ok": False, "error": "agent no longer maps uniquely to that live pane"}
+        row = matches[0]
+        agent_session, worktree = row.get("session"), row.get("worktree")
+        if not isinstance(agent_session, str) or not agent_session or not isinstance(worktree, str) or not worktree:
+            return {"ok": False, "error": "agent has no verified live pane identity"}
+        panes = call("/terminal/panes", method="GET", timeout=10)
+        if not isinstance(panes, dict) or panes.get("ok") is not True or not isinstance(panes.get("panes"), list):
+            return {"ok": False, "error": "live pane list is unavailable"}
+        matches = [p for p in panes["panes"] if isinstance(p, dict)
+                   and p.get("paneId") == pane_id and p.get("agentSession") == agent_session
+                   and isinstance(p.get("agentCwds"), list) and worktree in p["agentCwds"]]
+        if len(matches) != 1:
+            return {"ok": False, "error": "agent pane is not uniquely live"}
+        answer = call("/terminal/panes/focus", {
+            "paneId": pane_id, "agentSession": agent_session, "worktree": worktree,
+        }, timeout=10)
+    except (ValueError, OSError):
+        return {"ok": False, "error": "could not verify or focus the agent pane"}
+    if not isinstance(answer, dict) or answer.get("ok") is not True:
+        error = answer.get("error") if isinstance(answer, dict) else None
+        return {"ok": False, "error": error[:180] if isinstance(error, str) and error else "pane could not be focused"}
+    return {"ok": True, "name": name, "paneId": pane_id}
+
+
+def resources(limit):
+    """Reuse the server's sampled process rates, omitting command lines."""
+    try:
+        data = call("/machine/resources?limit=" + str(max(1, limit)), method="GET", timeout=3)
+    except (ValueError, OSError):
+        return {"ok": False, "error": "agentglass returned invalid resource metadata"}
+    if isinstance(data, dict) and data.get("ok") is False:
+        return data
+    if not isinstance(data, dict) or not isinstance(data.get("procs"), list) or not isinstance(data.get("machine"), dict):
+        return {"ok": False, "error": "agentglass returned invalid resource metadata"}
+    procs = [{k: r.get(k) for k in ("pid", "ppid", "comm", "cpu", "rss", "cwd")}
+             for r in data["procs"] if isinstance(r, dict)]
+    for r in procs:
+        r["comm"] = " ".join(str(r["comm"] or "unknown").split())[:80]
+        r["cwd"] = " ".join(r["cwd"].split())[:240] if isinstance(r["cwd"], str) else None
+    return {"ok": True, "result": {
+        "machine": {k: data["machine"].get(k) for k in ("cpu", "cores", "memUsed", "memTotal", "swapUsed", "load1")},
+        "seen": data.get("seen"), "rated": data.get("rated") is True,
+        "procs": procs[:limit], "omitted": max(0, (data.get("seen") or len(procs)) - min(limit, len(procs))),
+        "attribution": "observed processes; task ownership unknown",
+    }}
+
+
+def services(limit):
+    """Reuse read-only TCP listener and user-service inventories."""
+    try:
+        data = call("/machine/ports", method="GET", timeout=8)
+    except (ValueError, OSError):
+        return {"ok": False, "error": "agentglass returned invalid service metadata"}
+    if not isinstance(data, dict) or not isinstance(data.get("ports"), list):
+        return {"ok": False, "error": "agentglass returned invalid service metadata"}
+    rows = []
+    for p in data["ports"]:
+        if not isinstance(p, dict) or not isinstance(p.get("port"), int):
+            continue
+        rows.append({
+            "port": p["port"], "addr": " ".join(str(p.get("addr") or "unknown").split())[:80],
+            "proc": " ".join(str(p.get("proc") or "unknown").split())[:80],
+            "pid": p.get("pid") if isinstance(p.get("pid"), int) else None,
+            "cwd": " ".join(p["cwd"].split())[:240] if isinstance(p.get("cwd"), str) else None,
+            "mine": p.get("mine") is True, "publicBind": p.get("publicBind") is True,
+            "fromAgent": p.get("fromAgent") is True, "cwdGone": p.get("cwdGone") is True,
+            "tmpLeftover": p.get("tmpLeftover") is True, "duplicate": p.get("duplicate") is True,
+            "idleSec": p.get("idleSec") if isinstance(p.get("idleSec"), (int, float)) else None,
+        })
+    try:
+        units = call("/machine/services?limit=" + str(max(0, min(48, limit))), method="GET", timeout=8)
+        if not isinstance(units, dict) or not isinstance(units.get("units"), list):
+            raise ValueError("invalid user service metadata")
+        def unit_count(key, fallback):
+            value = units.get(key)
+            return value if type(value) is int and value >= 0 else fallback
+        user_services = [{k: " ".join(str(row.get(k) or "").split())[:200]
+                          for k in ("unit", "load", "active", "sub", "description")}
+                         for row in units["units"] if isinstance(row, dict)]
+        user_services_report = {"total": unit_count("total", len(user_services)),
+                                "running": unit_count("running", 0), "failed": unit_count("failed", 0),
+                                "units": user_services[:limit], "omitted": unit_count("omitted", 0),
+                                "error": " ".join(units["error"].split())[:180] if isinstance(units.get("error"), str) else ""}
+    except (ValueError, OSError):
+        user_services_report = {"total": 0, "running": 0, "failed": 0, "units": [], "omitted": 0,
+                                "error": "user systemd service inventory unavailable"}
+    return {"ok": True, "result": {
+        "listening": len(data["ports"]), "mine": data.get("mine", 0), "external": data.get("external", 0),
+        "services": rows[:limit], "omitted": max(0, len(rows) - limit),
+        "error": " ".join(data["error"].split())[:180] if isinstance(data.get("error"), str) else "",
+        "userServices": user_services_report,
+        "attribution": "listener process context; agent ancestry is a signal, not ownership",
+    }}
+
+
+def managed_run(name, cwd, command, priority="background", memory_high=None):
+    """Start one argv as a user service with its own cgroup and stable unit id."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,63}", name):
+        return {"ok": False, "error": "run name must be 1–64 letters, numbers, spaces, dots, underscores, or hyphens"}
+    if not command or not command[0]:
+        return {"ok": False, "error": "command is required after --"}
+    cwd = os.path.realpath(os.path.expanduser(cwd))
+    if not os.path.isdir(cwd):
+        return {"ok": False, "error": "working directory is not a directory"}
+    if priority not in ("background", "normal"):
+        return {"ok": False, "error": "priority must be background or normal; managed work cannot outrank foreground apps"}
+    if memory_high is not None and not re.fullmatch(r"[1-9][0-9]*(?:K|M|G|T)", memory_high):
+        return {"ok": False, "error": "memory high must be a positive systemd size such as 4G or 750M"}
+
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:24] or "run"
+    unit = f"agentglass-run-{slug}-{uuid.uuid4().hex}.service"
+    weight = {"background": 20, "normal": 80}[priority]
+    argv = ["systemd-run", "--user", "--quiet", "--service-type=exec", f"--unit={unit}",
+            "--remain-after-exit", "--expand-environment=no",
+            f"--description=Agentglass workflow: {name}", f"--working-directory={cwd}",
+            f"--setenv=HOME={os.path.expanduser('~')}", f"--setenv=PATH={os.environ.get('PATH', '')}",
+            "--property=CPUAccounting=yes", "--property=MemoryAccounting=yes",
+            f"--property=CPUWeight={weight}"]
+    if memory_high is not None:
+        argv.append(f"--property=MemoryHigh={memory_high}")
+    argv.extend(["--", *command])
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"ok": False, "error": "systemd-run could not start the managed workflow"}
+    if result.returncode:
+        detail = " ".join((result.stderr or "").split())[:180]
+        return {"ok": False, "error": detail or "systemd-run could not start the managed workflow"}
+    return {"ok": True, "result": {"unit": unit, "name": name, "cwd": cwd,
+            "priority": priority, "cpuWeight": weight, "memoryHigh": memory_high}}
+
+
+def managed_runs(limit=12):
+    """Read bounded per-run cgroup accounting from this user's systemd manager."""
+    cap = max(0, min(24, int(limit)))
+    base = ["systemctl", "--user", "--no-pager"]
+    try:
+        listed = subprocess.run(base + ["--plain", "--no-legend", "list-units", "--all",
+            "--type=service", "agentglass-run-*.service"], capture_output=True, text=True,
+            timeout=8, check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"ok": False, "error": "systemctl --user could not list managed workflows"}
+    if listed.returncode:
+        detail = " ".join((listed.stderr or "").split())[:180]
+        return {"ok": False, "error": detail or "systemctl --user could not list managed workflows"}
+
+    found = []
+    for line in listed.stdout.splitlines():
+        fields = line.split(None, 4)
+        if len(fields) < 4 or not re.fullmatch(r"agentglass-run-[a-z0-9-]+-[a-f0-9]{32}\.service", fields[0]):
+            continue
+        found.append({"unit": fields[0], "load": fields[1], "active": fields[2],
+                      "sub": fields[3], "name": fields[4][:80] if len(fields) > 4 else fields[0]})
+
+    fields = ("CPUUsageNSec", "MemoryCurrent", "MemoryPeak", "TasksCurrent", "MainPID")
+    selected = found[:cap]
+    values_by_unit = {}
+    if selected:
+        try:
+            detail = subprocess.run(base + ["show", "--property=Id," + ",".join(fields),
+                *[row["unit"] for row in selected]], capture_output=True, text=True, timeout=8, check=False)
+            values = {}
+            for line in detail.stdout.splitlines() if detail.returncode == 0 else []:
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                if key == "Id":
+                    if values:
+                        values_by_unit[values["Id"]] = values
+                    values = {"Id": value}
+                elif values:
+                    values[key] = value
+            if values:
+                values_by_unit[values["Id"]] = values
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            values_by_unit = {}
+
+    rows = []
+    for row in selected:
+        values = values_by_unit.get(row["unit"], {})
+        for key, prop in (("cpuUsageNs", "CPUUsageNSec"), ("memoryCurrent", "MemoryCurrent"),
+                          ("memoryPeak", "MemoryPeak"), ("tasks", "TasksCurrent"), ("pid", "MainPID")):
+            value = values.get(prop, "")
+            row[key] = int(value) if value.isdigit() else None
+        rows.append(row)
+    return {"ok": True, "result": {"runs": rows, "total": len(found),
+            "omitted": max(0, len(found) - len(rows)),
+            "accounting": "per-systemd-unit cgroup; CPU is accumulated time, memory is current/peak"}}
+
+
+def stop_managed_run(unit):
+    if not isinstance(unit, str) or not re.fullmatch(r"agentglass-run-[a-z0-9-]+-[a-f0-9]{32}\.service", unit):
+        return {"ok": False, "error": "pass an exact managed workflow unit from `runs`"}
+    try:
+        result = subprocess.run(["systemctl", "--user", "stop", unit], capture_output=True,
+                                text=True, timeout=15, check=False)
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return {"ok": False, "error": "systemctl --user could not stop the managed workflow"}
+    if result.returncode:
+        try:
+            cleared = subprocess.run(["systemctl", "--user", "reset-failed", unit], capture_output=True,
+                                     text=True, timeout=10, check=False)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            cleared = None
+        if cleared is None or cleared.returncode:
+            detail = " ".join((result.stderr or "").split())[:180]
+            return {"ok": False, "error": detail or "managed workflow could not be stopped or cleared"}
+    return {"ok": True, "result": {"unit": unit, "stopped": True}}
+
+
+def status(limit, details=False):
+    """Two metadata reads. Never fetch sessions or transcripts for a glance."""
+    try:
+        projects = call("/projects", method="GET", timeout=3)
+        board = call("/agents/board", method="GET", timeout=3)
+    except (ValueError, OSError):
+        return {"ok": False, "error": "agentglass returned invalid status metadata"}
+    for value in (projects, board):
+        if isinstance(value, dict) and value.get("ok") is False:
+            return value
+    if not (isinstance(projects, dict) and isinstance(projects.get("projects"), list)
+            and isinstance(board, dict) and isinstance(board.get("agents"), list)):
+        return {"ok": False, "error": "agentglass returned invalid status metadata"}
+    rows = [r for r in board["agents"] if isinstance(r, dict) and not r.get("role")]
+    attention = [r for r in rows if r.get("attention")]
+    visible = sorted((r for r in rows if r.get("attention") or not r.get("gone")),
+                     key=lambda r: (not bool(r.get("attention")), r.get("state") != "working"))
+    # ponytail: capped metadata, use field/read for task text and session detail.
+    def short(value):
+        return " ".join(value.split())[:160] if isinstance(value, str) else ""
+    agents = []
+    for r in visible[:limit]:
+        need = r.get("needsYou") if isinstance(r.get("needsYou"), dict) else {}
+        pane_id = r.get("paneId")
+        agents.append({"name": short(r.get("name")), "state": short(r.get("state")),
+                       "project": short(r.get("worktree")), "attention": short(r.get("attention")),
+                       "reason": short(need.get("kind")),
+                       "paneId": pane_id if isinstance(pane_id, str) and re.fullmatch(r"%[0-9]+", pane_id) else None})
+    workspace = projects.get("workspace")
+    roots = projects.get("workspaces")
+    result = {
+        "version": 1, "updatedAt": int(time.time() * 1000), "reachable": True, "stale": False,
+        "error": "", "workspace": short(workspace) if workspace else None,
+        "workspaceCount": len(roots) if isinstance(roots, list) else int(bool(workspace)),
+        "scanning": projects.get("scanning") is True, "projectCount": len(projects["projects"]),
+        "counts": {"total": len(rows), "working": sum(r.get("state") == "working" and not r.get("gone") for r in rows),
+                   "waiting": len(attention)}, "agents": agents, "omitted": len(visible) - len(agents),
+    }
+    if details:
+        try:
+            kinds = call("/terminal/agents", method="GET", timeout=5)
+            if not isinstance(kinds, dict) or not isinstance(kinds.get("agents"), list):
+                raise ValueError("invalid agent kind metadata")
+            result["agentKinds"] = [{"id": short(r.get("id")), "title": short(r.get("title"))}
+                                    for r in kinds["agents"] if isinstance(r, dict) and r.get("installed") is True
+                                    and isinstance(r.get("id"), str)]
+        except (ValueError, OSError):
+            result["agentKinds"] = []
+            result["agentKindsError"] = "installed agent choices unavailable"
+        report = resources(limit)
+        result["resources"] = report.get("result")
+        if not report.get("ok"):
+            result["resourcesError"] = report.get("error")
+        listening = services(limit)
+        result["services"] = listening.get("result")
+        service_errors = []
+        if not listening.get("ok"):
+            service_errors.append(listening.get("error", "listener inventory unavailable"))
+        elif listening["result"].get("error"):
+            service_errors.append(listening["result"]["error"])
+        if service_errors:
+            result["servicesError"] = "; ".join(str(e) for e in service_errors)[:240]
+        try:
+            spend = call("/stats?window=86400000", method="GET", timeout=3)
+            totals = spend.get("totals") if isinstance(spend, dict) else None
+            if not isinstance(totals, dict):
+                raise ValueError("invalid spend metadata")
+            result["spend"] = {k: totals.get(k) for k in ("cost_usd", "input_tokens", "output_tokens")}
+            result["spend"]["window"] = "24h"
+        except (ValueError, OSError):
+            result["spendError"] = "spend unavailable"
+    return {"ok": True, "result": result}
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="agentglass-agent", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    p = sub.add_parser("start", help="seat an agent by name in a checkout")
+    p.add_argument("name")
+    p.add_argument("--cwd", required=True, help="the checkout (a worktree) it runs in")
+    p.add_argument("--kind", default=None, help="which CLI: claude (default), codex, ...")
+    p.add_argument("--role", choices=["scout", "builder", "verifier"],
+                   help="a worker role: the CLI and model Settings pick for it, locked against push, commit and merge")
+    p.add_argument("--yolo", action="store_true", help="skip permissions, if Settings allow it")
+    p.add_argument("--remote-control", metavar="NAME", help="Claude's --remote-control NAME")
+    p.add_argument("--prompt", default="", help="a first message on the command line (prefer `prompt` after `start`)")
+    p.add_argument("--prompt-stdin", action="store_true", help="read one JSON string line from stdin so prompt text is not in process arguments")
+    p.add_argument("--timeout", type=int, default=180000, help="ms to wait for the CLI to be up (0: return at once)")
+    p.add_argument("--keep", action="store_true",
+                   help="keep the tab for a day after the CLI exits, to `read` its answer; the agent still ends")
+    p.add_argument("args", nargs="*", help="extra CLI flags, after --")
+
+    p = sub.add_parser("prompt", help="hand the agent a message and press Enter until it is taken")
+    p.add_argument("name")
+    p.add_argument("text", nargs="?", default="", help="the message, as ONE quoted argument")
+    p.add_argument("--file", help="read the message from this file instead")
+    p.add_argument("--timeout", type=int, default=10000, help="ms to wait for the paste to land and be taken")
+
+    p = sub.add_parser("wait", help="block until the agent is in a state")
+    p.add_argument("name")
+    p.add_argument("--until", default="working", help="ready, working, needs-you or gone (comma to accept several)")
+    p.add_argument("--timeout", type=int, default=90000, help="ms")
+
+    p = sub.add_parser("read", help="the agent's screen")
+    p.add_argument("name")
+    p.add_argument("--lines", type=int, default=0, help="only the last N lines (0: the visible screen)")
+    p.add_argument("--text", action="store_true", help="print the screen as text instead of JSON")
+
+    p = sub.add_parser("send-keys", help="press one key: enter, escape, up, down, left, right, tab, space, backspace, ctrl-c")
+    p.add_argument("name")
+    p.add_argument("key")
+
+    p = sub.add_parser("list", help="every live named agent, as JSON")
+    p.add_argument("--all", action="store_true", help="include ended ones, with endedAt")
+
+    p = sub.add_parser("stop", help="stop a named agent — a tab you enlisted is LET GO, not killed")
+    p.add_argument("name")
+    p.add_argument("--kill", action="store_true",
+                   help="kill the window even for a tab you only enlisted: you mean the tab, not the registration")
+
+    p = sub.add_parser("schedule", help="start an agent later: at a clock time, a date-time, or after a delay")
+    p.add_argument("name")
+    p.add_argument("--cwd", required=True, help="the checkout it will run in")
+    p.add_argument("--at", required=True, help='"08:00" (today or tomorrow), "2026-09-06 08:00", or "+30m" / "+2h"')
+    p.add_argument("--kind", default="claude")
+    p.add_argument("--yolo", action="store_true", help="skip permissions, if Settings allow it (checked again when it fires)")
+    p.add_argument("--prompt", default="", help="its first message")
+    p.add_argument("--file", help="read the first message from this file")
+
+    sub.add_parser("schedules", help="every schedule: waiting first, then what fired and how")
+
+    p = sub.add_parser("unschedule", help="cancel a schedule that has not fired")
+    p.add_argument("id")
+
+    p = sub.add_parser("say", help="the orchestrator's one line for this round (run it from the project's checkout)")
+    p.add_argument("line", help="what a person should read: who needs them, what changed")
+    p.add_argument("--root", help="the project this is about (default: the current directory)")
+
+    p = sub.add_parser("enlist", help="take a tab you opened yourself under the app's hand, so broadcast, prompt and read reach it")
+    p.add_argument("name", help="what you will call it from now on")
+    p.add_argument("--pane", help="the tmux pane id (%%12). Exact, and the way to be sure")
+    p.add_argument("--window", help="the tmux window name, when it is not the same as <name>")
+
+    p = sub.add_parser("need", help="ask the person for the one action only they can take — and keep it on their screen until they take it")
+    p.add_argument("text", help="one line: what you are asking them to do")
+    p.add_argument("--cost", default="", help="what it costs them: 'one click', 'five minutes', 'a review round'")
+    p.add_argument("--recommend", default="", help="what you would do. Leave it out if you have no opinion rather than inventing one")
+    p.add_argument("--proof", default="", help="what would show it settled: a reviewer requested, a push landed")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("needs", help="what you have asked the person for and not had an answer to")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("settled", help="a decision you asked for has been taken (or no longer matters)")
+    p.add_argument("id")
+    p.add_argument("outcome", nargs="?", default="", help="one line: what came of it")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("task", help="put something on this project's queue — what you found, for whoever picks it up")
+    p.add_argument("title", help="one line: what is to be done")
+    p.add_argument("--proof", default="", help="what would prove it done: a test, a file, an output. An unstated proof is allowed and drawn as missing")
+    p.add_argument("--detail", default="", help="the rest of it, if a line is not enough")
+    p.add_argument("--weight", type=int, default=0, help="how big you think it is; 0 when you do not know")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("tasks", help="the queue as it stands: waiting, out, and what landed")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("drop", help="take a task off the queue")
+    p.add_argument("id")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("claim", help="take a queued task for a named agent, before you open it")
+    p.add_argument("id", help="the task id, as the queue gave it")
+    p.add_argument("--to", required=True, dest="to", help="the named agent that will carry it")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("finish", help="say how a queued task went")
+    p.add_argument("id")
+    p.add_argument("outcome", help="one line: what came of it")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("recall", help="what this person has already decided about something")
+    p.add_argument("question", help="in your own words, as ONE quoted argument")
+    p.add_argument("--root", help="the project (default: the current directory)")
+
+    p = sub.add_parser("orchestrate", help="put an orchestrator in a project's chair, or bring the one that is there")
+    p.add_argument("--project", help="the project's checkout (default: the current directory)")
+    p.add_argument("--powers", choices=["speak", "nudge", "assign"], help="what the chair may do (default: what the project already had, else speak)")
+    p.add_argument("--model", help="which model to seat (default: what this build calls cheapest-capable)")
+
+    p = sub.add_parser("adopt", help="tell the app that YOU are already this project's orchestrator (keeps your session and your context)")
+    p.add_argument("--project", help="the project's checkout (default: the current directory)")
+    p.add_argument("--pane", help="your tmux pane (default: $TMUX_PANE)")
+    p.add_argument("--session", default="", help="your session id, if you know it")
+    p.add_argument("--powers", choices=["speak", "nudge", "assign"], help="what the chair may do")
+
+    p = sub.add_parser("report", help="send your STATE/BLOCKED/NEED/COST to this project's orchestrator")
+    p.add_argument("text", nargs="?", default="", help="the report, as ONE quoted argument")
+    p.add_argument("--file", help="read the report from this file instead")
+    p.add_argument("--as", dest="who", help="your name (default: $AGENTGLASS_AGENT_NAME, else the tmux window)")
+    p.add_argument("--project", help="the project (default: the current directory)")
+
+    p = sub.add_parser("field", help="who is working in this project, what state, and since when — a few lines")
+    p.add_argument("--project", help="the project (default: the current directory)")
+    p.add_argument("--json", action="store_true", help="the rows as JSON instead of the readout")
+
+    p = sub.add_parser("inbox", help="every unread report, in one call, and marks them read")
+    p.add_argument("--project", help="the project (default: the current directory)")
+    p.add_argument("--peek", action="store_true", help="read without marking them read")
+
+    p = sub.add_parser("broadcast", help="one message to many named agents")
+    p.add_argument("text", help="the message, as ONE quoted argument")
+    p.add_argument("--to", help="comma-separated names (default: every live named agent)")
+    p.add_argument("--timeout", type=int, default=10000, help="ms to wait for each paste to land")
+
+    sub.add_parser("health", help="is agentglass listening")
+
+    p = sub.add_parser("status", help="compact observed workflows and attention, without transcripts")
+    p.add_argument("--json", action="store_true", help="bounded metadata for scripts and widgets")
+    p.add_argument("--limit", type=int, choices=range(0, 13), default=5, metavar="0..12")
+    p.add_argument("--details", action="store_true", help="also read machine capacity, services, installed agent kinds, and 24h spend")
+
+    p = sub.add_parser("resources", help="bounded process CPU, RSS and parent PID; no command lines")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=int, choices=range(0, 25), default=5, metavar="0..24")
+
+    p = sub.add_parser("run", help="run an argv in its own systemd cgroup; default is background CPU weight")
+    p.add_argument("name", help="short label shown in the workflow list")
+    p.add_argument("--cwd", required=True, help="working directory for the command")
+    p.add_argument("--priority", choices=("background", "normal"), default="background")
+    p.add_argument("--memory-high", help="optional soft memory pressure threshold, e.g. 4G")
+
+    p = sub.add_parser("runs", help="list bounded managed workflow runs and their cgroup usage")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=int, choices=range(0, 25), default=12, metavar="0..24")
+
+    p = sub.add_parser("run-stop", help="stop only an exact unit shown by `runs`")
+    p.add_argument("unit")
+
+    p = sub.add_parser("services", help="bounded read-only listening services with process context")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--limit", type=int, choices=range(0, 25), default=12, metavar="0..24")
+
+    p = sub.add_parser("focus", help="focus an agent only while its board row still names the live pane")
+    p.add_argument("name", help="the exact agent name from status")
+    p.add_argument("pane_id", help="the exact pane id shown on the native dashboard")
+
+    p = sub.add_parser("workspace", help="persist the cockpit's scope (affects connected clients)")
+    scope = p.add_mutually_exclusive_group(required=True)
+    scope.add_argument("--home", action="store_true", help="scope to your home directory")
+    scope.add_argument("--all", action="store_true", help="clear scope: every project on the machine")
+    p.add_argument("--discover", action="store_true", help="with --home: register already-observed home repositories in the picker")
+
+    sub.add_parser("setup", help="set home scope, connect installed supported agents, and verify")
+
+    p = sub.add_parser("connections", help="bounded installed/configured/received-event checks, without transcripts")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--connect", nargs="?", const="all", metavar="ID|all", help="wire one agent, or every installed supported agent")
+
+    # Everything after a bare `--` is the agent CLI's, not ours. Split it off
+    # by hand: argparse only learned to hand `-- --flag value` to a trailing
+    # `nargs="*"` positional inside a sub-command in Python 3.13, and 3.12
+    # answers "unrecognized arguments" with exit 2 — which is what the CI
+    # runners run.
+    argv = sys.argv[1:]
+    passthrough = []
+    if "--" in argv:
+        cut = argv.index("--")
+        passthrough = argv[cut + 1:]
+        argv = argv[:cut]
+    a = ap.parse_args(argv)
+    if a.cmd == "workspace" and a.discover and not a.home:
+        ap.error("--discover requires --home")
+
+    if a.cmd == "health":
+        return emit(call("/health", method="GET", timeout=10))
+    if a.cmd == "workspace":
+        return emit(workspace(a.home, a.discover))
+    if a.cmd == "setup":
+        return emit(setup())
+    if a.cmd == "connections":
+        res = connections(a.connect)
+        if a.json or not res.get("ok"):
+            return emit(res)
+        for row in res["result"]["agents"]:
+            print(f"{row['id']}: installed={'yes' if row['installed'] else 'no'} | configured={'yes' if row['configured'] else 'no'} | last received={row['lastReceivedAt'] or 'none'}")
+        print(res["result"]["coverage"])
+        return 0
+    if a.cmd == "focus":
+        return emit(focus_agent(a.name, a.pane_id))
+    if a.cmd == "run":
+        return emit(managed_run(a.name, a.cwd, passthrough, a.priority, a.memory_high))
+    if a.cmd == "runs":
+        res = managed_runs(a.limit)
+        if a.json or not res.get("ok"):
+            return emit(res)
+        result = res["result"]
+        print(f"{result['total']} managed workflows · {result['accounting']}")
+        for row in result["runs"]:
+            memory = f"{row['memoryCurrent'] / (1024 ** 2):.0f}/{row['memoryPeak'] / (1024 ** 2):.0f} MiB" if row["memoryCurrent"] is not None and row["memoryPeak"] is not None else "memory unavailable"
+            cpu = f"{row['cpuUsageNs'] / 1e9:.1f}s CPU" if row["cpuUsageNs"] is not None else "CPU unavailable"
+            print(f"{row['unit']} · {row['active']}/{row['sub']} · {cpu} · {memory}")
+        if result["omitted"]:
+            print(f"+{result['omitted']} more workflows")
+        return 0
+    if a.cmd == "run-stop":
+        return emit(stop_managed_run(a.unit))
+    if a.cmd == "resources":
+        res = resources(a.limit)
+        if a.json or not res.get("ok"):
+            return emit(res)
+        r = res["result"]
+        print(f"{r['seen']} user processes | {r['attribution']}")
+        for p in r["procs"]:
+            cpu = f"{p['cpu']:.1f}%" if isinstance(p['cpu'], (int, float)) else "sampling"
+            rss = (p['rss'] or 0) / (1024 * 1024)
+            print(f"{p['pid']} <- {p['ppid']} | {p['comm']} | CPU {cpu} | RSS {rss:.0f} MiB"
+                  f" | cwd {p['cwd'] or 'unknown'}")
+        if r["omitted"]:
+            print(f"+{r['omitted']} not shown")
+        return 0
+    if a.cmd == "services":
+        res = services(a.limit)
+        if a.json or not res.get("ok"):
+            return emit(res)
+        r = res["result"]
+        print(f"{r['listening']} listening | {r['mine']} owned by this user | {r['external']} process details unavailable")
+        for p in r["services"]:
+            flags = ("PUBLIC BIND " if p["publicBind"] else "") + ("agent ancestry " if p["fromAgent"] else "")
+            print(f":{p['port']} {p['proc']} pid={p['pid'] or '?'} {p['addr']} {flags}cwd={p['cwd'] or 'unknown'}")
+        user_units = r["userServices"]
+        print(f"User services: {user_units['total']} total · {user_units['running']} running · {user_units['failed']} failed")
+        for unit in user_units["units"]:
+            print(f"{unit['unit']} · {unit['active']}/{unit['sub']} · {unit['description']}")
+        if r["omitted"]:
+            print(f"+{r['omitted']} not shown")
+        if r["error"]:
+            print(f"unavailable: {r['error']}", file=sys.stderr)
+            return 1
+        if user_units["error"]:
+            print(f"user services unavailable: {user_units['error']}", file=sys.stderr)
+            return 1
+        return 0
+    if a.cmd == "status":
+        res = status(a.limit, a.details)
+        if a.json:
+            return emit(res)
+        if not res.get("ok"):
+            print(res.get("error", "status unavailable"), file=sys.stderr)
+            return 1
+        s = res["result"]
+        c = s["counts"]
+        print(f"{c['working']} working | {c['waiting']} need attention | {c['total']} observed | {s['projectCount']} known projects")
+        scope = s["workspace"] or "whole machine"
+        if s["workspaceCount"] > 1:
+            scope += f" (+{s['workspaceCount'] - 1} roots)"
+        print(f"scope: {scope} | scanner: {'on' if s['scanning'] else 'off'}")
+        if a.details:
+            machine = (s.get("resources") or {}).get("machine", {})
+            cpu = f"{machine['cpu']:.1f}%" if isinstance(machine.get("cpu"), (int, float)) else "sampling/unavailable"
+            used = machine.get("memUsed")
+            memory = f"{used / (1024 ** 3):.1f} GiB" if isinstance(used, (int, float)) else "unavailable"
+            cost = (s.get("spend") or {}).get("cost_usd")
+            spend = f"${cost:.4f}" if isinstance(cost, (int, float)) else "unavailable"
+            print(f"CPU: {cpu} | memory used: {memory} | recorded spend (24h): {spend}")
+            service_data = s.get("services") or {}
+            print(f"Listening services: {service_data.get('listening', 'unavailable')}"
+                  + (f" | {s['servicesError']}" if s.get("servicesError") else ""))
+        for r in s["agents"]:
+            state = r["attention"] or r["state"] or "unknown"
+            print(f"{r['name']}: {state}{' (' + r['reason'] + ')' if r['reason'] else ''} | {r['project']}")
+        if s["omitted"]:
+            print(f"+{s['omitted']} more; use --limit 12 or agentglass-agent field --project <path>")
+        return 0
+    if a.cmd == "list":
+        return emit(call("/agents/named" + ("?all=1" if a.all else ""), method="GET", timeout=60))
+    if a.cmd == "start":
+        prompt = a.prompt
+        if a.prompt_stdin:
+            if prompt:
+                return emit({"ok": False, "error": "use either --prompt or --prompt-stdin"})
+            try:
+                encoded = sys.stdin.readline(32769)
+                prompt = json.loads(encoded)
+            except (ValueError, TypeError):
+                return emit({"ok": False, "error": "stdin must contain one JSON string line"})
+            try:
+                prompt_size = len(prompt.encode("utf-8")) if isinstance(prompt, str) else 4097
+            except UnicodeEncodeError:
+                prompt_size = 4097
+            if prompt_size > 4096:
+                return emit({"ok": False, "error": "stdin prompt must be a string of at most 4096 bytes"})
+        body = {"name": a.name, "cwd": os.path.abspath(os.path.expanduser(a.cwd)),
+                "yolo": bool(a.yolo), "prompt": prompt, "timeout": a.timeout, "args": list(a.args) + passthrough}
+        # Absent rather than "claude": the server defaults it, and a role picks
+        # its own CLI and refuses a different one named beside it.
+        if a.kind:
+            body["kind"] = a.kind
+        if a.role:
+            body["role"] = a.role
+        if a.remote_control:
+            body["remoteControl"] = a.remote_control
+        if a.keep:
+            body["keep"] = True
+        return emit(call("/agents/named/start", body))
+    if a.cmd == "prompt":
+        text = a.text
+        if a.file:
+            with open(a.file, encoding="utf-8") as f:
+                text = f.read()
+        if not text.strip():
+            return emit({"ok": False, "error": "nothing to send: pass the text or --file"})
+        return emit(call("/agents/named/prompt", {"name": a.name, "text": text, "timeout": a.timeout}))
+    if a.cmd == "wait":
+        return emit(call("/agents/named/wait", {"name": a.name, "until": a.until, "timeout": a.timeout}))
+    if a.cmd == "read":
+        res = call("/agents/named/read", {"name": a.name, "lines": a.lines}, timeout=30)
+        if a.text and res.get("ok"):
+            print(res["result"]["text"])
+            return 0
+        return emit(res)
+    if a.cmd == "send-keys":
+        return emit(call("/agents/named/keys", {"name": a.name, "key": a.key}, timeout=30))
+    if a.cmd == "stop":
+        return emit(call("/agents/named/stop", {"name": a.name, "kill": bool(a.kill)}, timeout=30))
+    if a.cmd == "schedule":
+        text = a.prompt
+        if a.file:
+            with open(a.file, encoding="utf-8") as f:
+                text = f.read()
+        return emit(call("/agents/schedule", {"name": a.name, "cwd": os.path.abspath(os.path.expanduser(a.cwd)), "kind": a.kind,
+                                              "yolo": bool(a.yolo), "prompt": text, "when": a.at}, timeout=30))
+    if a.cmd == "schedules":
+        return emit(call("/agents/schedule", method="GET", timeout=30))
+    if a.cmd == "unschedule":
+        return emit(call("/agents/schedule/cancel", {"id": a.id}, timeout=30))
+    if a.cmd == "report":
+        text = a.text
+        if a.file:
+            with open(a.file, encoding="utf-8") as f:
+                text = f.read()
+        if not text.strip():
+            return emit({"ok": False, "error": "nothing to report: pass the text or --file"})
+        root = os.path.abspath(os.path.expanduser(a.project)) if a.project else os.getcwd()
+        # Your own name, in the order the app can know it: what it started you
+        # as, then the tmux window you are in, then the checkout you are in.
+        who = a.who or os.environ.get("AGENTGLASS_AGENT_NAME") or os.environ.get("TMUX_WINDOW_NAME") or os.path.basename(root)
+        return emit(call("/seat/report", {"root": root, "agent": who, "text": text}, timeout=30))
+    if a.cmd == "field":
+        root = os.path.abspath(os.path.expanduser(a.project)) if a.project else os.getcwd()
+        q = urllib.parse.urlencode({"root": root, **({"format": "json"} if a.json else {})})
+        if a.json:
+            return emit(call("/seat/field?" + q, method="GET", timeout=30))
+        ok, out = text_call("/seat/field?" + q)
+        print(out)
+        return 0 if ok else 1
+    if a.cmd == "inbox":
+        root = os.path.abspath(os.path.expanduser(a.project)) if a.project else os.getcwd()
+        return emit(call("/seat/inbox", {"root": root, "peek": bool(a.peek)}, timeout=30))
+    if a.cmd == "broadcast":
+        body = {"text": a.text, "timeout": a.timeout}
+        if a.to:
+            body["names"] = [n.strip() for n in a.to.split(",") if n.strip()]
+        return emit(call("/agents/named/broadcast", body, timeout=630))
+    if a.cmd == "adopt":
+        root = os.path.abspath(os.path.expanduser(a.project)) if a.project else os.getcwd()
+        pane = a.pane or os.environ.get("TMUX_PANE", "")
+        if not pane:
+            return emit({"ok": False, "error": "no pane: run this from inside your tmux pane, or pass --pane %N"})
+        body = {"root": root, "pane": pane, "session": a.session}
+        if a.powers:
+            body["powers"] = a.powers
+        return emit(call("/seat/adopt", body, timeout=60))
+    if a.cmd == "orchestrate":
+        root = os.path.abspath(os.path.expanduser(a.project)) if a.project else os.getcwd()
+        body = {"root": root}
+        if a.powers:
+            body["powers"] = a.powers
+        if a.model:
+            body["model"] = a.model
+        return emit(call("/seat/orchestrate", body, timeout=180))
+    if a.cmd == "recall":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/recall", {"root": root, "question": a.question}, timeout=30))
+    if a.cmd == "enlist":
+        body = {"name": a.name}
+        if a.pane:
+            body["pane"] = a.pane
+        if a.window:
+            body["window"] = a.window
+        return emit(call("/agents/named/enlist", body, timeout=30))
+    if a.cmd == "need":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/need", {
+            "root": root, "text": a.text, "cost": a.cost, "recommend": a.recommend, "proof": a.proof,
+        }, timeout=30))
+    if a.cmd == "needs":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        ok, out = text_call("/seat/needs?" + urllib.parse.urlencode({"root": root}))
+        print(out)
+        return 0 if ok else 1
+    if a.cmd == "settled":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/need/finish", {"root": root, "id": a.id, "outcome": a.outcome}, timeout=30))
+    if a.cmd == "task":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/task", {
+            "root": root, "title": a.title, "proof": a.proof, "detail": a.detail, "weight": a.weight,
+        }, timeout=30))
+    if a.cmd == "tasks":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/tasks?root=" + urllib.parse.quote(root), method="GET", timeout=30))
+    if a.cmd == "drop":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/task/drop", {"root": root, "id": a.id}, timeout=30))
+    if a.cmd == "claim":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/task/claim", {"root": root, "id": a.id, "agent": a.to}, timeout=30))
+    if a.cmd == "finish":
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/task/finish", {"root": root, "id": a.id, "outcome": a.outcome}, timeout=30))
+    if a.cmd == "say":
+        # The seat runs IN its project's checkout, so the default root is the
+        # working directory: one less thing for a prompt to get wrong, and a
+        # line said from the wrong directory lands on the wrong project's view.
+        root = os.path.abspath(os.path.expanduser(a.root)) if a.root else os.getcwd()
+        return emit(call("/seat/say", {"root": root, "line": a.line}, timeout=30))
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

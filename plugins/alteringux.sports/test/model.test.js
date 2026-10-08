@@ -25,6 +25,9 @@ test("parseState returns defaults for unparseable JSON instead of throwing", () 
 test("parseState reads a well-formed state file", () => {
   const st = Model.parseState(JSON.stringify({
     version: 1, updatedAt: "2026-09-13T10:00:00Z",
+    matchDataUpdatedAt: "2026-09-12T20:00:00Z",
+    articleDataUpdatedAt: "2026-09-12T19:00:00Z",
+    refreshHealth: { usedCachedMatches: true, usedCachedArticles: false },
     live: [{ id: "1", sport: "Rugby", homeTeam: "A", awayTeam: "B", homeScore: 10, awayScore: 7, status: "2H", elapsed: 62 }],
     upcoming: [{ id: "2", sport: "Rugby", homeTeam: "A", awayTeam: "C", dateEvent: "2026-09-20", strTimestamp: "2026-09-20T15:00:00" }],
     results: [{ id: "3", sport: "Rugby", homeTeam: "A", awayTeam: "D", dateEvent: "2026-09-06", homeScore: 20, awayScore: 15 }],
@@ -35,6 +38,9 @@ test("parseState reads a well-formed state file", () => {
     teams: { "9": { idTeam: "9", strTeam: "Arsenal", strTeamBadge: "https://example.test/badge.png" } }
   }))
   assert.strictEqual(st.updatedAt, "2026-09-13T10:00:00Z")
+  assert.strictEqual(st.matchDataUpdatedAt, "2026-09-12T20:00:00Z")
+  assert.strictEqual(st.articleDataUpdatedAt, "2026-09-12T19:00:00Z")
+  assert.deepStrictEqual(st.refreshHealth, { usedCachedMatches: true, usedCachedArticles: false })
   assert.strictEqual(st.live.length, 1)
   assert.strictEqual(st.upcoming.length, 1)
   assert.strictEqual(st.results.length, 1)
@@ -226,15 +232,8 @@ test("sportGlyph falls back to the trophy for unknown sports", () => {
 test("sport metadata includes UFC and visual accent colors", () => {
   assert.strictEqual(Model.sportLabel("Fighting"), "UFC / MMA")
   assert.strictEqual(Model.sportGlyph("Fighting"), "󰒃")
-  assert.strictEqual(Model.sportColor("Fighting"), "#FF5277")
+  assert.strictEqual(Model.sportColor("Fighting"), "#FF0066")
   assert.notStrictEqual(Model.sportColor("Golf"), Model.sportColor("Soccer"))
-})
-
-test("sportEmoji provides recognizable icons for configured sports", () => {
-  assert.strictEqual(Model.sportEmoji("Soccer"), "⚽")
-  assert.strictEqual(Model.sportEmoji("Basketball"), "🏀")
-  assert.strictEqual(Model.sportEmoji("Fighting"), "🥊")
-  assert.strictEqual(Model.sportEmoji("Hurling"), "🏆")
 })
 
 test("match media helpers preserve provider links and generate legal searches", () => {

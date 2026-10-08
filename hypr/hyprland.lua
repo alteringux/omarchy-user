@@ -27,8 +27,3 @@ require("default.hypr.toggles")
 
 -- Add any other personal Hyprland configuration below.
 -- o.window("qemu", { workspace = "5" })
-
--- Pin browsers to fixed workspaces on launch. "silent" = don't yank focus
--- to that workspace while everything comes up on login.
-o.window("zen", { workspace = "2 silent" })
-o.window("chromium", { workspace = "3 silent" })

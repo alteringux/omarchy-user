@@ -1,4 +1,5 @@
 import QtQuick
+import "../shared"
 import QtQuick.Layouts
 import Quickshell
 import qs.Commons
@@ -14,6 +15,7 @@ import "../alteringux.kit" as Kit
 // dimmed once past), the target date, and a × to delete it. Same shape as the
 // alteringux.timers overlay.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.countdown"
   ipcTarget: ""
@@ -28,7 +30,7 @@ Panel {
 
   // "soon" tint — the shared warning amber (alteringux.timers' "running
   // long" colour lives here too now: Kit.Palette.warning, not a re-hardcoded hex).
-  readonly property color soonColor: Kit.Palette.warning
+  readonly property color soonColor: _webPalette.warning
 
   // Month the calendar is showing, and the day picked in it ("" = none yet).
   property int viewYear: (new Date()).getFullYear()
@@ -51,6 +53,26 @@ Panel {
   readonly property var added: hostWidget ? hostWidget.added : []
   readonly property var sorted: Model.sortedBySoonest(root.entries)
   readonly property var chips: Model.rankLabels(root.added, root.entries, 4)
+
+  property int submittedGeneration: -1
+  property string submittedText: ""
+  property string submittedKey: ""
+  readonly property bool submissionPending: hostWidget && hostWidget.actionPending && submittedGeneration === hostWidget.actionGeneration
+
+  Connections {
+    target: root.hostWidget
+    ignoreUnknownSignals: true
+    function onActionFeedback(message, generation, success) {
+      if (generation === root.submittedGeneration) {
+        if (success && labelField.text === root.submittedText && root.selectedKey === root.submittedKey) {
+          labelField.text = ""
+          root.selectedKey = ""
+        }
+        root.submittedGeneration = -1
+      }
+      if (root.opened && feedbackText.visible) feedbackText.Accessible.announce(message)
+    }
+  }
 
   // Snap the calendar back to the current month and clear the pick each time
   // the overlay opens, so a stale month view from days ago can't linger.
@@ -76,13 +98,13 @@ Panel {
   // the Add button — one "add" path.
   function submit() {
     guard.run("submit", function() {
-      if (!hostWidget) return
+      if (!hostWidget || root.submissionPending) return
       var text = labelField.text
       if (!text || text.trim().length === 0) return
       if (!root.hasValidSelection) return
-      hostWidget.addEntryAt(text, root.selectedEpoch)
-      labelField.text = ""
-      root.selectedKey = ""
+      root.submittedText = text
+      root.submittedKey = root.selectedKey
+      root.submittedGeneration = hostWidget.addEntryAt(text, root.selectedEpoch)
       labelField.forceActiveFocus()
     })
   }
@@ -102,7 +124,7 @@ Panel {
     })
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -112,7 +134,7 @@ Panel {
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(560)))
     focusTarget: labelField
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       // While the label field is focused, or a card label is being edited in
       // place, let every keystroke (space, x, hjkl, Esc) reach the field
@@ -121,6 +143,9 @@ Panel {
 
       onCloseRequested: root.close()
       onActivateRequested: root.submit()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Add a countdown from the current input", context: "Countdown · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -140,6 +165,20 @@ Panel {
             foreground: root.barForeground
           }
 
+          Text {
+            id: feedbackText
+            width: parent.width
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            visible: text.length > 0
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+          }
+
           // ---- date picker -------------------------------------------
           readonly property real calCellW: Math.floor((content.width - root.calGap * 6) / 7)
           readonly property real calCellH: Style.space(26)
@@ -153,7 +192,10 @@ Panel {
               width: parent.width
               height: prevBtn.implicitHeight
 
-              Button {
+              Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Previous month"
                 id: prevBtn
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
@@ -171,7 +213,10 @@ Panel {
                 font.pixelSize: Style.font.body
                 font.bold: true
               }
-              Button {
+              Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Next month"
                 id: nextBtn
                 anchors.right: parent.right
                 anchors.verticalCenter: parent.verticalCenter
@@ -221,19 +266,33 @@ Panel {
                     width: content.calCellW
                     height: content.calCellH
                     radius: Style.cornerRadius
-                    color: cell.selected ? Util.alpha(Color.accent, 0.9)
+                    activeFocusOnTab: cell.future
+                    Accessible.role: Accessible.RadioButton
+                    Accessible.name: "Select " + Qt.formatDate(
+                      new Date(cell.modelData.year, cell.modelData.month, cell.modelData.day), "dddd, MMMM d, yyyy")
+                    Accessible.checkable: true
+                    Accessible.checked: cell.selected
+                    Accessible.description: (cell.isToday ? "Today. " : "")
+                      + (!cell.future ? "Past dates are unavailable for countdowns." : "")
+                    Accessible.onPressAction: activate()
+                    color: cell.selected ? Util.alpha(_webPalette.accent, 0.9)
                           : (cellMouse.containsMouse && cell.future ? Util.alpha(root.barForeground, 0.12)
                           : "transparent")
-                    border.width: cell.isToday && !cell.selected ? Style.spacing.hairline : 0
-                    border.color: Util.alpha(root.barForeground, 0.35)
+                    border.width: activeFocus || (cell.isToday && !cell.selected) ? Style.spacing.hairline : 0
+                    border.color: activeFocus ? _webPalette.accent : Util.alpha(root.barForeground, 0.35)
+
+                    function activate() { if (cell.future) root.selectedKey = cell.modelData.key }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
 
                     Text {
                       anchors.centerIn: parent
                       text: cell.modelData.day
-                      color: cell.selected ? Color.background : root.barForeground
+                      color: cell.selected ? _webPalette.background : root.barForeground
                       opacity: cell.selected ? 1
-                              : (!cell.modelData.inMonth ? 0.22
-                              : (cell.future ? 0.95 : 0.3))
+                        : (!cell.modelData.inMonth ? 0.22
+                        : (cell.future ? 0.95 : 0.3))
                       font.family: Style.font.family
                       font.pixelSize: Style.font.bodySmall
                       font.bold: cell.selected || cell.isToday
@@ -245,7 +304,7 @@ Panel {
                       hoverEnabled: true
                       enabled: cell.future
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: root.selectedKey = cell.modelData.key
+                      onClicked: { cell.forceActiveFocus(); cell.activate() }
                     }
                   }
                 }
@@ -258,8 +317,7 @@ Panel {
                 ? "Pick a future date"
                 : Model.formatTarget(root.selectedEpoch) + "  ·  "
                   + Model.formatRemaining(Model.daysRemaining(root.selectedEpoch, root.nowMs))
-              color: root.hasValidSelection ? Color.accent : root.barForeground
-              opacity: root.selectedKey === "" ? 0.55 : 1
+              color: root.hasValidSelection ? _webPalette.accent : root.barForeground
               font.family: Style.font.family
               font.pixelSize: Style.font.bodySmall
               font.bold: root.hasValidSelection
@@ -278,12 +336,15 @@ Panel {
               foreground: root.barForeground
               onAccepted: root.submit()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               id: addButton
               text: "Add"
               foreground: root.barForeground
               bordered: true
-              enabled: labelField.text.trim().length > 0 && root.hasValidSelection
+              enabled: labelField.text.trim().length > 0 && root.hasValidSelection && !root.submissionPending
               onClicked: root.submit()
             }
           }
@@ -302,6 +363,10 @@ Panel {
               delegate: Rectangle {
                 id: chip
                 required property var modelData
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Use remembered countdown " + chip.fullText
+                Accessible.onPressAction: root.applyChip(chip.modelData)
                 readonly property string fullText: modelData.label
                   + (modelData.days >= 1 ? ("  " + modelData.days + "d") : "")
 
@@ -310,7 +375,12 @@ Panel {
                 radius: Style.cornerRadius
                 color: chipMouse.containsMouse ? Util.alpha(root.barForeground, 0.10) : "transparent"
                 border.width: 1
-                border.color: Util.alpha(root.barForeground, 0.25)
+                border.color: activeFocus ? _webPalette.accent : Util.alpha(root.barForeground, 0.25)
+
+                Keys.onReturnPressed: root.applyChip(chip.modelData)
+
+                Keys.onEnterPressed: root.applyChip(chip.modelData)
+                Keys.onSpacePressed: root.applyChip(chip.modelData)
 
                 // Prefill from the label. Sits below the × handler in the
                 // stack, so clicks on the × don't reach this.
@@ -319,7 +389,7 @@ Panel {
                   anchors.fill: parent
                   hoverEnabled: true
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: root.applyChip(chip.modelData)
+                  onClicked: { chip.forceActiveFocus(); root.applyChip(chip.modelData) }
                 }
 
                 Row {
@@ -327,31 +397,32 @@ Panel {
                   anchors.centerIn: parent
                   spacing: Style.space(6)
 
-                  Text {
-                    text: chipMetrics.elidedText
+                  MarqueeText {
+                    text: chip.fullText
+                    width: content.width - Style.space(48)
                     color: root.barForeground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.body
                     anchors.verticalCenter: parent.verticalCenter
-
-                    TextMetrics {
-                      id: chipMetrics
-                      text: chip.fullText
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.body
-                      elide: Qt.ElideRight
-                      // panel width minus this pill's padding, the × and its gap
-                      elideWidth: content.width - Style.space(48)
-                    }
                   }
 
                   Text {
+                    id: forgetChipAction
                     text: "×"
-                    color: root.barForeground
-                    opacity: forgetMouse.containsMouse ? 1 : 0.45
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Forget countdown label " + chip.modelData.label
+                    Accessible.onPressAction: activate()
+                    color: activeFocus ? _webPalette.accent : root.barForeground
                     font.family: Style.font.family
                     font.pixelSize: Style.font.body
+                    font.underline: activeFocus
                     anchors.verticalCenter: parent.verticalCenter
+
+                    function activate() { if (hostWidget) hostWidget.forgetLabel(chip.modelData.label) }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
 
                     MouseArea {
                       id: forgetMouse
@@ -359,7 +430,7 @@ Panel {
                       anchors.margins: -4
                       hoverEnabled: true
                       cursorShape: Qt.PointingHandCursor
-                      onClicked: if (hostWidget) hostWidget.forgetLabel(chip.modelData.label)
+                      onClicked: { forgetChipAction.forceActiveFocus(); forgetChipAction.activate() }
                     }
                   }
                 }
@@ -392,23 +463,33 @@ Panel {
               color: Util.alpha(root.barForeground, card.past ? 0.03 : 0.05)
               border.width: 1
               border.color: card.soon ? Util.alpha(root.soonColor, 0.55)
-                                      : Util.alpha(root.barForeground, 0.14)
+                                      : _webPalette.cardBorderFor(root.barForeground)
 
               Text {
+                id: removeCountdownAction
                 text: "×"
-                color: root.barForeground
-                opacity: 0.5
+                activeFocusOnTab: true
+                Accessible.role: Accessible.Button
+                Accessible.name: "Remove countdown " + card.modelData.label
+                Accessible.onPressAction: activate()
+                color: activeFocus ? _webPalette.accent : root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
+                font.underline: activeFocus
                 anchors.top: parent.top
                 anchors.right: parent.right
                 anchors.margins: Style.space(8)
+
+                function activate() { if (hostWidget) hostWidget.removeEntry(card.modelData.id) }
+                Keys.onReturnPressed: activate()
+                Keys.onEnterPressed: activate()
+                Keys.onSpacePressed: activate()
 
                 MouseArea {
                   anchors.fill: parent
                   anchors.margins: -6
                   cursorShape: Qt.PointingHandCursor
-                  onClicked: if (hostWidget) hostWidget.removeEntry(modelData.id)
+                  onClicked: { removeCountdownAction.forceActiveFocus(); removeCountdownAction.activate() }
                 }
               }
 
@@ -424,8 +505,7 @@ Panel {
                 Kit.InlineEdit {
                   width: parent.width
                   text: card.modelData.label
-                  foreground: root.barForeground
-                  textOpacity: card.past ? 0.6 : 1
+                  foreground: card.past ? _webPalette.muted : root.barForeground
                   pixelSize: Style.font.body
                   bold: true
                   placeholderText: "What are you counting down to?"
@@ -441,27 +521,37 @@ Panel {
                   Text {
                     id: remainingText
                     width: parent.width
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: card.showingMinutes
+                      ? "Show days remaining for " + card.modelData.label
+                      : "Show minutes remaining for " + card.modelData.label
+                    Accessible.onPressAction: activate()
                     text: card.showingMinutes
                       ? Model.formatMinutesRemaining(
                           Model.minutesRemaining(modelData.targetEpoch, root.nowMs))
                       : Model.formatRemaining(card.daysLeft)
-                    color: card.soon ? root.soonColor : (card.past ? root.barForeground : Color.accent)
-                    opacity: card.past ? 0.6 : 1
+                    color: activeFocus ? _webPalette.accent : card.soon ? root.soonColor : (card.past ? root.barForeground : _webPalette.accent)
                     font.family: Style.font.family
                     font.pixelSize: Style.font.heading
                     font.bold: true
+                    font.underline: activeFocus
+
+                    function activate() { card.showingMinutes = !card.showingMinutes }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
                   }
 
                   MouseArea {
                     anchors.fill: parent
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: card.showingMinutes = !card.showingMinutes
+                    onClicked: { remainingText.forceActiveFocus(); remainingText.activate() }
                   }
                 }
                 Text {
                   text: Model.formatTarget(modelData.targetEpoch)
-                  color: root.barForeground
-                  opacity: 0.5
+                  color: _webPalette.muted
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -473,7 +563,7 @@ Panel {
 
           Text {
             text: "Enter: add  ·  Esc: close"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
           }

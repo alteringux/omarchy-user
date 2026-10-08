@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.wordstep",
+  "name": "Wordstep Reader",
+  "version": "1.0.0",
+  "author": "alteringux",
+  "description": "Read selected text with optional Piper speech, paced syllable highlighting, code-aware reading, and saved statistics",
+  "kinds": [
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "WordStep.qml"
+  }
+}

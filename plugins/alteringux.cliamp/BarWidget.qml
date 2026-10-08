@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Bar widget for the cliamp terminal music player. It owns nothing about
 // playback — cliamp does, behind its control socket. This widget only:
@@ -19,6 +20,7 @@ import "../alteringux.kit" as Kit
 // Hosted on alteringux.bottombar, so it must NOT also be listed in
 // shell.json's top-bar layout or its IpcHandler double-registers.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.cliamp"
 
@@ -313,7 +315,7 @@ BarWidget {
             required property int index
             width: Style.spaceReal(2.5)
             radius: width / 2
-            color: root.bar ? root.bar.barForeground : Color.bar.text
+            color: root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.barForeground
             opacity: root.playing ? 0.92 : 0.4
             anchors.verticalCenter: parent.verticalCenter
             height: Math.max(Style.spaceReal(2),
@@ -324,17 +326,17 @@ BarWidget {
         }
       }
 
-      Text {
+      MarqueeText {
         id: titleText
         anchors.verticalCenter: parent.verticalCenter
         anchors.left: vizRow.right
         anchors.leftMargin: Style.space(8)
         visible: root.running && text.length > 0
         text: root.status.label || ""
-        color: root.bar ? root.bar.barForeground : Color.bar.text
-        font.family: root.bar ? root.bar.fontFamily : Style.font.family
-        font.pixelSize: Style.font.bodySmall
-        elide: Text.ElideRight
+        color: root.bar ? _webPalette.barTextColorFor(root.bar.barForeground) : _webPalette.barForeground
+        textFont.family: root.bar ? root.bar.fontFamily : Style.font.family
+        textFont.pixelSize: Style.font.bodySmall
+        requestedElide: Text.ElideRight
         width: Math.min(implicitWidth, Style.space(170))
       }
 

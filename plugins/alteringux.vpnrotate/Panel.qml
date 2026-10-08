@@ -10,6 +10,7 @@ import "../alteringux.kit" as Kit
 // hostWidget (the BarWidget), which owns the status file and the calls out to
 // ~/.local/bin/protonvpn-rotate.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.vpnrotate"
   ipcTarget: ""
@@ -34,7 +35,7 @@ Panel {
   readonly property real rxRate: hostWidget ? hostWidget.rxRate : 0
   readonly property real txRate: hostWidget ? hostWidget.txRate : 0
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -43,7 +44,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(300))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
 
       onCloseRequested: root.close()
@@ -53,260 +54,276 @@ Panel {
         else if (!root.wifiBlocksConnect) root.hostWidget.runConnect()
       }
       onDeleteRequested: if (root.hostWidget && root.connected && !root.busy) root.hostWidget.runDisconnect()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Connect or disconnect the VPN", context: "VPN Rotate · shortcut focus" },
+        { keys: "X", description: "Disconnect the VPN", context: "VPN Rotate · shortcut focus" }
+      ]
 
-      Column {
-        id: content
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.top: parent.top
-        spacing: Style.space(14)
+      Kit.PanelScroll {
+        anchors.fill: parent
+        contentHeight: content.implicitHeight
 
-        Kit.PanelHead {
-          glyph: root.hostWidget ? root.hostWidget.icon : ""   // nf-fa-shield / sync / warning, live from the bar widget
-          title: "Proton VPN"
-          meta: Model.summaryLine(root.st)
-          foreground: root.barForeground
-        }
-
-        // ── status detail (hint role: sentences + wrapping, per ADR 0005) ──
-        Text {
-          width: content.width
-          visible: text.length > 0
-          text: {
-            if (!root.st) return ""
-            if (root.st.error) return "The rotator script reported a failure. Check ~/.local/state/omarchy/vpnrotate.log"
-            if (root.connected) {
-              var bits = []
-              if (root.st.org) bits.push(root.st.org)
-              if (root.st.since > 0 && root.hostWidget) bits.push("up " + Model.shortAgo(root.st.since, root.hostWidget.nowSec).replace(" ago", ""))
-              if (root.st.lastRotate > 0 && root.st.lastRotate !== root.st.since && root.hostWidget) bits.push("rotated " + Model.shortAgo(root.st.lastRotate, root.hostWidget.nowSec))
-              return bits.join("  ·  ")
-            }
-            return ""
-          }
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          wrapMode: Text.WordWrap
-        }
-
-        // ── connection metrics (throughput / load / latency / rotation tally) ──
         Column {
-          width: content.width
-          spacing: Style.space(3)
-          visible: root.connected || root.metrics.rotations > 0
+          id: content
+          width: parent.width
+          spacing: Style.space(14)
 
-          Text {
-            visible: root.connected
-            width: parent.width
-            text: "↓ " + Model.formatRate(root.rxRate) + "    ↑ " + Model.formatRate(root.txRate)
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
+          Kit.PanelHead {
+            glyph: root.hostWidget ? root.hostWidget.icon : ""   // nf-fa-shield / sync / warning, live from the bar widget
+            title: "Proton VPN"
+            meta: Model.summaryLine(root.st)
+            foreground: root.barForeground
           }
 
+          // ── status detail (hint role: sentences + wrapping, per ADR 0005) ──
           Text {
-            visible: root.connected && (root.metrics.rxBytes > 0 || root.metrics.txBytes > 0)
-            width: parent.width
-            text: Model.formatBytes(root.metrics.rxBytes) + " down  ·  " + Model.formatBytes(root.metrics.txBytes) + " up  ·  this session"
-            color: Kit.Palette.faint
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            visible: root.connected
-            width: parent.width
+            width: content.width
+            visible: text.length > 0
             text: {
-              var bits = []
-              if (root.metrics.load > 0) bits.push("Load " + Model.formatLoad(root.metrics.load))
-              if (root.metrics.protocol) bits.push(root.metrics.protocol === "wireguard" ? "WireGuard" : root.metrics.protocol)
-              bits.push("Exit " + Model.formatLatency(root.metrics.latencyMs))
-              return bits.join("  ·  ")
+              if (!root.st) return ""
+              if (root.st.error) return "The rotator script reported a failure. Check ~/.local/state/omarchy/vpnrotate.log"
+              if (root.connected) {
+                var bits = []
+                if (root.st.org) bits.push(root.st.org)
+                if (root.st.since > 0 && root.hostWidget) bits.push("up " + Model.shortAgo(root.st.since, root.hostWidget.nowSec).replace(" ago", ""))
+                if (root.st.lastRotate > 0 && root.st.lastRotate !== root.st.since && root.hostWidget) bits.push("rotated " + Model.shortAgo(root.st.lastRotate, root.hostWidget.nowSec))
+                return bits.join("  ·  ")
+              }
+              return ""
             }
-            color: Kit.Palette.faint
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-          }
-
-          Text {
-            visible: root.metrics.rotations > 0
-            width: parent.width
-            text: Model.rotationSummary(root.metrics, false)
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
           }
-        }
 
-        // Next-rotation readout + thin progress bar (only meaningful while
-        // auto-rotate is armed and the tunnel is up).
-        Text {
-          width: content.width
-          visible: root.cfg.autoRotate
-          text: {
-            if (!root.connected) return "Auto-rotate armed — will start after you connect"
-            if (root.busy) return "Rotating…"
-            if (root.secsToRotate < 0) return ""
-            return "Next rotation in " + Model.formatCountdown(root.secsToRotate)
+          // ── connection metrics (throughput / load / latency / rotation tally) ──
+          Column {
+            width: content.width
+            spacing: Style.space(3)
+            visible: root.connected || root.metrics.rotations > 0
+
+            Text {
+              visible: root.connected
+              width: parent.width
+              text: "↓ " + Model.formatRate(root.rxRate) + "    ↑ " + Model.formatRate(root.txRate)
+              color: root.barForeground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              visible: root.connected && (root.metrics.rxBytes > 0 || root.metrics.txBytes > 0)
+              width: parent.width
+              text: Model.formatBytes(root.metrics.rxBytes) + " down  ·  " + Model.formatBytes(root.metrics.txBytes) + " up  ·  this session"
+              color: _webPalette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              visible: root.connected
+              width: parent.width
+              text: {
+                var bits = []
+                if (root.metrics.load > 0) bits.push("Load " + Model.formatLoad(root.metrics.load))
+                if (root.metrics.protocol) bits.push(root.metrics.protocol === "wireguard" ? "WireGuard" : root.metrics.protocol)
+                bits.push("Exit " + Model.formatLatency(root.metrics.latencyMs))
+                return bits.join("  ·  ")
+              }
+              color: _webPalette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+            }
+
+            Text {
+              visible: root.metrics.rotations > 0
+              width: parent.width
+              text: Model.rotationSummary(root.metrics, false)
+              color: _webPalette.faint
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-        }
 
-        Rectangle {
-          width: content.width
-          height: Style.space(6)
-          radius: height / 2
-          color: Util.alpha(root.barForeground, 0.18)
-          visible: root.cfg.autoRotate && root.connected && root.secsToRotate >= 0
-
-          Rectangle {
-            height: parent.height
-            radius: parent.radius
-            width: {
-              var total = root.cfg.intervalSec
-              if (!(total > 0)) return 0
-              var done = Math.max(0, total - Math.max(0, root.secsToRotate))
-              return Math.max(parent.height, parent.width * (done / total))
+          // Next-rotation readout + thin progress bar (only meaningful while
+          // auto-rotate is armed and the tunnel is up).
+          Text {
+            width: content.width
+            visible: root.cfg.autoRotate
+            text: {
+              if (!root.connected) return "Auto-rotate armed — will start after you connect"
+              if (root.busy) return "Rotating…"
+              if (root.secsToRotate < 0) return ""
+              return "Next rotation in " + Model.formatCountdown(root.secsToRotate)
             }
             color: root.barForeground
-            opacity: 0.9
-            Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
           }
-        }
 
-        PanelSeparator {}
+          Rectangle {
+            width: content.width
+            height: Style.space(6)
+            radius: height / 2
+            color: Util.alpha(root.barForeground, 0.18)
+            visible: root.cfg.autoRotate && root.connected && root.secsToRotate >= 0
 
-        // ── connect / rotate ─────────────────────────────────────────────
-        Row {
-          spacing: Style.space(8)
-
-          Button {
-            text: root.connected ? "Disconnect" : "Connect"
-            foreground: root.barForeground
-            bordered: true
-            enabled: root.hostWidget && !root.busy && (root.connected || !root.wifiBlocksConnect)
-            onClicked: {
-              if (!root.hostWidget) return
-              if (root.connected) root.hostWidget.runDisconnect()
-              else root.hostWidget.runConnect()
+            Rectangle {
+              height: parent.height
+              radius: parent.radius
+              width: {
+                var total = root.cfg.intervalSec
+                if (!(total > 0)) return 0
+                var done = Math.max(0, total - Math.max(0, root.secsToRotate))
+                return Math.max(parent.height, parent.width * (done / total))
+              }
+              color: root.barForeground
+              opacity: 0.9
+              Behavior on width { NumberAnimation { duration: 400; easing.type: Easing.OutCubic } }
             }
           }
-          Button {
-            text: "Rotate now"
-            foreground: root.barForeground
-            bordered: true
-            enabled: root.hostWidget && root.connected && !root.busy
-            onClicked: if (root.hostWidget) root.hostWidget.runRotate()
-          }
-        }
 
-        // WiFi-only gate: explain why Connect is greyed out when off WiFi.
-        Text {
-          width: content.width
-          visible: !root.connected && root.wifiBlocksConnect
-          text: (root.wifiState === "unavailable"
-                 ? "Connect is disabled — WiFi is off or blocked. "
-                 : "Connect is disabled — you're not on WiFi. ")
-                + "The VPN only comes up over WiFi so your wired IP is never left exposed."
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
+          PanelSeparator {}
 
-        Text {
-          width: content.width
-          text: "Each rotation drops open connections for a few seconds while the tunnel re-handshakes."
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
+          // ── connect / rotate ─────────────────────────────────────────────
+          Row {
+            spacing: Style.space(8)
 
-        PanelSeparator {}
-
-        // ── auto-rotate ──────────────────────────────────────────────────
-        Toggle {
-          width: content.width
-          activeFocusOnTab: false
-          label: "Auto-rotate"
-          description: root.cfg.autoRotate
-            ? ("Switches server every " + Model.prettyInterval(root.cfg.intervalSec))
-            : "Off — rotate manually with the button above"
-          checked: root.cfg.autoRotate
-          foreground: root.barForeground
-          onClicked: if (root.hostWidget) root.hostWidget.toggleAutoRotate()
-        }
-
-        Text {
-          width: content.width
-          text: "Interval"
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
-        }
-
-        Row {
-          spacing: Style.space(6)
-
-          Repeater {
-            model: root.presets
-            Button {
-              required property var modelData
-              text: modelData.label
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              text: root.connected ? "Disconnect" : "Connect"
               foreground: root.barForeground
-              bordered: root.cfg.intervalSec === modelData.sec
-              onClicked: if (root.hostWidget) root.hostWidget.setIntervalSec(modelData.sec)
+              bordered: true
+              enabled: root.hostWidget && !root.busy && (root.connected || !root.wifiBlocksConnect)
+              onClicked: {
+                if (!root.hostWidget) return
+                if (root.connected) root.hostWidget.runDisconnect()
+                else root.hostWidget.runConnect()
+              }
+            }
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              text: "Rotate now"
+              foreground: root.barForeground
+              bordered: true
+              enabled: root.hostWidget && root.connected && !root.busy
+              onClicked: if (root.hostWidget) root.hostWidget.runRotate()
             }
           }
-        }
 
-        Text {
-          width: content.width
-          text: "A new interval takes effect on the next cycle. Proton's free tier shares a small IP pool, so this beats simple per-IP limits but not blocks on the whole VPN range."
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
+          // WiFi-only gate: explain why Connect is greyed out when off WiFi.
+          Text {
+            width: content.width
+            visible: !root.connected && root.wifiBlocksConnect
+            text: (root.wifiState === "unavailable"
+                   ? "Connect is disabled — WiFi is off or blocked. "
+                   : "Connect is disabled — you're not on WiFi. ")
+                  + "The VPN only comes up over WiFi so your wired IP is never left exposed."
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
 
-        PanelSeparator {}
+          Text {
+            width: content.width
+            text: "Each rotation drops open connections for a few seconds while the tunnel re-handshakes."
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
 
-        // ── kill switch ──────────────────────────────────────────────────
-        Toggle {
-          width: content.width
-          activeFocusOnTab: false
-          label: "Kill switch"
-          description: root.cfg.killSwitch
-            ? "Internet is blocked if the tunnel drops or a reconnect fails — no real-IP leak, brief offline until it recovers"
-            : "If the tunnel drops, traffic falls back to your real IP"
-          checked: root.cfg.killSwitch
-          foreground: root.barForeground
-          onClicked: if (root.hostWidget) root.hostWidget.toggleKillSwitch()
-        }
+          PanelSeparator {}
 
-        Text {
-          width: content.width
-          visible: root.killSwitchError.length > 0
-          text: root.killSwitchError
-          color: Kit.Palette.negative
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          wrapMode: Text.WordWrap
-        }
+          // ── auto-rotate ──────────────────────────────────────────────────
+          Toggle {
+            width: content.width
+            activeFocusOnTab: true
+            label: "Auto-rotate"
+            description: root.cfg.autoRotate
+              ? ("Switches server every " + Model.prettyInterval(root.cfg.intervalSec))
+              : "Off — rotate manually with the button above"
+            checked: root.cfg.autoRotate
+            foreground: root.barForeground
+            onClicked: if (root.hostWidget) root.hostWidget.toggleAutoRotate()
+          }
 
-        PanelSeparator {}
+          Text {
+            width: content.width
+            text: "Interval"
+            color: root.barForeground
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            font.bold: true
+          }
 
-        Text {
-          text: "Enter: connect/disconnect  ·  Del: disconnect  ·  Esc: close"
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
+          Row {
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.presets
+              Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: text
+                required property var modelData
+                text: modelData.label
+                foreground: root.barForeground
+                bordered: root.cfg.intervalSec === modelData.sec
+                onClicked: if (root.hostWidget) root.hostWidget.setIntervalSec(modelData.sec)
+              }
+            }
+          }
+
+          Text {
+            width: content.width
+            text: "A new interval takes effect on the next cycle. Proton's free tier shares a small IP pool, so this beats simple per-IP limits but not blocks on the whole VPN range."
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator {}
+
+          // ── kill switch ──────────────────────────────────────────────────
+          Toggle {
+            width: content.width
+            activeFocusOnTab: true
+            label: "Kill switch"
+            description: root.cfg.killSwitch
+              ? "Internet is blocked if the tunnel drops or a reconnect fails — no real-IP leak, brief offline until it recovers"
+              : "If the tunnel drops, traffic falls back to your real IP"
+            checked: root.cfg.killSwitch
+            foreground: root.barForeground
+            onClicked: if (root.hostWidget) root.hostWidget.toggleKillSwitch()
+          }
+
+          Text {
+            width: content.width
+            visible: root.killSwitchError.length > 0
+            text: root.killSwitchError
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
+          }
+
+          PanelSeparator {}
+
+          Text {
+            text: "Enter: connect/disconnect  ·  X: disconnect  ·  Esc: close"
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.bodySmall
+          }
         }
       }
     }

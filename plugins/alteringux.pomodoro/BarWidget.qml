@@ -16,6 +16,7 @@ import "../alteringux.kit" as Kit
 // start/pause press, so a finished work block doesn't march into a break
 // unattended.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.pomodoro"
 
@@ -96,7 +97,7 @@ BarWidget {
   // rather than disappears so a stopped timer still reads at a glance.
   readonly property bool showProgress: phase !== Model.PHASE_IDLE && !ready
   readonly property real progressFraction: (showProgress && configLoaded) ? Model.phaseProgress(phase, remainingMs, config) : 0
-  readonly property color progressColor: phase === Model.PHASE_WORK ? Kit.Palette.info : Kit.Palette.positive
+  readonly property color progressColor: phase === Model.PHASE_WORK ? _webPalette.barAccent : _webPalette.barPositive
 
   readonly property var guard: Kit.BugGuard.create("alteringux.pomodoro", function(argv) { Quickshell.execDetached(argv) })
 
@@ -309,7 +310,7 @@ BarWidget {
         id: track
         anchors.fill: parent
         radius: height / 2
-        color: Kit.Palette.faint
+        color: _webPalette.barMuted
         opacity: 0.35
       }
 

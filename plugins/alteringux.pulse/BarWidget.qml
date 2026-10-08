@@ -15,6 +15,7 @@ import "../alteringux.kit" as Kit
 // files, renders the feed through Panel.qml, and turns every user action back
 // into an omarchy-pulse verb (or the stored action command).
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.pulse"
 
@@ -69,24 +70,63 @@ BarWidget {
   }
 
   readonly property color displayColor: {
-    if (root.topLevel === "critical") return Kit.Palette.negative
-    if (root.topLevel === "urgent") return Kit.Palette.urgent
-    if (root.topLevel === "warning") return Kit.Palette.warning
-    if (root.unread > 0) return Kit.Palette.info
-    return root.bar ? Color.bar.text : "#ffffff"
+    if (root.topLevel === "critical") return _webPalette.barNegative
+    if (root.topLevel === "urgent") return _webPalette.barUrgent
+    if (root.topLevel === "warning") return _webPalette.barWarning
+    if (root.unread > 0) return _webPalette.barAccent
+    return root.bar ? _webPalette.barForeground : _webPalette.foreground
   }
 
   // ---- the CLI bridge ---------------------------------------------
+  property string actionStatus: ""
+  property int actionGeneration: 0
+  signal actionFeedback(string message)
+  function reportActionStatus(message) {
+    actionStatus = message
+    actionFeedback(message)
+  }
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property string feedbackVerb: ""
     running: false
-    onExited: { activityStore.reload(); attentionStore.reload(); readStore.reload(); usageStore.reload() }
+    onExited: function(code) {
+      activityStore.reload(); attentionStore.reload(); readStore.reload(); usageStore.reload()
+      if (feedbackGeneration !== root.actionGeneration) return
+      if (code !== 0) {
+        root.reportActionStatus("Request failed (exit " + code + "). Try again; check Pulse logs if it persists.")
+      } else if (feedbackVerb === "read") {
+        root.reportActionStatus("Marked all as read.")
+      } else if (feedbackVerb === "clear") {
+        root.reportActionStatus("Alert dismissal completed.")
+      } else {
+        // The helper launches the stored action detached. Its own zero exit
+        // code proves dispatch only, not completion of that child action.
+        root.reportActionStatus("Action requested. Check the opened plugin.")
+      }
+    }
   }
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
-      if (actionProc.running) { Quickshell.execDetached([root.scriptPath].concat(args)); return }
-      actionProc.command = [root.scriptPath].concat(args)
-      actionProc.running = true
+      try {
+        const feedback = args[0] !== "usage"
+        if (feedback) {
+          root.actionGeneration++
+          root.actionStatus = "Working…"
+        }
+        if (actionProc.running) {
+          Quickshell.execDetached([root.scriptPath].concat(args))
+          if (feedback) root.reportActionStatus("Request sent. Completion is unavailable; check the result in Pulse.")
+          return
+        }
+        actionProc.feedbackGeneration = feedback ? root.actionGeneration : -1
+        actionProc.feedbackVerb = feedback ? String(args[0]) : ""
+        actionProc.command = [root.scriptPath].concat(args)
+        actionProc.running = true
+      } catch (error) {
+        if (args[0] !== "usage") root.reportActionStatus("Request could not be sent. Try again; check Pulse logs if it persists.")
+        throw error
+      }
     })
   }
 
@@ -107,8 +147,17 @@ BarWidget {
   function actOn(plugin) { if (plugin) runVerb(["act", String(plugin)]) }
   function runAction(cmd) {
     guard.run("runAction", function () {
-      var c = String(cmd || "").trim()
-      if (c.length) Quickshell.execDetached(["sh", "-lc", c])
+      root.actionGeneration++
+      try {
+        var c = String(cmd || "").trim()
+        if (c.length) {
+          Quickshell.execDetached(["sh", "-lc", c])
+          root.reportActionStatus("Action requested. Check the opened plugin; completion is unavailable.")
+        } else root.reportActionStatus("No action is currently available.")
+      } catch (error) {
+        root.reportActionStatus("Action could not be requested. Try again; check Pulse logs if it persists.")
+        throw error
+      }
     })
   }
 
@@ -120,7 +169,7 @@ BarWidget {
   // inline). Panel.qml's button now calls this too.
   function runNextAction() {
     var na = root.summary.nextAction
-    if (!na) return
+    if (!na) { root.actionGeneration++; root.reportActionStatus("No action is currently available."); return }
     if (na.source === "attention") root.actOn(na.plugin)
     else root.runAction(na.action)
   }
