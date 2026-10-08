@@ -3,6 +3,28 @@ const fs = require("node:fs")
 const path = require("node:path")
 const vm = require("node:vm")
 
+// ponytail: direct QML references only; add parsing if generated bindings need coverage.
+const invalidReferences = []
+function checkPaletteInstances(directory) {
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const file = path.join(directory, entry.name)
+    if (entry.isDirectory() && entry.name !== "test") checkPaletteInstances(file)
+    else if (entry.isFile() && entry.name.endsWith(".qml")) {
+      fs.readFileSync(file, "utf8").split("\n").forEach((line, index) => {
+        if (!line.trimStart().startsWith("//") && /\bKit\.Palette\.[a-z]\w*/.test(line)) {
+          invalidReferences.push(`${path.relative(path.join(__dirname, "../.."), file)}:${index + 1}`)
+        }
+      })
+    }
+  }
+}
+for (const entry of fs.readdirSync(path.join(__dirname, "../.."), { withFileTypes: true })) {
+  if (entry.isDirectory() && entry.name.startsWith("alteringux.")) {
+    checkPaletteInstances(path.join(__dirname, "../..", entry.name))
+  }
+}
+assert.deepEqual(invalidReferences, [], "Palette roles belong to an instance; Palette is not a singleton")
+
 const source = fs.readFileSync(path.join(__dirname, "..", "PaletteLogic.js"), "utf8")
 const logic = {}
 vm.runInNewContext(source.replace(/^\.pragma library\s*/, ""), logic)

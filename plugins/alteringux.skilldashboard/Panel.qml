@@ -10,6 +10,7 @@ Panel {
   id: root
   moduleName: "alteringux.skilldashboard"
   ipcTarget: ""
+  property QtObject _webPalette: Kit.Palette {}
 
   property var anchorItem: null
   property var hostWidget: null
@@ -107,7 +108,7 @@ Panel {
             width: content.width
             text: root.hostWidget ? root.hostWidget.actionStatus : ""
             color: root.hostWidget && root.hostWidget.actionFailed
-              ? Kit.Palette.negative : Kit.Palette.faint
+              ? root._webPalette.negative : root._webPalette.faint
             wrapMode: Text.WordWrap
             Accessible.role: Accessible.StaticText
             Accessible.name: text
@@ -117,7 +118,7 @@ Panel {
             visible: !!(root.hostWidget && root.hostWidget.refreshStatus)
             width: content.width
             text: root.hostWidget ? root.hostWidget.refreshStatus : ""
-            color: Kit.Palette.negative
+            color: root._webPalette.negative
             wrapMode: Text.WordWrap
             Accessible.role: Accessible.StaticText
             Accessible.name: text
@@ -150,8 +151,8 @@ Panel {
                 Text {
                   text: modelData.status === "removed" ? "removed · recoverable"
                     : (modelData.stale ? "stale" : ((modelData.uses || 0) + " uses"))
-                  color: modelData.status === "removed" ? Kit.Palette.warning
-                    : (modelData.stale ? Color.urgent : Kit.Palette.faint)
+                  color: modelData.status === "removed" ? root._webPalette.warning
+                    : (modelData.stale ? Color.urgent : root._webPalette.faint)
                   Accessible.role: Accessible.StaticText
                   Accessible.name: text
                 }
@@ -187,14 +188,14 @@ Panel {
                   text: modelData.lastAt
                     ? "Last used " + new Date(modelData.lastAt).toLocaleDateString()
                     : "Never used"
-                  color: Kit.Palette.faint
+                  color: root._webPalette.faint
                   Accessible.role: Accessible.StaticText
                   Accessible.name: text
                 }
 
                 Text {
                   text: modelData.owned ? "User owned" : "Managed"
-                  color: Kit.Palette.faint
+                  color: root._webPalette.faint
                   Accessible.role: Accessible.StaticText
                   Accessible.name: text
                 }
@@ -272,7 +273,7 @@ Panel {
               Rectangle {
                 Layout.fillWidth: true
                 height: Style.spacing.hairline
-                color: Kit.Palette.muted
+                color: root._webPalette.muted
                 opacity: 0.35
               }
             }

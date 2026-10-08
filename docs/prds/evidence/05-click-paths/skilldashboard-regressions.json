@@ -1,0 +1,72 @@
+{
+  "palette": {
+    "before": {
+      "checks": [
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "values": [
+        "undefined",
+        "undefined",
+        "undefined",
+        "undefined",
+        "undefined",
+        "undefined",
+        "undefined",
+        "undefined"
+      ]
+    },
+    "after": {
+      "checks": [
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true,
+        true
+      ],
+      "values": [
+        "#ff0000",
+        "#669999",
+        "#ff0000",
+        "#cc9900",
+        "#669999",
+        "#669999",
+        "#669999",
+        "#669999"
+      ]
+    },
+    "scope": "Current panel role references evaluated in Quickshell; no window or screen-reader delivery"
+  },
+  "lifecycle": {
+    "enableBefore": "disabled after Enable",
+    "enableAfter": "active after Enable",
+    "ownershipBefore": {
+      "removeExit": 0,
+      "outsideSkillPreserved": false
+    },
+    "ownershipAfter": "Focused suite passes enable, reversible removal, symlink-parent confinement, unsafe ID rejection, occupied/dangling destination rejection, and forged trash-path rejection; all fixtures disposable"
+  },
+  "qml": {
+    "count": 2,
+    "failures": []
+  },
+  "portable": {
+    "selected": "skilldashboard",
+    "suites": 1,
+    "failed": 0
+  },
+  "aggregate": {
+    "command": "bash tests/run-all.sh --portable",
+    "suites": 77,
+    "failed": 0
+  }
+}

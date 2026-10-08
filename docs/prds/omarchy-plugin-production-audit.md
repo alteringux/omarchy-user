@@ -51,9 +51,16 @@ subagents; their remaining implementation and native verification tasks are open
   fatal lock error: one lock became secure, a second request caused exit 134
   with the production signature. The test compositor was then stopped.
   This establishes a reproducible failure path, not every trigger in the live shell.
-- Click-path discovery found 574 handler/key-hook lines across 89 first-party
-  QML files. The implementation plan lists all 42 manifest IDs exactly once;
-  ordered behavior tracing and native verification remain incomplete.
+- The coverage seam now accounts for all 42 JSON audit records and report rows.
+  Broader discovery found 1,170 QML handler occurrences in 97 files plus 42 host
+  entries; the earlier selected-hook search was incomplete. Package-local Skill
+  Dashboard traces identified undefined Palette bindings, Enable retaining disabled
+  status, and ownership escape through a symlinked parent. The candidate repairs
+  these; focused binding/CLI regressions and two-component QML loading pass.
+  The full local portable rerun passed all 77 suites after those fixes.
+- The attached-action probe passes four checks/one invocation. A private Wayland
+  reader fixture passes 24 geometry checks at actual 340/340/640 px owner widths.
+  These do not establish native keyboard, screenshot or AT-SPI completion.
 
 ## Risks and evidence missing
 
@@ -71,9 +78,10 @@ subagents; their remaining implementation and native verification tasks are open
    Quickshell crash (PID 3825163, SIGABRT) reports “Tried to show lockscreen
    surfaces without active lock.” An isolated second-lock request now reproduces
    that signature. The upstream repair is staged in a separate release-source
-   checkout, but its build stopped at 4% because a generated Makefile's temporary
-   CMake executable disappeared. Recovery and repaired-runtime verification remain
-   open. No native gate pass is claimed from this state.
+   checkout. Its earlier build stopped when a temporary CMake path disappeared;
+   the full feature build has resumed with stable copied CMake tooling. Recovery
+   and repaired-runtime verification remain open. No native gate pass is claimed
+   from this state.
 
 ## Continuation checkpoint
 

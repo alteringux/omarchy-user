@@ -7,7 +7,8 @@ Date: 2026-10-08. Readiness remains **84/100 provisional**.
 [Touchpoint records](evidence/05-click-paths/touchpoints.json) account for all 42
 first-party product manifests through the existing catalog-completeness test.
 Kit is recorded as shared infrastructure; third-party packages are excluded.
-The discovery revision and per-file SHA-256 values identify the source inspected.
+The discovery revision records the starting branch state; per-file SHA-256 values
+identify the actual source inspected, including subsequent source fixes.
 
 The broader inventory contains **1,170 QML signal-handler occurrences in 97 files**
 and **42 declared host entry points**. This supersedes the earlier 574-line search,
@@ -73,7 +74,7 @@ and must be reconciled with these records before it closes a touchpoint.
 | `alteringux.reminders` | 10 | 9 | Enter → next → back → confirm/cancel; draft survives back and cancel schedules nothing | pending |
 | `alteringux.reposwatch` | 9 | 20 | Scan synthetic repos → open selected repo; stale/unavailable repo remains identifiable | pending |
 | `alteringux.score` | 8 | 26 | Increment/decrement → undo → reset/history; ordered rapid actions yield the expected score | pending |
-| `alteringux.skilldashboard` | 20 | 20 | `remove_refresh_restore`: confirm Remove → refresh → Restore; protected paths fail safely | pending |
+| `alteringux.skilldashboard` | 20 | 21 | `remove_refresh_restore`: confirm Remove → refresh → Restore; protected paths fail safely | package source traced; native pending |
 | `alteringux.sports` | 62 | 42 | Select match/section → refresh → detail; cached matches/articles keep section timestamps | pending |
 | `alteringux.stocks` | 19 | 19 | Select market → refresh → inspect; retained quotes keep Yahoo Finance and fetch time | pending |
 | `alteringux.stopwatch` | 23 | 44 | Start → pause/resume → cancel; persisted state returns to idle after deletion | pending |
@@ -97,3 +98,41 @@ and must be reconciled with these records before it closes a touchpoint.
 
 See the [execution plan](../superpowers/plans/2026-10-08-omarchy-plugin-audit-and-release.md)
 and [runtime repair plan](../superpowers/plans/2026-10-08-quickshell-lock-repair.md).
+
+## Skill Dashboard findings and verification
+
+- **CLICK-PATH-skilldashboard-001:** seven color-expression lines contained eight
+  static role accesses on the non-singleton `Kit.Palette` type. The actual Qt
+  expressions returned `undefined`; the panel now owns one palette instance and
+  all eight resolve to colors. The portable Kit guard rejects this API misuse.
+- **CLICK-PATH-skilldashboard-002:** Disable → Enable retained `disabled`.
+  The CLI now writes `active` for Enable; the lifecycle regression passes.
+- **CLICK-PATH-skilldashboard-003:** lexical HOME-prefix validation allowed a
+  symlinked parent to move an outside fixture. Canonical confinement now covers
+  removal, restore and removed-row discovery. Invalid IDs, forged backup paths,
+  occupied and dangling restore destinations are rejected; backups survive.
+
+[Recorded before/after results](evidence/05-click-paths/skilldashboard-regressions.json)
+cover Qt expression bindings and disposable CLI fixtures. The two package QML
+components load without failures. All 19 discovered package-local hooks have an
+ordered source trace; the manifest host entry and inherited/IPC/CLI routes still
+need reconciliation. Full native lifecycle interaction and rendered color review
+remain open.
+
+## Shared reader and action probe
+
+The attached-action probe reports four true checks and one invocation. It does
+not test external AT-SPI delivery. The reader's old `qmltestrunner` fixture lacked
+Quickshell's embedded plugin; an offscreen window attempt then stalled. The new
+runner uses installed Quickshell and a private Sway compositor. Its 340/340/640 px
+owner windows at 16/32/32 px text pass eight checks each. A negative control caught
+the compositor tiling the first owner at 796 px; the isolated floating-window
+rule fixes the fixture and verifies the actual requested width.
+
+[Scoped matrix](evidence/05-click-paths/native-matrix.json) and
+[reader geometry results](evidence/05-click-paths/reader-layout-result.json)
+record these cases. They do not close native keyboard, screenshot or AT-SPI gates.
+Run the reader with
+`python3 docs/prds/evidence/02-accessibility/run-reader-layout-probe.py --sway /absolute/path/to/sway`.
+The runner requires Bubblewrap, Qt and Quickshell on the audit host; portable CI
+continues to defer host-only native checks.

@@ -46,3 +46,24 @@ This review checkpoint contains the current continuation only. The older local
 execution history remains in the preserved original worktree. See the
 [product teardown and implementation specification](omarchy-plugin-product-teardown.md)
 for the 42-plugin design findings and agreed fixes.
+
+## Implement-spec continuation — 2026-10-08
+
+Draft PR #13 and the existing candidate remain the integration review surface.
+The catalog seam now requires all 42 JSON audit records and report rows. Its four
+tests pass, with negative controls rejecting missing IDs and unsupported native
+passes. Broader discovery found 1,170 hooks/97 QML files plus 42 host entries;
+package state/call/native coverage remains open.
+
+Skill Dashboard source tracing reproduced and repaired undefined palette-role
+bindings, Enable retaining disabled status, and symlink-parent ownership escape.
+Focused palette, QML-load and lifecycle checks pass. Canonical guards also reject
+unsafe IDs, forged trash paths and occupied/dangling restore destinations.
+
+The shared attached-action probe passes four checks/one invocation. A private
+Wayland reader fixture passes 24 geometry checks at measured owner widths. These
+are scoped proofs; they do not establish external AT-SPI or whole-panel journeys.
+The full Quickshell repair build is running with stable copied CMake tooling in
+the isolated dependency checkout. No installed runtime has changed.
+
+The full local portable implementation run passed all 77 suites after these fixes.

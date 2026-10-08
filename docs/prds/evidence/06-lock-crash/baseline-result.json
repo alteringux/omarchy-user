@@ -1,0 +1,20 @@
+{
+  "binary": "/usr/bin/quickshell",
+  "sway": "/tmp/quickshell-native-audit/sway/usr/bin/sway",
+  "coreHandling": "gdb intercepts fatal signal before delivery; debugger exit is not the client exit",
+  "results": [
+    {
+      "scenario": "contested",
+      "expected": "crash",
+      "matched": true,
+      "debuggerExit": 134,
+      "abortIntercepted": true,
+      "holderSecure": true,
+      "secondDeclined": false,
+      "challengerSecure": false,
+      "log": "docs/prds/evidence/06-lock-crash/baseline-client.log"
+    }
+  ],
+  "binarySha256": "2dc99382c032710fe495ed115cdee9dc9c69bdb3a21af4d86a9a8ea16733069b",
+  "version": "Quickshell 0.3.1 (revision , distributed by Arch Linux)"
+}
