@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_ROOT = ROOT / "plugins"
 README = ROOT / "README.md"
 TEARDOWN = ROOT / "docs/prds/omarchy-plugin-product-teardown.md"
+AUDIT = ROOT / "docs/prds/evidence/05-click-paths/touchpoints.json"
 PLUGIN_ID = re.compile(r"^\|\s*`(alteringux\.[a-z0-9.-]+)`\s*\|", re.MULTILINE)
 TEARDOWN_PLUGIN = re.compile(r"^\|\s*`([a-z0-9.-]+)`\s*\|", re.MULTILINE)
 
@@ -64,6 +65,44 @@ class PluginCatalogTest(unittest.TestCase):
         self.assertEqual(len(manifests), 42, "update this expected count with an intentional inventory change")
         self.assertEqual(inventory_diff(catalog, manifests), {"missing": [], "extra": [], "duplicate": []})
         self.assertEqual(inventory_diff(teardown, manifests), {"missing": [], "extra": [], "duplicate": []})
+        self.assertTrue(AUDIT.is_file(), "all first-party plugins need an explicit audit record")
+        audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+        self.assertEqual(audit["schemaVersion"], 1)
+        self.assertEqual(inventory_diff([row["id"] for row in audit["plugins"]], manifests),
+                         {"missing": [], "extra": [], "duplicate": []})
+        report = ROOT / "docs/prds/omarchy-plugin-click-path-audit.md"
+        self.assertEqual(inventory_diff(PLUGIN_ID.findall(report.read_text(encoding="utf-8")), manifests),
+                         {"missing": [], "extra": [], "duplicate": []})
+
+    def test_audit_sources_and_evidence_are_explicit(self):
+        audit = json.loads(AUDIT.read_text(encoding="utf-8"))
+        required = {"id", "source", "entry", "calls", "reads", "writes", "resets",
+                    "expected", "observed", "status", "evidence"}
+        statuses = {"pending", "source-reviewed", "native-pass", "failed", "not-applicable"}
+        for row in audit["plugins"]:
+            ids = [item["id"] for item in row["touchpoints"]]
+            self.assertEqual(len(ids), len(set(ids)), row["id"])
+            self.assertTrue(ids, row["id"])
+            for item in row["touchpoints"]:
+                with self.subTest(plugin=row["id"], touchpoint=item["id"]):
+                    self.assertTrue(required <= item.keys())
+                    self.assertIn(item["status"], statuses)
+                    source = item["source"]
+                    path = Path(source["path"])
+                    self.assertFalse(path.is_absolute())
+                    self.assertNotIn("..", path.parts)
+                    self.assertTrue(str(path).startswith(f"plugins/{row['id']}/"))
+                    lines = (ROOT / path).read_text(encoding="utf-8").splitlines()
+                    self.assertGreaterEqual(source["line"], 1)
+                    self.assertLessEqual(source["line"], len(lines))
+                    if item["status"] == "native-pass":
+                        self.assertTrue(item["observed"])
+                        self.assertTrue(item["evidence"], "native passes need direct interaction evidence")
+                    for evidence in item["evidence"]:
+                        path = Path(evidence)
+                        self.assertFalse(path.is_absolute())
+                        self.assertNotIn("..", path.parts)
+                        self.assertTrue((ROOT / path).is_file())
 
     def test_fixture_reports_missing_extra_and_duplicate_ids(self):
         with self.subTest("missing and duplicate catalog row"):
