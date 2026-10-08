@@ -3,6 +3,7 @@
 set -uo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+export OMARCHY_GLIMPSE_DIR="$REPO/plugins/alteringux.glimpse"
 CLI="${OMARCHY_GLIMPSE_BIN:-$REPO/local-bin/omarchy-glimpse}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 

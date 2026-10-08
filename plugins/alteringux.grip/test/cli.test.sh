@@ -11,6 +11,7 @@
 set -uo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+export OMARCHY_GRIP_DIR="$REPO/plugins/alteringux.grip"
 CLI="${OMARCHY_GRIP_BIN:-$REPO/local-bin/omarchy-grip}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 

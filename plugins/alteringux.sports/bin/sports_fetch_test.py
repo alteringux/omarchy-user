@@ -99,6 +99,9 @@ class RefreshTest(unittest.TestCase):
         self.cfg = json.loads(json.dumps(sports_fetch.DEFAULT_CONFIG))
         self.tmp = tempfile.mkdtemp()
         self.state_path = os.path.join(self.tmp, "sports.json")
+        self.config_path = os.path.join(self.tmp, "config.json")
+        with open(self.config_path, "w") as fh:
+            json.dump(self.cfg, fh)
 
     def test_load_config_tolerates_malformed_shapes(self):
         path = os.path.join(self.tmp, "sports-config.json")
@@ -220,7 +223,7 @@ class RefreshTest(unittest.TestCase):
         with mock.patch.object(sports_fetch, "fetch_json", return_value=None), \
              mock.patch.object(sports_fetch, "fetch_articles", return_value=[]), \
              mock.patch.object(sports_fetch, "STATE_PATH", self.state_path):
-            rc = sports_fetch.main(["--state", self.state_path])
+            rc = sports_fetch.main(["--config", self.config_path, "--state", self.state_path])
         self.assertEqual(rc, 0)
         with open(self.state_path) as fh:
             doc = json.load(fh)
@@ -241,7 +244,7 @@ class RefreshTest(unittest.TestCase):
             json.dump(previous, fh)
         with mock.patch.object(sports_fetch, "fetch_json", return_value=None), \
              mock.patch.object(sports_fetch, "fetch_articles", return_value=[]):
-            rc = sports_fetch.main(["--state", self.state_path])
+            rc = sports_fetch.main(["--config", self.config_path, "--state", self.state_path])
         self.assertEqual(rc, 0)
         with open(self.state_path) as fh:
             doc = json.load(fh)
@@ -271,12 +274,16 @@ class RefreshTest(unittest.TestCase):
             json.dump(previous, fh)
         with mock.patch.object(sports_fetch, "fetch_json", return_value=None), \
              mock.patch.object(sports_fetch, "fetch_articles", return_value=[]):
-            rc = sports_fetch.main(["--state", self.state_path])
+            rc = sports_fetch.main(["--config", self.config_path, "--state", self.state_path])
         self.assertEqual(rc, 0)
         with open(self.state_path) as fh:
             doc = json.load(fh)
         self.assertEqual(doc["predictions"], previous["predictions"])
     def test_main_preserves_cached_articles_when_feeds_are_unavailable(self):
+        self.cfg["activeSports"] = ["Soccer"]
+        self.cfg["articlesFeeds"] = {"Soccer": ["https://example.test/feed"]}
+        with open(self.config_path, "w") as fh:
+            json.dump(self.cfg, fh)
         previous = {
             "version": 1,
             "updatedAt": "2026-09-13T12:00:00Z",
@@ -289,7 +296,7 @@ class RefreshTest(unittest.TestCase):
             json.dump(previous, fh)
         with mock.patch.object(sports_fetch, "fetch_json", return_value=None), \
              mock.patch.object(sports_fetch, "fetch_articles", return_value=[]):
-            rc = sports_fetch.main(["--state", self.state_path])
+            rc = sports_fetch.main(["--config", self.config_path, "--state", self.state_path])
         self.assertEqual(rc, 0)
         with open(self.state_path) as fh:
             doc = json.load(fh)

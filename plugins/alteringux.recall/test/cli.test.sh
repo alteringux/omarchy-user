@@ -11,6 +11,7 @@
 set -uo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+export OMARCHY_RECALL_DIR="$REPO/plugins/alteringux.recall"
 CLI="${OMARCHY_RECALL_BIN:-$REPO/local-bin/omarchy-recall}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 

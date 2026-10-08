@@ -8,7 +8,7 @@
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 SCRIPT="$REPO/local-bin/omarchy-hide-window"
-BINDINGS="$HOME/.config/hypr/bindings.lua"
+BINDINGS="$REPO/hypr/bindings.lua"
 export PATH="$HERE/mocks:$PATH"
 
 RESULTS=$(mktemp)
