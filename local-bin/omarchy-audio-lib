@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Shared audio helpers for the omarchy spoken-notification family.
+
+PACTL="${PACTL:-pactl}"
+
+# Return success when the default output is muted or has zero volume. A missing
+# or failing pactl fails open so broken audio discovery never suppresses cues.
+omarchy_output_muted() {
+  [[ "${OMARCHY_IGNORE_SYSTEM_MUTE:-${OMARCHY_STOPWATCH_IGNORE_SYSTEM_MUTE:-0}}" = 1 ]] && return 1
+  command -v "$PACTL" >/dev/null 2>&1 || return 1
+  local sink mute vol
+  sink=$("$PACTL" get-default-sink 2>/dev/null) || return 1
+  [[ -n "$sink" ]] || return 1
+  mute=$("$PACTL" get-sink-mute "$sink" 2>/dev/null | awk '{print $2}')
+  [[ "$mute" = "yes" ]] && return 0
+  vol=$("$PACTL" get-sink-volume "$sink" 2>/dev/null | grep -oE '[0-9]+%' | tr -d '%' | sort -rn | head -1)
+  [[ -n "$vol" && "$vol" -eq 0 ]] && return 0
+  return 1
+}

@@ -2,6 +2,7 @@ import QtQuick
 import Quickshell
 import qs.Commons
 import qs.Ui
+import "../alteringux.kit" as Kit
 import "Model.js" as Model
 
 // The clock's calendar popup: a month grid with ISO week numbers, built to
@@ -15,6 +16,7 @@ import "Model.js" as Model
 // BarWidget.qml owns the bar label and hands this panel the button to
 // anchor against.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "omarchy.clock"
   ipcTarget: "omarchy.clock"
@@ -75,7 +77,7 @@ Panel {
 
   // Guarded so the widget renders before the bar is injected (the bar-widget
   // contract instantiates it bare).
-  readonly property color contentForeground: bar ? bar.foreground : Color.foreground
+  readonly property color contentForeground: bar ? _webPalette.barTextColorFor(bar.foreground) : _webPalette.foreground
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
 
   readonly property int cellWidth: Style.space(52)
@@ -228,6 +230,11 @@ Panel {
     return String(labelLocale.dayName(weekday, Locale.ShortFormat)).toUpperCase()
   }
 
+  function dayAccessibleName(day) {
+    var date = new Date(day.year, day.month, day.day)
+    return Qt.formatDate(date, "dddd, MMMM d, yyyy") + (day.today ? ", today" : "")
+  }
+
   SystemClock {
     id: clock
     precision: SystemClock.Minutes
@@ -239,7 +246,7 @@ Panel {
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -250,10 +257,26 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(560))
     contentHeight: panel.fittedContentHeight(calendarColumn.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
+      sectionNavigation: true
+      tabShortcutDescription: root.editingLife
+        ? "Move between life-progress fields"
+        : "Switch between panels in shortcut focus; move between controls in control focus"
+      tabShortcutContext: root.editingLife ? "Clock · life-progress editor" : "Clock · shortcut focus"
       id: keyCatcher
       anchors.fill: parent
       blocked: root.editingLife
+      escapeShortcutDescription: root.editingLife ? "Cancel life-progress editing" : "Close the panel"
+      escapeShortcutContext: root.editingLife ? "Clock · life-progress editor" : "Clock · shortcut focus"
+      additionalShortcutDescriptions: [
+        { keys: "Left / Right / H / L", description: "Move between months", context: "Clock · shortcut focus" },
+        { keys: "Up / Down / K / J", description: "Move between years", context: "Clock · shortcut focus" },
+        { keys: "[ / ]", description: "Move to the previous or next month", context: "Clock · shortcut focus" },
+        { keys: "{ / }", description: "Move to the previous or next year", context: "Clock · shortcut focus" },
+        { keys: "Enter / Space / T", description: "Go to today", context: "Clock · shortcut focus" },
+        { keys: "W", description: "Toggle the week start day", context: "Clock · shortcut focus" },
+        { keys: "Enter / Return", description: "Save life-progress values", context: "Clock · life-progress editor" }
+      ]
       onMoveRequested: function(dx, dy) {
         if (dx !== 0) root.moveMonth(dx)
         if (dy !== 0) root.moveYear(dy)
@@ -287,6 +310,11 @@ Panel {
           width: Math.max(calendarScroll.width, gridColumn.width)
           spacing: Style.space(8)
 
+          Kit.PanelHead {
+            title: "Calendar"
+            foreground: root.contentForeground
+          }
+
           // ---- Hero: today, centered. Once the view has stepped back
           //      it is also the way home — clicking the date you are
           //      looking for beats hunting for a reset button.
@@ -306,13 +334,12 @@ Panel {
                 anchors.baseline: heroDate.baseline
                 text: "󰃭"
                 color: heroMouse.containsMouse
-                  ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                  ? Style.hoverStateColor(root.contentForeground, _webPalette.accent)
                   : root.contentForeground
                 font.family: root.contentFontFamily
-                // Decorative, and deliberately outside the Style.font.*
-                // scale. Sized so the glyph reads at the cap height of the
-                // date beside it rather than towering over it.
-                font.pixelSize: 48
+                // Keep the glyph near the date's cap height while following
+                // the user's configured text scale.
+                font.pixelSize: Style.fontPx(4.0)
               }
 
               Text {
@@ -321,10 +348,10 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 text: Qt.formatDate(root.today, "MMMM d")
                 color: heroMouse.containsMouse
-                  ? Style.hoverStateColor(root.contentForeground, Color.accent)
+                  ? Style.hoverStateColor(root.contentForeground, _webPalette.accent)
                   : root.contentForeground
                 font.family: root.contentFontFamily
-                font.pixelSize: 52
+                font.pixelSize: Style.fontPx(4.333)
                 font.bold: true
               }
             }
@@ -361,6 +388,23 @@ Panel {
               anchors.horizontalCenter: parent.horizontalCenter
               width: gridColumn.width
               height: Math.max(yearLabel.implicitHeight, Style.space(10))
+              activeFocusOnTab: !root.editingLife
+              Accessible.role: Accessible.Button
+              Accessible.name: root.birthYear > 0 ? "Edit life progress settings" : "Set life progress settings"
+              Accessible.description: "Activate to enter a birth year and expected lifespan. Double-tap the year also opens editing."
+              Accessible.focusable: !root.editingLife
+              Accessible.onPressAction: root.startEditingLife()
+              Keys.onReturnPressed: root.startEditingLife()
+              Keys.onEnterPressed: root.startEditingLife()
+              Keys.onSpacePressed: root.startEditingLife()
+
+              Rectangle {
+                anchors.fill: parent
+                color: "transparent"
+                border.width: yearBlock.activeFocus ? 1 : 0
+                border.color: _webPalette.accent
+                radius: Style.cornerRadius
+              }
 
               TapHandler {
                 enabled: !root.editingLife
@@ -376,7 +420,7 @@ Panel {
                 Text {
                   anchors.verticalCenter: parent.verticalCenter
                   text: "BORN"
-                  color: Qt.darker(root.contentForeground, 1.5)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.5), _webPalette.background)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
                   font.letterSpacing: 1
@@ -390,6 +434,7 @@ Panel {
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
                   inputMethodHints: Qt.ImhDigitsOnly
+                  Accessible.name: "Birth year"
 
                   Keys.onPressed: function(event) { root.handleLifeKey(event, expectancyField) }
                 }
@@ -399,7 +444,7 @@ Panel {
                   anchors.verticalCenterOffset: 0
                   leftPadding: Style.space(6)
                   text: "LIVE TO"
-                  color: Qt.darker(root.contentForeground, 1.5)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.5), _webPalette.background)
                   font.family: root.contentFontFamily
                   font.pixelSize: Style.font.bodySmall
                   font.letterSpacing: 1
@@ -413,6 +458,7 @@ Panel {
                   foreground: root.contentForeground
                   font.family: root.contentFontFamily
                   inputMethodHints: Qt.ImhDigitsOnly
+                  Accessible.name: "Life expectancy in years"
 
                   Keys.onPressed: function(event) { root.handleLifeKey(event, bornField) }
                 }
@@ -425,7 +471,7 @@ Panel {
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.today.getFullYear()
-                color: Qt.darker(root.contentForeground, 1.5)
+                color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.5), _webPalette.background)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.letterSpacing: 1
@@ -459,7 +505,7 @@ Panel {
                   width: Math.round(parent.width * root.yearDone)
                   height: parent.height
                   radius: parent.radius
-                  color: Style.selectedStateColor(root.contentForeground, Color.accent)
+                  color: Style.selectedStateColor(root.contentForeground, _webPalette.accent)
 
                   Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
@@ -480,13 +526,31 @@ Panel {
               anchors.horizontalCenter: parent.horizontalCenter
               width: gridColumn.width
               height: Math.max(lifeLabel.implicitHeight, Style.space(10))
+              activeFocusOnTab: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Clear life progress settings"
+              Accessible.description: "Removes the saved birth year and hides this tracker. Double-tap to clear."
+              Accessible.onPressAction: root.clearLife()
+              Keys.onReturnPressed: root.clearLife()
+              Keys.onEnterPressed: root.clearLife()
+              Keys.onSpacePressed: root.clearLife()
+              onActiveFocusChanged: if (!activeFocus && root.birthYear <= 0)
+                Qt.callLater(function() { if (root.opened) keyCatcher.forceActiveFocus() })
+
+              Rectangle {
+                anchors.fill: parent
+                color: "transparent"
+                border.width: lifeBlock.activeFocus ? 1 : 0
+                border.color: _webPalette.accent
+                radius: Style.cornerRadius
+              }
 
               Text {
                 id: lifeLabel
                 anchors.left: parent.left
                 anchors.verticalCenter: parent.verticalCenter
                 text: "LIFE"
-                color: Qt.darker(root.contentForeground, 1.5)
+                color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.5), _webPalette.background)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.letterSpacing: 1
@@ -517,7 +581,7 @@ Panel {
                   width: Math.round(parent.width * root.lifeDone)
                   height: parent.height
                   radius: parent.radius
-                  color: Style.selectedStateColor(root.contentForeground, Color.accent)
+                  color: Style.selectedStateColor(root.contentForeground, _webPalette.accent)
 
                   Behavior on width { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
                 }
@@ -579,15 +643,17 @@ Panel {
                   height: Style.space(16)
                   radius: Style.cornerRadius
                   color: weekStartMouse.containsMouse
-                    ? Style.hoverFillFor(root.contentForeground, Color.accent)
+                    ? Style.hoverFillFor(root.contentForeground, _webPalette.accent)
                     : "transparent"
+                  border.width: weekStartMouse.activeFocus ? Style.spacing.hairline : 0
+                  border.color: _webPalette.accent
 
                   Text {
                     anchors.centerIn: parent
                     text: "W"
                     color: weekStartMouse.containsMouse
-                      ? Style.hoverStateColor(root.contentForeground, Color.accent)
-                      : Qt.darker(root.contentForeground, 1.9)
+                      ? Style.hoverStateColor(root.contentForeground, _webPalette.accent)
+                      : _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.9), _webPalette.background)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
                     font.letterSpacing: 1
@@ -598,6 +664,14 @@ Panel {
                     id: weekStartMouse
                     anchors.fill: parent
                     hoverEnabled: true
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Start weeks on " + root.nextWeekStartLabel
+                    Accessible.description: "Weeks currently start on " + labelLocale.dayName(root.weekStart, Locale.LongFormat)
+                    Accessible.onPressAction: root.toggleWeekStart()
+                    Keys.onReturnPressed: root.toggleWeekStart()
+                    Keys.onEnterPressed: root.toggleWeekStart()
+                    Keys.onSpacePressed: root.toggleWeekStart()
                     cursorShape: Qt.PointingHandCursor
                     onClicked: root.toggleWeekStart()
                   }
@@ -625,7 +699,8 @@ Panel {
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                     text: root.weekdayLabel(modelData)
-                    color: Qt.darker(root.contentForeground, 1.5)
+                    Accessible.name: labelLocale.dayName(modelData, Locale.LongFormat)
+                    color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.5), _webPalette.background)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
                     font.letterSpacing: 1
@@ -648,7 +723,8 @@ Panel {
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                     text: modelData.week
-                    color: Qt.darker(root.contentForeground, 1.9)
+                    Accessible.name: "Week " + modelData.week
+                    color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.9), _webPalette.background)
                     font.family: root.contentFontFamily
                     font.pixelSize: Style.font.caption
                   }
@@ -671,15 +747,16 @@ Panel {
                       // over a grid this quiet.
                       color: "transparent"
                       border.width: modelData.today ? Style.spacing.hairline : 0
-                      border.color: Style.normalBorderFor(root.contentForeground, Color.accent)
+                      border.color: Style.normalBorderFor(root.contentForeground, _webPalette.accent)
 
                       Text {
                         textFormat: Text.PlainText
                         anchors.centerIn: parent
                         text: modelData.day
+                        Accessible.name: root.dayAccessibleName(modelData)
                         color: modelData.inMonth
-                          ? (modelData.weekend ? Qt.darker(root.contentForeground, 1.45) : root.contentForeground)
-                          : Qt.darker(root.contentForeground, 2.2)
+                          ? (modelData.weekend ? _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.45), _webPalette.background) : root.contentForeground)
+                          : _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 2.2), _webPalette.background)
                         font.family: root.contentFontFamily
                         font.pixelSize: Style.font.body
                         font.bold: modelData.today
@@ -728,7 +805,7 @@ Panel {
                 width: Style.space(130)
                 horizontalAlignment: Text.AlignHCenter
                 text: Qt.formatDate(root.viewDate, "MMMM yyyy").toUpperCase()
-                color: Qt.darker(root.contentForeground, 1.4)
+                color: _webPalette.contrastColorFor(Qt.darker(root.contentForeground, 1.4), _webPalette.background)
                 font.family: root.contentFontFamily
                 font.pixelSize: Style.font.body
                 font.letterSpacing: 1
@@ -742,6 +819,9 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅁"
                 tooltipText: "Previous month"
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: tooltipText
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(-1)
@@ -753,11 +833,29 @@ Panel {
                 anchors.verticalCenter: parent.verticalCenter
                 iconText: "󰅂"
                 tooltipText: "Next month"
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: tooltipText
                 foreground: root.contentForeground
                 fontFamily: root.contentFontFamily
                 onClicked: root.moveMonth(1)
               }
             }
+          }
+
+          Text {
+            id: shortcutHint
+            width: calendarScroll.width
+            text: root.editingLife
+              ? "Tab/Shift+Tab: next field  ·  Enter: save  ·  Esc: cancel  ·  F6: controls/shortcuts"
+              : "←/→, H/L, [ ]: month  ·  ↑/↓, K/J, { }: year  ·  Enter/Space/T: today  ·  W: week start"
+                + "\nF6: controls/shortcuts  ·  Esc: close  ·  Tab/Shift+Tab: panels in shortcut focus; controls in control focus"
+                + "\nIn control focus, activate the year row to edit life progress; activate LIFE to clear it."
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: _webPalette.faint
+            font.family: root.contentFontFamily
+            font.pixelSize: Style.font.caption
           }
         }
       }

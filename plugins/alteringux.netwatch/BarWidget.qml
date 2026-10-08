@@ -7,6 +7,7 @@ import "Model.js" as Model
 import "../alteringux.kit" as Kit
 
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.netwatch"
 
@@ -66,8 +67,37 @@ BarWidget {
   // ---- the sampler. The shipped systemd timer keeps buckets accruing when the
   //      shell isn't running; this keeps the live rate fresh while it is.
   readonly property int sampleIntervalMs: Model.sampleIntervalMs(root.config || {})
+  property string sampleError: ""
+  property bool sampleFailureAnnounced: false
+  signal sampleFeedback(string message)
+  function reportSampleFailure(message) {
+    root.sampleError = message
+    if (root.sampleFailureAnnounced) return
+    root.sampleFailureAnnounced = true
+    root.sampleFeedback(message)
+  }
 
-  Process { id: sampleProc; running: false; onExited: stateStore.reload() }
+  Process {
+    id: sampleProc
+    property bool started: false
+    property bool attempted: false
+    running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportSampleFailure("Network sample unavailable. Check ~/.local/bin/omarchy-netwatch.")
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload()
+      started = false
+      attempted = false
+      if (code === 0 && status === 0) { root.sampleError = ""; root.sampleFailureAnnounced = false }
+      else root.reportSampleFailure("Network sample failed (exit " + code + ").")
+    }
+  }
 
   function sampleNow() {
     guard.run("sampleNow", function () {
@@ -139,7 +169,7 @@ BarWidget {
     tooltipText: root.tooltipText
     dimmed: !!(stat && stat.stale)
     active: root.quotaWarn
-    activeColor: root.quotaCrit ? Kit.Palette.negative : Kit.Palette.warning
+    activeColor: root.quotaCrit ? _webPalette.barNegative : _webPalette.barWarning
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

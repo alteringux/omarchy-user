@@ -16,6 +16,7 @@ import "../alteringux.kit" as Kit
 // whether the settings Panel is open, so the companion stays visible on the
 // desktop the whole time it's enabled.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.deskpet"
 
@@ -178,9 +179,9 @@ BarWidget {
   }
 
   readonly property color displayColor: {
-    if (!root.state.enabled) return Kit.Palette.faint
-    if (root.mood === "hungry" || root.mood === "grumpy") return Kit.Palette.warning
-    return root.bar ? Color.bar.text : "#ffffff"
+    if (!root.state.enabled) return _webPalette.barMuted
+    if (root.mood === "hungry" || root.mood === "grumpy") return _webPalette.barWarning
+    return root.bar ? _webPalette.barForeground : _webPalette.foreground
   }
 
   WidgetButton {

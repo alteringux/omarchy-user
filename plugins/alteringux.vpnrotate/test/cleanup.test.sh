@@ -5,7 +5,8 @@
 #   - SIGTERM during connect clears state and does not strand the tunnel
 set -uo pipefail
 
-SCRIPT="${PROTONVPN_ROTATE_BIN:-$HOME/.local/bin/protonvpn-rotate}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+SCRIPT="${PROTONVPN_ROTATE_BIN:-$REPO/local-bin/protonvpn-rotate}"
 [ -f "$SCRIPT" ] || { echo "cannot find protonvpn-rotate at $SCRIPT" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

@@ -1,5 +1,7 @@
 import QtQuick
+import Quickshell
 import qs.Commons
+import "../alteringux.kit" as Kit
 
 // Minimal stand-in for the omarchy shell's `Bar` object, handed to every
 // widget this bottom bar hosts (as `widget.bar`) and, through the widget's
@@ -26,16 +28,18 @@ import qs.Commons
 // summon routing. `position: "bottom"` makes KeyboardPanel.cardOrigin place
 // popups above this bar instead of below the top one.
 QtObject {
+  property QtObject _webPalette: Kit.Palette {}
   id: shim
 
   property string position: "bottom"
   property int barSize: Math.max(20, Style.bar.sizeHorizontal)
   property bool vertical: false
+  property int popupExtraGap: 0
 
   property string fontFamily: Style.font.family
-  property color barForeground: Color.bar.text
-  property color foreground: Color.bar.text
-  property color urgent: Color.bar.active
+  property color barForeground: _webPalette.barForeground
+  property color foreground: _webPalette.barForeground
+  property color urgent: _webPalette.barActive
   property bool foregroundAnimationEnabled: false
 
   // ---- click-target registry (WidgetButton registers itself here) --------
@@ -59,6 +63,7 @@ QtObject {
   // ---- tooltips: no host surface on this bar, so swallow the calls -------
   function showTooltip(item, text) {}
   function hideTooltip(item) {}
+  function run(command) { if (command) Quickshell.execDetached(["bash", "-lc", String(command)]) }
 
   // ---- single-popout-per-bar coordinator --------------------------------
   property var activePopout: null

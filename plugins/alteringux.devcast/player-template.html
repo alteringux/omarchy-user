@@ -6,23 +6,23 @@
 <title>__TITLE__ — devcast</title>
 <style>
   :root {
-    --bg: #f6f7f9; --panel: #ffffff; --ink: #1c2024; --dim: #5b636c;
-    --line: #e2e5e9; --accent: #2f6feb; --add: #1a7f37; --del: #cf222e;
-    --chip: #eef1f5; --shadow: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
+    --bg: #FFFFFF; --panel: #FFFFFF; --ink: #000000; --dim: #333333;
+    --line: #666666; --accent: #0066CC; --add: #006600; --del: #990000;
+    --chip: #CCCCCC; --shadow: 0 1px 3px rgba(0,0,0,.08), 0 8px 24px rgba(0,0,0,.06);
     --mono: ui-monospace, "JetBrainsMono Nerd Font", "JetBrains Mono", Menlo, Consolas, monospace;
     --sans: ui-sans-serif, system-ui, "Inter", "Segoe UI", Roboto, sans-serif;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --dim: #98a1ac;
-      --line: #262c35; --accent: #6aa1ff; --add: #3fb950; --del: #f85149;
-      --chip: #212832; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
+      --bg: #000000; --panel: #000033; --ink: #FFFFFF; --dim: #CCCCCC;
+      --line: #666666; --accent: #66CCFF; --add: #66FF66; --del: #FF9999;
+      --chip: #333333; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
     }
   }
   :root[data-theme="dark"] {
-    --bg: #0f1216; --panel: #171b21; --ink: #e6e9ee; --dim: #98a1ac;
-    --line: #262c35; --accent: #6aa1ff; --add: #3fb950; --del: #f85149;
-    --chip: #212832; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
+    --bg: #000000; --panel: #000033; --ink: #FFFFFF; --dim: #CCCCCC;
+    --line: #666666; --accent: #66CCFF; --add: #66FF66; --del: #FF9999;
+    --chip: #333333; --shadow: 0 1px 3px rgba(0,0,0,.4), 0 12px 32px rgba(0,0,0,.35);
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; }
@@ -52,7 +52,7 @@
   .rail .r.on { background: var(--chip); color: var(--ink); font-weight: 600; }
   .rail .r .ic { flex: 0 0 auto; width: 16px; text-align: center; }
   .rail .r .lb { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .rail .r .tm { flex: 0 0 auto; font-variant-numeric: tabular-nums; opacity: .7; }
+  .rail .r .tm { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
   .stage {
     flex: 1; overflow: hidden; padding: 26px clamp(18px, 5vw, 64px);
     display: flex; flex-direction: column; gap: 14px;
@@ -62,7 +62,7 @@
     font-weight: 700; display: flex; align-items: center; gap: 8px;
   }
   .kind .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
-  .kind.k-prompt .dot { background: #8957e5; }
+  .kind.k-prompt .dot { background: #9966CC; }
   .kind.k-tool .dot { background: var(--accent); }
   .kind.k-narration .dot { background: var(--add); }
   .kind.k-thinking .dot { background: var(--dim); }
@@ -109,7 +109,7 @@
   .btn {
     appearance: none; border: 1px solid var(--line); background: var(--bg); color: var(--ink);
     font-size: 14px; width: 34px; height: 34px; border-radius: 9px; cursor: pointer;
-    display: inline-flex; align-items: center; justify-content: center;
+    display: inline-flex; align-items: center; justify-content: center; font-family: var(--mono);
   }
   .btn:hover { border-color: var(--accent); color: var(--accent); }
   .btn.play { width: 40px; font-size: 16px; }
@@ -157,9 +157,9 @@
     </div>
   </div>
   <div class="transport" id="transport">
-    <button class="btn" id="prev" title="Previous step (←)">⏮</button>
-    <button class="btn play" id="play" title="Play / pause (Space)">▶</button>
-    <button class="btn" id="next" title="Next step (→)">⏭</button>
+    <button class="btn" id="prev" title="Previous step (←)">󰒮</button>
+    <button class="btn play" id="play" title="Play / pause (Space)">󰐊</button>
+    <button class="btn" id="next" title="Next step (→)">󰒭</button>
     <div class="scrub" id="scrub"><div class="ticks" id="ticks"></div><div class="fill" id="fill"></div></div>
     <span class="time" id="time">0:00 / 0:00</span>
     <select class="speed" id="speed" title="Speed (↑/↓)">
@@ -206,7 +206,7 @@
   }
 
   // ---- rail
-  var ICON = { prompt: "▸", narration: "✎", thinking: "…", tool: "⚙" };
+  var ICON = { prompt: "▸", narration: "✎", thinking: "…", tool: "󰒓" };
   var rail = $("rail");
   steps.forEach(function (s, i) {
     var r = document.createElement("div");
@@ -342,12 +342,12 @@
   function play() {
     if (playing) return;
     if (clock >= total) clock = 0;
-    playing = true; $("play").textContent = "⏸";
+    playing = true; $("play").textContent = "󰏤";
     lastFrame = performance.now();
     rafId = requestAnimationFrame(tick);
   }
   function pause() {
-    playing = false; $("play").textContent = clock >= total ? "↻" : "▶";
+    playing = false; $("play").textContent = clock >= total ? "↻" : "󰐊";
     if (rafId) cancelAnimationFrame(rafId);
   }
   function toggle() { playing ? pause() : play(); }

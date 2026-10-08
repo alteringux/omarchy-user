@@ -7,10 +7,11 @@ import "../alteringux.kit" as Kit
 // { values, max, n } from Model.sparkline. Draws a filled line; shows a
 // "collecting samples…" hint until there are at least two points.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var series: ({ values: [], max: 1, n: 0 })
-  property color stroke: Kit.Palette.info
+  property color stroke: _webPalette.info
   property color foreground: "white"
   property real fillAlpha: 0.13
 

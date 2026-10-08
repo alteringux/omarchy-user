@@ -5,12 +5,14 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Detail popup for reposwatch: one row per watched repo — branch, dirty
 // breakdown, ahead/behind, and how long ago its last commit landed. Binds to
 // the host widget's watched store; never writes except the on-demand
 // scan a user action triggers.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.reposwatch"
   ipcTarget: "alteringux.reposwatch"
@@ -25,9 +27,9 @@ Panel {
   readonly property var stat: (hostWidget && hostWidget.stat) ? hostWidget.stat : Model.defaultState()
 
   function levelColor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.positive
+    if (level === "critical") return _webPalette.negative
+    if (level === "warning") return _webPalette.warning
+    return _webPalette.positive
   }
 
   function open() { root.controller.show() }
@@ -49,7 +51,7 @@ Panel {
     return Math.floor(s / 86400) + "d ago"
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -60,12 +62,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       id: keyCatcher
       anchors.fill: parent
+      sectionNavigation: true
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.scanNow() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Scan repositories for changes", context: "Repository monitor · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -96,7 +102,7 @@ Panel {
               Kit.MetaText { content: "DIRTY"; foreground: root.barForeground }
               Text {
                 text: root.stat.totals.dirtyRepos
-                color: root.stat.totals.dirtyRepos > 0 ? Kit.Palette.warning : root.barForeground
+                color: root.stat.totals.dirtyRepos > 0 ? _webPalette.warning : root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
                 font.bold: true
@@ -129,7 +135,7 @@ Panel {
               Kit.MetaText { content: "ERRORS"; foreground: root.barForeground }
               Text {
                 text: root.stat.totals.errorRepos
-                color: root.stat.totals.errorRepos > 0 ? Kit.Palette.negative : root.barForeground
+                color: root.stat.totals.errorRepos > 0 ? _webPalette.negative : root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
                 font.bold: true
@@ -159,22 +165,22 @@ Panel {
                 Row {
                   width: parent.width
                   spacing: Style.space(6)
-                  Text {
+                  MarqueeText {
                     text: modelData.name
                     color: root.barForeground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.bodySmall
-                    font.bold: true
-                    elide: Text.ElideRight
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.bodySmall
+                    textFont.bold: true
+                    requestedElide: Text.ElideRight
                     width: Style.space(140)
                   }
-                  Text {
+                  MarqueeText {
                     visible: modelData.ok
                     text: modelData.branch
-                    color: Qt.darker(root.barForeground, 1.3)
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
+                    color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.3), _webPalette.barBackground)
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.caption
+                    requestedElide: Text.ElideRight
                     width: Style.space(90)
                   }
                   Item { width: parent.width - x - trailing.width; height: 1 }
@@ -188,7 +194,7 @@ Panel {
                   }
                 }
 
-                Text {
+                MarqueeText {
                   width: parent.width
                   text: modelData.ok
                     ? (modelData.dirty.total > 0
@@ -196,10 +202,10 @@ Panel {
                           modelData.dirty.untracked + " untracked · " + root.relativeAge(modelData.lastCommitTs)
                         : "clean · " + root.relativeAge(modelData.lastCommitTs))
                     : modelData.error
-                  color: modelData.ok ? Kit.Palette.faint : Kit.Palette.negative
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
-                  elide: Text.ElideRight
+                  color: modelData.ok ? _webPalette.faint : _webPalette.negative
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.caption
+                  requestedElide: Text.ElideRight
                 }
               }
             }

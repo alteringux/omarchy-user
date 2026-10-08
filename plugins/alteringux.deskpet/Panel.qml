@@ -9,6 +9,7 @@ import "../alteringux.kit" as Kit
 // mood bars, and tune how chatty it is. Everything here acts on hostWidget,
 // which owns the state and does the actual Model.js math.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.deskpet"
   ipcTarget: ""
@@ -33,7 +34,7 @@ Panel {
     return "Content"
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -42,7 +43,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(320))
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(560)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       onCloseRequested: root.close()
 
@@ -56,8 +57,8 @@ Panel {
           spacing: Style.space(14)
 
           Kit.PanelHead {
-            glyph: (hostWidget && hostWidget.state.shiny ? "✨" : "") + root.pet.glyph
-            title: root.pet.name + (hostWidget && hostWidget.state.shiny ? " ✨ (Shiny!)" : "")
+            glyph: (hostWidget && hostWidget.state.shiny ? "󰫨" : "") + root.pet.glyph
+            title: root.pet.name + (hostWidget && hostWidget.state.shiny ? " 󰫨 (Shiny!)" : "")
             meta: (root.seasonalEvent ? root.seasonalEvent.glyph + " " + root.seasonalEvent.name.toUpperCase() + "  ·  " : "")
               + root.moodDescription(root.mood).toUpperCase() + "  ·  LVL " + root.level.level + " " + root.level.title.toUpperCase()
             foreground: root.barForeground
@@ -66,7 +67,7 @@ Panel {
           Text {
             width: content.width
             text: root.pet.tagline + "  ·  " + root.level.total + "/" + root.level.nextAt + " to next level"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             wrapMode: Text.WordWrap
@@ -107,7 +108,7 @@ Panel {
                     id: pctText
                     anchors.right: parent.right
                     text: Math.round(modelData.value) + "%"
-                    color: Kit.Palette.faint
+                    color: _webPalette.faint
                     font.family: Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -123,9 +124,9 @@ Panel {
                     height: parent.height
                     radius: parent.radius
                     width: Math.max(parent.height, parent.width * Model.clamp(modelData.value, 0, 100) / 100)
-                    color: modelData.tone === "positive" ? Kit.Palette.positive
-                      : modelData.tone === "warning" ? Kit.Palette.warning
-                      : Kit.Palette.info
+                    color: modelData.tone === "positive" ? _webPalette.positive
+                      : modelData.tone === "warning" ? _webPalette.warning
+                      : _webPalette.info
                     Behavior on width { NumberAnimation { duration: 300; easing.type: Easing.OutCubic } }
                   }
                 }
@@ -136,29 +137,42 @@ Panel {
           PanelSeparator {}
 
           // ---- actions -------------------------------------------------
-          Row {
+          Flow {
+            width: content.width
             spacing: Style.space(8)
 
-            Button {
+            Kit.ActionButton {
               text: "Feed"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.feedPet()
             }
-            Button {
+            Kit.ActionButton {
               text: "Play"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.playWithPet()
             }
-            Button {
+            Kit.ActionButton {
               text: "Pet"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.pokePet()
             }
-            Button {
+            Kit.ActionButton {
               text: root.st.asleep ? "Wake" : "Sleep"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text + " pet"
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.toggleSleep()
@@ -183,9 +197,14 @@ Panel {
 
             Repeater {
               model: Model.allPets()
-              Button {
+              Kit.ActionButton {
                 required property var modelData
                 text: modelData.glyph + " " + modelData.name
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: "Select pet " + modelData.name
+                Accessible.checkable: true
+                Accessible.checked: hostWidget && hostWidget.state.petId === modelData.id
                 foreground: root.barForeground
                 bordered: hostWidget && hostWidget.state.petId === modelData.id
                 onClicked: if (hostWidget) hostWidget.selectPet(modelData.id)
@@ -209,8 +228,13 @@ Panel {
             width: content.width
             spacing: Style.space(6)
 
-            Button {
+            Kit.ActionButton {
               text: "None"
+              focusable: true
+              Accessible.role: Accessible.RadioButton
+              Accessible.name: "Remove current accessory"
+              Accessible.checkable: true
+              Accessible.checked: hostWidget && hostWidget.state.accessoryId === null
               foreground: root.barForeground
               bordered: hostWidget && hostWidget.state.accessoryId === null
               onClicked: if (hostWidget) hostWidget.equipAccessory(null)
@@ -218,11 +242,16 @@ Panel {
 
             Repeater {
               model: Model.ACCESSORIES
-              Button {
+              Kit.ActionButton {
                 required property var modelData
                 readonly property bool unlocked: root.unlockedIds.indexOf(modelData.unlockedBy) >= 0
-                text: (unlocked ? modelData.glyph : "🔒") + " " + modelData.name
-                foreground: unlocked ? root.barForeground : Kit.Palette.faint
+                text: (unlocked ? modelData.glyph : "󰌾") + " " + modelData.name
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: "Equip " + modelData.name
+                Accessible.checkable: true
+                Accessible.checked: hostWidget && hostWidget.state.accessoryId === modelData.id
+                foreground: unlocked ? root.barForeground : _webPalette.faint
                 bordered: hostWidget && hostWidget.state.accessoryId === modelData.id
                 enabled: unlocked
                 onClicked: if (hostWidget) hostWidget.equipAccessory(modelData.id)
@@ -247,9 +276,14 @@ Panel {
 
             Repeater {
               model: Model.ROAM_MODES
-              Button {
+              Kit.ActionButton {
                 required property var modelData
                 text: modelData === "off" ? "Still" : (modelData === "walk" ? "Walk" : "Gallop")
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: "Set roaming to " + text
+                Accessible.checkable: true
+                Accessible.checked: hostWidget && hostWidget.state.roamMode === modelData
                 foreground: root.barForeground
                 bordered: hostWidget && hostWidget.state.roamMode === modelData
                 onClicked: if (hostWidget) hostWidget.setRoamMode(modelData)
@@ -274,9 +308,14 @@ Panel {
 
             Repeater {
               model: root.speechPresets
-              Button {
+              Kit.ActionButton {
                 required property var modelData
                 text: modelData <= 1.5 ? "Very Chatty" : (modelData <= 3 ? "Chatty" : (modelData <= 6 ? "Normal" : "Quiet"))
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: "Set pet speech frequency to " + text
+                Accessible.checkable: true
+                Accessible.checked: hostWidget && hostWidget.state.speechFreqMin === modelData
                 foreground: root.barForeground
                 bordered: hostWidget && hostWidget.state.speechFreqMin === modelData
                 onClicked: if (hostWidget) hostWidget.setSpeechFreq(modelData)
@@ -288,7 +327,13 @@ Panel {
 
           Toggle {
             width: content.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: label
+            Accessible.checkable: true
+            Accessible.checked: checked
+            Accessible.onPressAction: clicked()
+            Accessible.onToggleAction: clicked()
             label: "Show on desktop"
             description: (hostWidget && hostWidget.state.enabled) ? "Floating on top of everything" : "Hidden"
             checked: hostWidget && hostWidget.state.enabled
@@ -298,7 +343,13 @@ Panel {
 
           Toggle {
             width: content.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: label
+            Accessible.checkable: true
+            Accessible.checked: checked
+            Accessible.onPressAction: clicked()
+            Accessible.onToggleAction: clicked()
             label: "Mute chatter"
             description: (hostWidget && hostWidget.state.muted) ? "Speech bubble silenced" : "Speaks up sometimes"
             checked: hostWidget && hostWidget.state.muted
@@ -311,7 +362,14 @@ Panel {
           // ---- screen watch ------------------------------------------------
           Toggle {
             width: content.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: label
+            Accessible.checkable: true
+            Accessible.checked: checked
+            Accessible.description: description
+            Accessible.onPressAction: clicked()
+            Accessible.onToggleAction: clicked()
             label: "Let it look at your screen"
             description: (hostWidget && hostWidget.state.screenWatchEnabled)
               ? "Sends a screenshot to NanoGPT (external AI) every so often for a comment"
@@ -327,9 +385,14 @@ Panel {
 
             Repeater {
               model: [15, 30, 60]
-              Button {
+              Kit.ActionButton {
                 required property var modelData
                 text: modelData <= 15 ? "Often" : (modelData <= 30 ? "Normal" : "Rare")
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: "Set screen check frequency to " + text
+                Accessible.checkable: true
+                Accessible.checked: hostWidget && hostWidget.state.screenLookFreqMin === modelData
                 foreground: root.barForeground
                 bordered: hostWidget && hostWidget.state.screenLookFreqMin === modelData
                 onClicked: if (hostWidget) hostWidget.setScreenLookFreq(modelData)
@@ -361,13 +424,12 @@ Panel {
                 spacing: Style.space(4)
 
                 Text {
-                  text: unlocked ? "🏆" : "🔒"
+                  text: unlocked ? "󰔸" : "󰌾"
                   font.pixelSize: Style.font.bodySmall
-                  opacity: unlocked ? 1 : 0.5
                 }
                 Text {
                   text: modelData.name
-                  color: unlocked ? root.barForeground : Kit.Palette.faint
+                  color: unlocked ? root.barForeground : _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -384,7 +446,7 @@ Panel {
               ? ("Adopted " + hostWidget.ageDaysValue + " day" + (hostWidget.ageDaysValue === 1 ? "" : "s") + " ago  ·  "
                 + Math.round(root.st.totalPokes || 0) + " pets  ·  " + Math.round(root.st.totalFeeds || 0) + " snacks")
               : ""
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -394,7 +456,7 @@ Panel {
           // (Kit.Palette.faint at caption size), not the meta treatment.
           Text {
             text: "Right-click the pet on your desktop to open this panel too. Esc: close"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap

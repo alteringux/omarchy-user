@@ -178,7 +178,7 @@ if (op === "scan") {
   })
   rl.on("close", () => {
     if (!out.title && firstUserPrompt) {
-      out.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").slice(0, 72).trim()
+      out.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").trim()
     }
     if (!out.title) out.title = "session"
     process.stdout.write(JSON.stringify(out) + "\n")
@@ -209,7 +209,9 @@ if (op === "catalog") {
   if (prevPath && !rebuild) {
     try {
       const prev = JSON.parse(fs.readFileSync(prevPath, "utf8"))
-      for (const s of prev.sessions || []) if (s.sourcePath) prevByPath[s.sourcePath] = s
+      // Version 1 fallback titles were clipped before reaching the UI.
+      if (prev.version === 2)
+        for (const s of prev.sessions || []) if (s.sourcePath) prevByPath[s.sourcePath] = s
     } catch (e) {}
   }
   const builtBySession = {}
@@ -332,7 +334,7 @@ if (op === "catalog") {
       })
       rl.on("close", () => {
         if (!o.title && firstUserPrompt)
-          o.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").slice(0, 72).trim()
+          o.title = firstUserPrompt.split("\n")[0].replace(/^\/\S+\s*/, "").trim()
         if (!o.title) o.title = "session"
         resolve(o)
       })
@@ -358,7 +360,7 @@ if (op === "catalog") {
     }
     sessions.sort((a, b) => (b.lastTs || 0) - (a.lastTs || 0))
     process.stdout.write(
-      JSON.stringify({ version: 1, updatedAt: Date.now(), count: sessions.length, sessions }) + "\n"
+      JSON.stringify({ version: 2, updatedAt: Date.now(), count: sessions.length, sessions }) + "\n"
     )
     process.exit(0)
   })()

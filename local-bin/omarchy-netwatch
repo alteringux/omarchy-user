@@ -12,7 +12,7 @@
 #   today / this month* is not something the kernel tracks — `sample` takes the
 #   delta since the previous reading and accumulates it into hour/day/month
 #   buckets in netwatch-state.json. Run it on a cadence (the shipped
-#   omarchy-netwatch-sample.timer does, every ~20s); the bar widget also calls
+#   omarchy-netwatch-sample.timer does, every ~5min); the bar widget also calls
 #   it on its own tick for a fresh live rate.
 #
 #   `top` is a separate, instantaneous view: it parses `ss -tunHp` (no root

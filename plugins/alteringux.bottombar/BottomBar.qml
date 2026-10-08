@@ -20,6 +20,7 @@ import "../alteringux.kit" as Kit
 // Because these widgets are instantiated HERE, they must NOT also appear in
 // shell.json's top-bar layout, or their IpcHandlers double-register.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   // Injected by the omarchy-shell host for service plugins.
@@ -29,6 +30,8 @@ Item {
 
   readonly property string home: Quickshell.env("HOME")
   readonly property int barSize: Math.max(20, Style.bar.sizeHorizontal)
+  readonly property real surfaceWidth: Quickshell.screens.length ? Quickshell.screens[0].width : 2048
+  readonly property real surfaceHeight: Quickshell.screens.length ? Quickshell.screens[0].height : 1280
 
   // Hosted widgets. The candidate arrays preserve the bar's intentional
   // left/right order; the registry-backed properties below decide which
@@ -43,18 +46,38 @@ Item {
     { id: "alteringux.stopwatch" },
     { id: "alteringux.timers" },
     { id: "alteringux.grip" },
-    { id: "alteringux.stocks" },
-    { id: "alteringux.score" },
-    { id: "alteringux.conductor" },
-    { id: "alteringux.phone" }
+    { id: "alteringux.countdown" },
+    { id: "alteringux.devcast" },
+    { id: "alteringux.pulse" },
+    { id: "alteringux.reposwatch" },
+    { id: "alteringux.nanogpt" },
+    { id: "alteringux.recall" }
   ]
   readonly property var rightCandidates: [
+    { id: "alteringux.score" },
+    { id: "alteringux.conductor" },
+    { id: "alteringux.phone" },
+    { id: "alteringux.deskpet" },
+    { id: "alteringux.glimpse" }
+  ]
+  readonly property var overflowCandidates: [
     { id: "alteringux.flow" },
     { id: "alteringux.cliamp" },
-    { id: "alteringux.countdown" }
+    { id: "alteringux.stocks" },
+    { id: "alteringux.sports" },
+    { id: "alteringux.breathe" },
+    { id: "alteringux.ttsplayer" }
+  ]
+  readonly property var sideLeftCandidates: [
+    { id: "omarchy.menu" },
+    { id: "alteringux.dashboard" }
+  ]
+  readonly property var sideRightCandidates: [
+    { id: "alteringux.skilldashboard" },
+    { id: "io.github.kristoferlund.webcam" }
   ]
 
-  function enabledSpecs(candidates) {
+  function enabledSpecs(candidates, section) {
     var registry = root.pluginRegistry
     // The revision is a binding dependency: a rescan/config mutation can
     // change installedPlugins or enabled state without replacing the object.
@@ -79,22 +102,174 @@ Item {
 
       var src = registry.entryPointUrl(manifest, "barWidget")
       if (!src) continue
-      result.push({ id: id, src: src })
+      result.push({ id: id, src: src, section: section })
     }
     return result
   }
 
-  readonly property var leftSpecs: root.enabledSpecs(root.leftCandidates)
-  readonly property var rightSpecs: root.enabledSpecs(root.rightCandidates)
-  readonly property var widgetSpecs: root.leftSpecs.concat(root.rightSpecs)
+  readonly property var leftSpecs: root.enabledSpecs(root.leftCandidates, "left")
+  readonly property var rightSpecs: root.enabledSpecs(root.rightCandidates, "right")
+  readonly property var overflowSpecs: root.enabledSpecs(root.overflowCandidates, "overflow")
+  readonly property var sideLeftSpecs: root.enabledSpecs(root.sideLeftCandidates, "side-left")
+  readonly property var sideRightSpecs: root.enabledSpecs(root.sideRightCandidates, "side-right")
+  // Placement rule: vertical rails are reserved for click-only icon affordances.
+  // Text and changing values stay readable on the horizontal bar.
+  readonly property var widgetSpecs: root.leftSpecs.concat(root.rightSpecs, root.overflowSpecs,
+                                                           root.sideLeftSpecs, root.sideRightSpecs)
+
+  // Keep the edge rows useful at ordinary laptop widths. Long labels still
+  // open their existing popups; the slot only bounds their inline preview.
+  // ponytail: fixed caps are the smallest safe seam until the bar gains a
+  // first-class overflow menu.
+  readonly property var inlineWidthCaps: ({
+    "alteringux.flow": 170,
+    "alteringux.cliamp": 130,
+    "alteringux.countdown": 190,
+    "alteringux.stocks": 140,
+    "alteringux.sports": 190,
+    "alteringux.breathe": 90
+  })
+
+  readonly property var overflowWidthCaps: ({
+    "alteringux.flow": 282,
+    "alteringux.cliamp": 178,
+    "alteringux.countdown": 300,
+    "alteringux.stocks": 192,
+    "alteringux.sports": 499,
+    "alteringux.breathe": 122,
+    "alteringux.ttsplayer": 160
+  })
+
+  function inlineWidth(id, natural) {
+    var width = Math.max(0, Number(natural) || 0)
+    var cap = root.inlineWidthCaps[id]
+    return cap === undefined ? width : Math.min(width, cap)
+  }
+
+  function slotNaturalWidth(slot) {
+    return slot.failed
+      ? Style.space(20)
+      : Math.max(0, Number(slot.hostItem ? slot.hostItem.implicitWidth : 0) || 0)
+  }
+
+  function slotWidth(slot) {
+    var natural = root.slotNaturalWidth(slot)
+    if (String(slot.modelData.section) === "overflow") {
+      var fixed = root.overflowWidthCaps[slot.modelData.id]
+      return fixed === undefined ? Math.max(80, natural) : Math.min(fixed, natural)
+    }
+    return root.inlineWidth(slot.modelData.id, natural)
+  }
+
+  function naturalInlineTotal() {
+    var total = 0
+    for (var id in root.widgetSlots) {
+      var slot = root.widgetSlots[id]
+      if (!slot || !slot.ownsHostedWidgets || !slot.visible) continue
+      if (String(slot.modelData.section) !== "left" && String(slot.modelData.section) !== "right") continue
+      total += root.slotWidth(slot)
+    }
+    return total
+  }
+
+  function inlineScale(surfaceWidth) {
+    var available = Math.max(1, Number(surfaceWidth) - Style.space(16))
+    var total = root.naturalInlineTotal()
+    return total > available ? available / total : 1
+  }
+
+  function overflowTotal() {
+    var total = 0
+    for (var id in root.widgetSlots) {
+      var slot = root.widgetSlots[id]
+      if (!slot || !slot.ownsHostedWidgets || !slot.visible
+          || String(slot.modelData.section) !== "overflow") continue
+      total += root.slotWidth(slot)
+    }
+    return total
+  }
+
+  function overflowScale(surfaceWidth) {
+    var available = Math.max(1, Number(surfaceWidth) - Style.space(16))
+    var total = root.overflowTotal()
+    return total > available ? available / total : 1
+  }
+
+  function layoutBudget(surfaceWidth) {
+    var width = Math.max(1, Number(surfaceWidth) || 1)
+    var scale = root.inlineScale(width)
+    var left = 0
+    var right = 0
+    for (var id in root.widgetSlots) {
+      var slot = root.widgetSlots[id]
+      if (!slot || !slot.ownsHostedWidgets || !slot.visible) continue
+      if (String(slot.modelData.section) !== "left" && String(slot.modelData.section) !== "right") continue
+      var compact = Math.floor(root.slotWidth(slot) * scale)
+      if (String(slot.modelData.section) === "left") left += compact
+      else right += compact
+    }
+    var available = Math.max(1, width - Style.space(16))
+    var overflow = Math.floor(root.overflowTotal() * root.overflowScale(width))
+    return { width: width, available: available, scale: scale,
+      left: left, right: right, total: left + right,
+      overflow: overflow, overflowScale: root.overflowScale(width),
+      fits: left + right <= available && overflow <= available }
+  }
 
   property var widgetStates: ({})
+  property var widgetSlots: ({})
 
   function noteWidget(id, loaded) {
     var next = {}
     for (var k in root.widgetStates) next[k] = root.widgetStates[k]
     next[id] = loaded
     root.widgetStates = next
+  }
+
+  function noteWidgetSlot(id, slot) {
+    var next = {}
+    for (var key in root.widgetSlots) next[key] = root.widgetSlots[key]
+    next[id] = slot
+    root.widgetSlots = next
+  }
+
+  function forgetWidgetSlot(id, slot) {
+    if (root.widgetSlots[id] !== slot) return
+    var next = {}
+    for (var key in root.widgetSlots) {
+      if (key !== id) next[key] = root.widgetSlots[key]
+    }
+    root.widgetSlots = next
+  }
+
+  function debugGeometry() {
+    var out = []
+    for (var id in root.widgetSlots) {
+      var slot = root.widgetSlots[id]
+      if (!slot || !slot.ownsHostedWidgets || !slot.visible || slot.width <= 0 || slot.height <= 0) continue
+      var point = { x: slot.x, y: slot.y }
+      try { point = slot.mapToItem(null, 0, 0) } catch (e) {}
+      var section = String(slot.modelData.section || "")
+      var leftWidth = leftSideBar.expanded ? leftSideBar.expandedWidth : leftSideBar.sideWidth
+      var rightWidth = rightSideBar.expanded ? rightSideBar.expandedWidth : rightSideBar.sideWidth
+      if (section === "side-right") point.x += root.surfaceWidth - rightWidth
+      else if (section !== "side-left") point.x += leftWidth
+      point.y += section === "left" || section === "right"
+        ? root.surfaceHeight - root.barSize * 2 : root.barSize
+      out.push({
+        id: id,
+        section: section,
+        x: Math.round(point.x),
+        y: Math.round(point.y),
+        width: Math.round(slot.width),
+        height: Math.round(slot.height),
+        visible: true,
+        itemVisible: !!slot.hostItem,
+        itemWidth: Math.round(slot.hostItem ? slot.hostItem.implicitWidth || 0 : 0),
+        itemHeight: Math.round(slot.hostItem ? slot.hostItem.implicitHeight || 0 : 0)
+      })
+    }
+    return out
   }
 
   readonly property var guard: Kit.BugGuard.create("alteringux.bottombar", function (argv) { Quickshell.execDetached(argv) })
@@ -125,7 +300,7 @@ Item {
 
   // A recheck request that lands while hiddenProbe is already in flight used
   // to be dropped silently (setting `running = true` on an already-running
-  // Process is a no-op), leaving `hidden` stale until the next 3s tick. Track
+  // Process is a no-op), leaving `hidden` stale until the next 10s tick. Track
   // the request instead of the raw flag so nothing gets lost.
   property bool hiddenProbeDirty: false
 
@@ -164,7 +339,7 @@ Item {
   }
 
   Timer {
-    interval: 3000
+    interval: 10000
     repeat: true
     running: true
     onTriggered: root.requestHiddenProbe()
@@ -181,7 +356,7 @@ Item {
     function hide(): void { root.setHidden(true) }
     function toggle(): void { root.setHidden(!root.ownHidden) }
     // Force an immediate re-check of both hide flags instead of waiting up
-    // to 3s for the next poll tick — useful right after a script flips
+    // to 10s for the next poll tick — useful right after a script flips
     // bar-off/bottombar-off and wants the change to show without delay.
     function reload(): void { root.requestHiddenProbe() }
     function status(): string {
@@ -196,6 +371,19 @@ Item {
             if (s === false) return w.id + " (failed)"
             return w.id + " (pending)"
           })
+        })
+      }, "{}")
+    }
+    function geometry(): string {
+      return root.guard.call("ipc.geometry", function () {
+        return JSON.stringify(root.debugGeometry())
+      }, "[]")
+    }
+    function budget(): string {
+      return root.guard.call("ipc.budget", function () {
+        return JSON.stringify({
+          current: root.layoutBudget(root.surfaceWidth - leftSideBar.sideWidth - rightSideBar.sideWidth),
+          minimum: root.layoutBudget(1280 - leftSideBar.sideWidth - rightSideBar.sideWidth)
         })
       }, "{}")
     }
@@ -237,13 +425,13 @@ Item {
 
         Rectangle {
           anchors.fill: parent
-          color: Color.bar.background
+          color: _webPalette.barBackground
 
           // Hairline along the top edge, echoing the top bar's weight.
           Rectangle {
             anchors { left: parent.left; right: parent.right; top: parent.top }
             height: 1
-            color: Qt.rgba(Color.bar.text.r, Color.bar.text.g, Color.bar.text.b, 0.12)
+            color: Qt.rgba(_webPalette.barForeground.r, _webPalette.barForeground.g, _webPalette.barForeground.b, 0.12)
           }
 
           // One hosted bar widget. The Loader gives the widget its height
@@ -256,14 +444,22 @@ Item {
             Item {
               id: slot
               required property var modelData
+              readonly property bool ownsHostedWidgets: win.ownsHostedWidgets
               readonly property bool failed: hostLoader.status === Loader.Error
+              readonly property var hostItem: hostLoader.item
               height: parent ? parent.height : root.barSize
               // A failed widget used to collapse to a 1px sliver with no
               // visual trace — indistinguishable from "not configured" and
               // only discoverable via the status() IPC call. Give it a
               // small, tappable marker instead so a crashed hosted widget is
               // visible right in the bar.
-              width: slot.failed ? errorMark.width : (hostLoader.item ? Math.max(1, hostLoader.item.implicitWidth) : 0)
+              width: slot.failed ? errorMark.width : Math.floor(root.slotWidth(slot)
+                * (String(slot.modelData.section) === "overflow"
+                  ? root.overflowScale(win.width) : root.inlineScale(win.width)))
+              clip: true
+
+              Component.onCompleted: root.noteWidgetSlot(slot.modelData.id, slot)
+              Component.onDestruction: root.forgetWidgetSlot(slot.modelData.id, slot)
 
               Loader {
                 active: win.ownsHostedWidgets
@@ -289,17 +485,20 @@ Item {
                 id: errorMark
                 visible: slot.failed
                 anchors.verticalCenter: parent.verticalCenter
-                width: Style.space(14)
-                height: Style.space(14)
+                width: Style.space(20)
+                height: Style.space(20)
                 radius: width / 2
+                Accessible.role: Accessible.StaticText
+                Accessible.name: slot.modelData.id + " failed to load"
                 color: "transparent"
                 border.width: 1
-                border.color: Kit.Palette.negative
+                border.color: _webPalette.barNegative
 
                 Text {
                   anchors.centerIn: parent
                   text: "!"
-                  color: Kit.Palette.negative
+                  Accessible.ignored: true
+                  color: _webPalette.barNegative
                   font.family: Style.font.family
                   font.bold: true
                   font.pixelSize: Style.space(10)
@@ -321,9 +520,10 @@ Item {
           Row {
             id: hostRow
             anchors {
-              left: parent.left; top: parent.top; bottom: parent.bottom
+              left: parent.left; bottom: parent.bottom
               leftMargin: Style.space(8)
             }
+            height: root.barSize
             spacing: 0
 
             Repeater {
@@ -336,9 +536,10 @@ Item {
           Row {
             id: tailRow
             anchors {
-              right: parent.right; top: parent.top; bottom: parent.bottom
+              right: parent.right; bottom: parent.bottom
               rightMargin: Style.space(8)
             }
+            height: root.barSize
             spacing: 0
 
             Repeater {
@@ -346,8 +547,43 @@ Item {
               delegate: widgetSlot
             }
           }
+
         }
       }
     }
+  }
+
+  OverflowBar {
+    barSize: root.barSize
+    barVisible: root.hiddenProbeReady && !root.hidden
+    specs: root.overflowSpecs
+    host: root
+    onWidgetLoaded: function(id, loaded) { root.noteWidget(id, loaded) }
+    onSlotAdded: function(id, slot) { root.noteWidgetSlot(id, slot) }
+    onSlotRemoved: function(id, slot) { root.forgetWidgetSlot(id, slot) }
+  }
+
+  SideBar {
+    id: leftSideBar
+    side: "left"
+    barSize: root.barSize
+    barVisible: root.hiddenProbeReady && !root.hidden
+    pluginRegistry: root.pluginRegistry
+    specs: root.sideLeftSpecs
+    onWidgetLoaded: function(id, loaded) { root.noteWidget(id, loaded) }
+    onSlotAdded: function(id, slot) { root.noteWidgetSlot(id, slot) }
+    onSlotRemoved: function(id, slot) { root.forgetWidgetSlot(id, slot) }
+  }
+
+  SideBar {
+    id: rightSideBar
+    side: "right"
+    barSize: root.barSize
+    barVisible: root.hiddenProbeReady && !root.hidden
+    pluginRegistry: root.pluginRegistry
+    specs: root.sideRightSpecs
+    onWidgetLoaded: function(id, loaded) { root.noteWidget(id, loaded) }
+    onSlotAdded: function(id, slot) { root.noteWidgetSlot(id, slot) }
+    onSlotRemoved: function(id, slot) { root.forgetWidgetSlot(id, slot) }
   }
 }

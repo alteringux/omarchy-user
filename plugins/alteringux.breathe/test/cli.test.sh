@@ -6,7 +6,8 @@
 # are exercised without spawning a unit or firing notifications. Run:
 #   bash ~/.config/omarchy/plugins/alteringux.breathe/test/cli.test.sh
 
-CLI="$HOME/.local/bin/omarchy-breathe"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="$REPO/local-bin/omarchy-breathe"
 export OMARCHY_BREATHE_NO_DAEMON=1 OMARCHY_BREATHE_QUIET=1
 
 RESULTS=$(mktemp)
@@ -185,38 +186,55 @@ t_daemon_completes_and_clamps() {
 }
 
 # Phase cues must fire once per boundary and never stack. The daemon kills the
-# previous blip before starting the next, so a player slower than the phase (the
-# shim sleeps 1.5s inside 1s phases) is cut off rather than left to pile up and
-# stutter. Runs the real daemon with a shimmed player on PATH and cues enabled.
+# previous blip before starting the next. Check the player processes directly;
+# a short sleep can finish naturally before the next tick on a loaded host.
+# Runs the real daemon with a shimmed player on PATH and cues enabled.
 t_phase_cues_fire_once_and_do_not_stack() {
   fresh
   local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/cues.log"
+  local sound="$OMARCHY_STATE_DIR/phase.oga"
   mkdir -p "$shim"
+  : > "$sound"
   cat > "$shim/pw-play" <<EOF
-#!/usr/bin/env bash
-echo "START" >> "$log"
-sleep 1.5
-echo "END" >> "$log"
+#!/usr/bin/env python3
+import os, time
+with open("$log", "a") as output:
+    output.write(str(os.getpid()) + "\\n")
+time.sleep(120)
 EOF
   chmod +x "$shim/pw-play"
   : > "$log"
 
   b get >/dev/null
-  jq '.customTechniques=[{id:"cue-fast",name:"CueFast",family:"custom",tone:"info",defaultCycles:6,
+  jq --arg sound "$sound" '.phaseSound=$sound | .customTechniques=[{id:"cue-fast",name:"CueFast",family:"custom",tone:"info",defaultCycles:60,
       phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}]' \
     "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
     && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
-  b start cue-fast --cycles 6 >/dev/null            # 6 x 2s = 12s, a boundary every 1s
+  b start cue-fast --cycles 60 >/dev/null
 
   PATH="$shim:$PATH" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
-    timeout 8 "$CLI" __run >/dev/null 2>&1
-
-  # grep -c prints a count but exits 1 on zero matches; keep just the number.
-  local blips ends
-  blips=$(grep -c START "$log" 2>/dev/null || true)
-  ends=$(grep -c END "$log" 2>/dev/null || true)
-  check "phase cues actually fire"                   "$([ "${blips:-0}" -ge 3 ] && echo yes)" yes
-  check "a slow prior cue is cut off, not stacked"   "$([ "${ends:-0}" -lt "${blips:-0}" ] && echo yes)" yes
+    timeout 30 "$CLI" __run >/dev/null 2>&1 &
+  local daemon=$! deadline=$((SECONDS + 25)) pid prior_alive=0 newest_alive=no
+  local -a players=()
+  while (( SECONDS < deadline )); do
+    mapfile -t players < "$log"
+    (( ${#players[@]} >= 3 )) && break
+    sleep 0.1
+  done
+  # Allow the preceding SIGTERM to be delivered before inspecting ownership.
+  sleep 0.2
+  if (( ${#players[@]} >= 3 )); then
+    for pid in "${players[@]:0:${#players[@]}-1}"; do
+      kill -0 "$pid" 2>/dev/null && prior_alive=$((prior_alive + 1))
+    done
+    kill -0 "${players[-1]}" 2>/dev/null && newest_alive=yes
+  fi
+  check "phase cues actually fire" "$([ "${#players[@]}" -ge 3 ] && echo yes)" yes
+  check "the newest slow cue remains alive" "$newest_alive" yes
+  check "all prior slow cues are cut off" "$prior_alive" 0
+  kill "$daemon" 2>/dev/null || true
+  wait "$daemon" || true
+  for pid in "${players[@]}"; do kill "$pid" 2>/dev/null || true; done
 }
 
 t_duplicate_daemons_share_one_voice_owner() {
@@ -228,24 +246,25 @@ t_duplicate_daemons_share_one_voice_owner() {
   : > "$log"
   _voice_home "$fh" with-piper
   b get >/dev/null
+  # Keep both daemons in the opening phase throughout the 20s ownership probe.
   jq '.customTechniques=[{id:"cue-dupe",name:"CueDupe",family:"custom",tone:"info",defaultCycles:1,
-      phases:[{kind:"INHALE",seconds:1,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}] | .cueVoice=true' \
+      phases:[{kind:"INHALE",seconds:30,label:"In"},{kind:"EXHALE",seconds:1,label:"Out"}]}] | .cueVoice=true' \
     "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
     && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
   b start cue-dupe --cycles 1 >/dev/null
 
   PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
-    timeout 4 "$CLI" __run >/dev/null 2>&1 &
+    timeout 20 "$CLI" __run >/dev/null 2>&1 &
   local first=$!
   PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
-    timeout 4 "$CLI" __run >/dev/null 2>&1 &
+    timeout 20 "$CLI" __run >/dev/null 2>&1 &
   local second=$!
   wait "$first" || true
   wait "$second" || true
 
   local opening
   opening=$(grep -c '/breathe-voice/In.wav' "$log" 2>/dev/null || true)
-  check "parallel daemons emit one opening cue" "$([ "${opening:-0}" = 1 ] && echo yes)" yes
+  check "parallel daemons emit one opening cue" "${opening:-0}" 1
 }
 
 # A fake HOME carrying a stub piper + voice model, so the voice path is exercised
@@ -296,22 +315,24 @@ t_spoken_cues_play_words_not_the_chime() {
 t_spoken_cues_fall_back_to_chime_without_tts() {
   fresh
   local shim="$OMARCHY_STATE_DIR/shim" log="$OMARCHY_STATE_DIR/plays.log" fh="$OMARCHY_STATE_DIR/home"
+  local sound="$OMARCHY_STATE_DIR/chime.oga"
   mkdir -p "$shim"
+  : > "$sound"
   printf '#!/usr/bin/env bash\necho "$1" >> "%s"\n' "$log" > "$shim/pw-play"
   chmod +x "$shim/pw-play"
   : > "$log"
   _voice_home "$fh" no-piper                        # HOME with no piper binary
 
   b get >/dev/null
-  jq '.cueVoice=true' "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
+  jq --arg sound "$sound" '.cueVoice=true | .phaseSound=$sound' "$OMARCHY_STATE_DIR/breathe-config.json" > "$OMARCHY_STATE_DIR/.c" \
     && mv "$OMARCHY_STATE_DIR/.c" "$OMARCHY_STATE_DIR/breathe-config.json"
   b start box --cycles 2 >/dev/null
 
   PATH="$shim:$PATH" HOME="$fh" OMARCHY_BREATHE_QUIET=0 OMARCHY_IGNORE_SYSTEM_MUTE=1 \
-    timeout 8 "$CLI" __run >/dev/null 2>&1
+    timeout 20 "$CLI" __run >/dev/null 2>&1
 
   check "voice on but no TTS still cues, via the chime" \
-    "$([ "$(grep -c '\.oga' "$log" 2>/dev/null || true)" -ge 1 ] && echo yes)" yes
+    "$([ "$(grep -Fxc "$sound" "$log" 2>/dev/null || true)" -ge 1 ] && echo yes)" yes
 }
 
 # The invariant that matters, enforced where the record is written: no session
@@ -660,10 +681,11 @@ for t in t_seeds_config t_config_never_mutated t_start t_start_defaults_from_con
          t_concurrent_state_writes_keep_fields t_daemon_rolls_a_loop \
          t_skip_advances_a_hold t_skip_is_a_noop_outside_a_hold \
          t_skip_refused_when_idle t_skipped_hold_time_is_not_credited_as_seconds; do
+  [ -z "${1:-}" ] || [ "${t#t_}" = "$1" ] || continue
   printf '\n\033[1m%s\033[0m\n' "${t#t_}"
   "$t"
 done
 
 P=$(grep -c P "$RESULTS" || true); F=$(grep -c F "$RESULTS" || true)
 printf '\n%s passed, %s failed\n' "$P" "$F"
-[ "$F" = 0 ]
+[ "$F" = 0 ] && [ "$P" -gt 0 ]

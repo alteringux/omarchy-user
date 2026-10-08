@@ -3,13 +3,17 @@
 // panel drives static rendering. Both use the same component.
 
 import QtQuick
+import QtQuick.Window
 import QtQuick.Layouts
 import Quickshell
 import qs.Commons
 import qs.Ui
 import "../NotificationLogic.js" as NotificationLogic
+import "../../shared"
+import "../../alteringux.kit" as Kit
 
 BorderSurface {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string app: ""
@@ -29,8 +33,29 @@ BorderSurface {
 
   // System monospace font injected by the container.
   property string fontFamily: ""
+  property bool separateDetailsWindow: false
+  readonly property bool hasClippedText: (summaryText.visible && summaryText.hasOverflow)
+    || (bodyText.visible && bodyText.hasOverflow)
+  readonly property string accessibleLabel: {
+    var content = summaryText.readableText || bodyText.readableText
+    var sender = root.app.trim()
+    if (sender && content) return "Notification from " + sender + ": " + content
+    if (content) return "Notification: " + content
+    if (sender) return "Notification from " + sender
+    return "Notification"
+  }
+  readonly property alias readButton: readButton
+  readonly property alias detailsView: notificationDetails
 
-  readonly property bool hovered: hoverTracker.hovered
+  readonly property bool pointerHovered: hoverTracker.hovered
+  readonly property bool readingActive: summaryText.detailsVisible || bodyText.detailsVisible
+    || notificationDetails.opened
+  // The toast lifetime consumes hovered. Keep it paused during deliberate
+  // keyboard reading as well, so the parent cannot expire mid-copy.
+  readonly property bool keyboardReading: root.visible && root.Window.window
+    && root.Window.window.visible && root.Window.window.active
+    && (activeFocus || summaryText.activeFocus || bodyText.activeFocus || readButton.activeFocus)
+  readonly property bool hovered: pointerHovered || readingActive || keyboardReading
 
   signal closeRequested()
   signal cardClicked()
@@ -43,17 +68,25 @@ BorderSurface {
   readonly property bool summaryStartsWithGlyph: NotificationLogic.summaryStartsWithGlyph(summary)
   readonly property bool singleLineToast: sanitizedBody.length === 0
   readonly property bool collapseRedundantIcon: singleLineToast && !hasGlyph && summaryStartsWithGlyph
-  readonly property string sanitizedBody: sanitizeBody(body)
+  // Commit normalized input after source bindings settle. Measuring rich
+  // text during a sanitizer binding can re-enter that same binding.
+  property string _sanitizedBody: ""
+  readonly property string sanitizedBody: _sanitizedBody
   readonly property string styledBody: sanitizedBody.replace(/\r\n|\r|\n/g, "<br/>")
 
-  readonly property color dimColor: Qt.darker(Color.notifications.text, 1.4)
-  readonly property color bodyColor: Qt.darker(Color.notifications.text, 1.15)
-  readonly property color accentColor: urgency === 2 ? Color.urgent : (urgency === 0 ? dimColor : Color.notifications.countdown)
-  readonly property var cardBorderSpec: Border.surfaceSpec("notifications", "border", Color.notifications.border, Math.max(1, Style.space(2)))
+  readonly property color dimColor: _webPalette.muted
+  readonly property color bodyColor: _webPalette.notificationText
+  readonly property color accentColor: urgency === 2 ? _webPalette.urgent : (urgency === 0 ? dimColor : _webPalette.notificationCountdown)
+  readonly property var cardBorderSpec: Border.surfaceSpec("notifications", "border", _webPalette.notificationBorder, Math.max(1, Style.space(2)))
+
 
   function sanitizeBody(s) {
     return NotificationLogic.sanitizeBody(s, app, appIcon)
   }
+  function refreshSanitizedBody() {
+    root._sanitizedBody = root.sanitizeBody(root.body)
+  }
+  Component.onCompleted: Qt.callLater(root.refreshSanitizedBody)
 
   function iconSource(icon) {
     var value = String(icon || "")
@@ -68,11 +101,68 @@ BorderSurface {
   // doesn't push content under the bottom edge.
   implicitHeight: mainColumn.implicitHeight + borderTop + borderBottom
   radius: cornerRadius
-  color: Color.notifications.background
+  color: _webPalette.notificationBackground
   borderSpec: cardBorderSpec
   clip: true
+  activeFocusOnTab: true
+  Accessible.role: Accessible.Button
+  Accessible.name: root.accessibleLabel
+  Accessible.description: "Enter: open notification. Delete: dismiss. F2 or Read complete text: read clipped text."
+  Accessible.onPressAction: root.cardClicked()
+  Keys.onReturnPressed: root.cardClicked()
+  Keys.onEnterPressed: root.cardClicked()
+  Keys.onSpacePressed: root.cardClicked()
+  Keys.onDeletePressed: root.closeRequested()
+  Keys.onPressed: function(event) {
+    if (event.key === Qt.Key_F2 && root.hasClippedText) {
+      root.readCompleteText()
+      event.accepted = true
+    }
+  }
+
+  function readCompleteText() {
+    if (visible && enabled && hasClippedText) {
+      root.refreshSanitizedBody()
+      notificationDetails.sourceText = [root.summary, bodyText.readableText]
+        .filter(function(text) { return text.length > 0 }).join("\n\n")
+      notificationDetails.open()
+    }
+  }
+  onVisibleChanged: if (!visible) notificationDetails.close()
+  onSummaryChanged: if (notificationDetails.opened) notificationDetails.close()
+  onBodyChanged: {
+    Qt.callLater(root.refreshSanitizedBody)
+    if (notificationDetails.opened) notificationDetails.close()
+  }
+  onAppChanged: {
+    Qt.callLater(root.refreshSanitizedBody)
+    if (notificationDetails.opened) notificationDetails.close()
+  }
+  onAppIconChanged: {
+    Qt.callLater(root.refreshSanitizedBody)
+    if (notificationDetails.opened) notificationDetails.close()
+  }
+
+  FullTextView {
+    id: notificationDetails
+    title: root.app.length ? "Notification from " + root.app : "Complete notification"
+    sourceFont: bodyText.textFont
+    returnFocusItem: readButton.visible ? readButton : root
+    forceSeparateWindow: root.separateDetailsWindow
+  }
 
   HoverHandler { id: hoverTracker }
+
+  Rectangle {
+    anchors.fill: parent
+    color: "transparent"
+    radius: root.cornerRadius
+    border.width: 2
+    border.color: _webPalette.accent
+    visible: root.activeFocus
+    z: 10
+    Accessible.ignored: true
+  }
 
   // A glanceable severity stripe for the two urgencies that aren't "business
   // as usual" -- accentColor was already computed (urgent red for critical,
@@ -93,6 +183,7 @@ BorderSurface {
   }
 
   MouseArea {
+    id: cardMouseArea
     anchors.fill: parent
     cursorShape: Qt.PointingHandCursor
     acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -155,7 +246,7 @@ BorderSurface {
           anchors.centerIn: parent
           visible: root.hasGlyph && smallIconImage.status !== Image.Ready
           text: root.glyph
-          color: Color.notifications.text
+          color: _webPalette.notificationText
           font.family: root.fontFamily
           font.pixelSize: Style.font.displayLarge
         }
@@ -166,7 +257,7 @@ BorderSurface {
         Layout.alignment: Qt.AlignVCenter
         visible: root.compactGlyph
         text: root.glyph
-        color: Color.notifications.text
+        color: _webPalette.notificationText
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
       }
@@ -176,7 +267,11 @@ BorderSurface {
         Layout.alignment: Qt.AlignVCenter
         spacing: Style.space(2)
 
-        Text {
+        MarqueeText {
+          id: summaryText
+          focusableOnOverflow: false
+          separateDetailsWindow: root.separateDetailsWindow
+          active: root.pointerHovered && !root.readingActive
           // The spec defines the summary as a single line of plain text, so
           // AutoText (Text's default) could only ever promote a hostile
           // string to rich text -- a sender could make its summary render
@@ -184,33 +279,52 @@ BorderSurface {
           // spoofing another app's toast. The body below is StyledText on
           // purpose (see Service.qml's bodyMarkupSupported) and is sanitized
           // in NotificationLogic; the summary never should be.
-          textFormat: Text.PlainText
+          requestedTextFormat: Text.PlainText
           Layout.fillWidth: true
           visible: root.summary.length > 0
           text: root.summary
-          font.family: "Liberation Sans"
-          color: Color.notifications.text
-          font.pixelSize: Style.font.title
-          font.bold: true
-          wrapMode: Text.WordWrap
-          elide: Text.ElideRight
-          maximumLineCount: 2
+          textFont.family: Style.font.menuFamily
+          color: _webPalette.notificationText
+          textFont.pixelSize: Style.font.title
+          textFont.bold: true
+          requestedWrapMode: Text.WordWrap
+          requestedMaximumLineCount: 2
         }
 
-        Text {
+        MarqueeText {
+          id: bodyText
+          focusableOnOverflow: false
+          separateDetailsWindow: root.separateDetailsWindow
+          active: root.pointerHovered && !root.readingActive
           Layout.fillWidth: true
           Layout.topMargin: Style.space(2)
           visible: root.sanitizedBody.length > 0
           text: root.styledBody
-          textFormat: Text.StyledText
-          font.family: "Liberation Sans"
+          requestedTextFormat: Text.StyledText
+          textFont.family: Style.font.menuFamily
           color: root.bodyColor
-          font.pixelSize: Style.font.title
-          wrapMode: Text.WordWrap
-          elide: Text.ElideRight
-          maximumLineCount: 3
+          textFont.pixelSize: Style.font.title
+          requestedWrapMode: Text.WordWrap
+          requestedMaximumLineCount: 3
         }
       }
+    }
+
+    Kit.ActionButton {
+      id: readButton
+      objectName: "notification-read-complete-text"
+      text: "Read complete text"
+      visible: root.hasClippedText
+      Layout.alignment: Qt.AlignRight
+      Layout.rightMargin: Style.space(12)
+      Layout.bottomMargin: Style.space(8)
+      fontFamily: Style.font.menuFamily
+      fontSize: Style.font.caption
+      foreground: _webPalette.notificationText
+      bordered: true
+      Accessible.name: "Read complete notification text"
+      Accessible.description: "Open a stationary, selectable view. Escape returns to this button."
+      onClicked: root.readCompleteText()
     }
   }
 

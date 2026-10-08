@@ -10,6 +10,7 @@ import "../alteringux.kit" as Kit
 // temperature, load average, and uptime. Binds straight to the host widget's
 // watched store (docs/adr/0006) — this panel never writes anything.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.sysmon"
   ipcTarget: "alteringux.sysmon"
@@ -35,9 +36,9 @@ Panel {
   }
 
   function levelColor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.positive
+    if (level === "critical") return _webPalette.negative
+    if (level === "warning") return _webPalette.warning
+    return _webPalette.positive
   }
 
   function open() { root.controller.show() }
@@ -50,7 +51,7 @@ Panel {
     return false
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -61,12 +62,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(340))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       id: keyCatcher
       anchors.fill: parent
+      sectionNavigation: true
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.sampleNow() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh system metrics", context: "System monitor · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -76,6 +81,26 @@ Panel {
           id: body
           width: parent.width
           spacing: Style.space(16)
+
+          Text {
+            width: body.width
+            height: visible ? implicitHeight : 0
+            visible: !!(root.hostWidget && root.hostWidget.sampleError)
+            text: root.hostWidget ? root.hostWidget.sampleError : ""
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onSampleFeedback(message) {
+                if (root.opened && parent.visible) parent.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.PanelHead {
             width: parent.width
@@ -202,7 +227,7 @@ Panel {
               Text {
                 id: swapText
                 text: Model.formatGb(root.stat.swap.usedKb) + " / " + Model.formatGb(root.stat.swap.totalKb)
-                color: Qt.darker(root.barForeground, 1.4)
+                color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 font.bold: true

@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Mock audio player for the omarchy-stopwatch suite: records that playback was
+# attempted (with which file) to $MOCK_PLAY_LOG and makes no sound. `paplay` is
+# a symlink to this file, so both fallbacks in play_bell() land here.
+[ -n "${MOCK_PLAY_LOG:-}" ] && printf '%s %s\n' "$(basename "$0")" "$*" >> "$MOCK_PLAY_LOG"
+exit 0

@@ -15,13 +15,16 @@ function sanitizeHeadline(raw) {
   var title = String(raw.title || "").trim();
   var url = String(raw.url || "").trim();
   if (!title || !/^https?:\/\//i.test(url)) return null;
+  var readingMinutes = parseInt(raw.readingMinutes, 10);
+  if (!(readingMinutes > 0)) readingMinutes = 0;
   return {
     source: source || "News",
     title: title,
     url: url,
     published: String(raw.published || "").trim(),
     category: String(raw.category || "").trim().slice(0, 24),
-    summary: String(raw.summary || "").trim().slice(0, 320)
+    summary: String(raw.summary || "").trim().slice(0, 320),
+    readingMinutes: readingMinutes
   };
 }
 
@@ -90,6 +93,16 @@ function relativeAge(iso, nowMs) {
   return days + "d";
 }
 
+// "12 min read" for short pieces; "3h 5m read" / "6h read" once it runs past an
+// hour (Literotica's newest listing regularly turns up multi-page novels).
+function formatReadTime(mins) {
+  if (!(mins > 0)) return "";
+  if (mins < 60) return mins + " min read";
+  var h = Math.floor(mins / 60);
+  var m = mins % 60;
+  return (m ? h + "h " + m + "m" : h + "h") + " read";
+}
+
 function withAges(headlines, nowMs) {
   return (headlines || []).map(function (h) {
     return {
@@ -100,7 +113,9 @@ function withAges(headlines, nowMs) {
       category: h.category || "",
       categoryBucket: normalizeCategory(h.category),
       summary: h.summary || "",
-      age: relativeAge(h.published, nowMs)
+      age: relativeAge(h.published, nowMs),
+      readingMinutes: h.readingMinutes || 0,
+      readTime: formatReadTime(h.readingMinutes || 0)
     };
   });
 }
@@ -114,10 +129,12 @@ function signature(headlines) {
     .join("");
 }
 
-// One display string per headline for the crawl: "BBC  Headline text  · 3h".
+// One display string per headline for the crawl:
+// "BBC  Headline text  · 3h  · 12 min read" (read time only on ero-news).
 function headlineLabel(h) {
   var age = h.age ? "  · " + h.age : "";
-  return h.source + "   " + h.title + age;
+  var read = h.readTime ? "  · " + h.readTime : "";
+  return h.source + "   " + h.title + age + read;
 }
 
 if (typeof module !== "undefined" && module.exports) {
@@ -127,6 +144,7 @@ if (typeof module !== "undefined" && module.exports) {
     normalizeCategory: normalizeCategory,
     parseState: parseState,
     relativeAge: relativeAge,
+    formatReadTime: formatReadTime,
     withAges: withAges,
     signature: signature,
     headlineLabel: headlineLabel

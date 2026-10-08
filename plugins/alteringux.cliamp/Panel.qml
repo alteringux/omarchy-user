@@ -6,10 +6,12 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Transport panel for cliamp. Everything acts on hostWidget (the BarWidget),
 // which owns the status poll and shells out to `cliamp ...`.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.cliamp"
   ipcTarget: ""
@@ -48,7 +50,7 @@ Panel {
 
   onOpenedChanged: if (opened && !visListProc.running) visListProc.running = true
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -57,13 +59,17 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(300))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: visDropdown.popupOpen
 
       onCloseRequested: root.close()
       onActivateRequested: if (root.hostWidget) root.hostWidget.playPause()
       onDeleteRequested: if (root.hostWidget) root.hostWidget.stopPlayback()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Play or pause audio", context: "CLIamp · shortcut focus" },
+        { keys: "X", description: "Stop playback", context: "CLIamp · shortcut focus" }
+      ]
 
       Column {
         id: content
@@ -80,15 +86,15 @@ Panel {
         }
 
         // Now playing.
-        Text {
+        MarqueeText {
           visible: root.running
           width: content.width
           text: root.status.label && root.status.label.length ? root.status.label : "—"
           color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.body
-          font.bold: true
-          elide: Text.ElideRight
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.body
+          textFont.bold: true
+          requestedElide: Text.ElideRight
         }
 
         // Wave synthesiser — a wider mirror of the bar strip.
@@ -147,38 +153,78 @@ Panel {
           visible: root.running && root.status.total > 0
           width: content.width
           text: Model.formatTime(root.status.position) + "  /  " + Model.formatTime(root.status.total)
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
+        }
+
+        Flow {
+          visible: root.running
+          width: content.width
+          spacing: Style.space(8)
+
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Seek backward 10 seconds"
+            foreground: root.barForeground
+            bordered: true
+            enabled: root.status.total > 0
+            text: "−10s"
+            onClicked: if (root.hostWidget) root.hostWidget.seekTo(Math.max(0, root.status.position - 10))
+          }
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Seek forward 10 seconds"
+            foreground: root.barForeground
+            bordered: true
+            enabled: root.status.total > 0
+            text: "+10s"
+            onClicked: if (root.hostWidget) root.hostWidget.seekTo(Math.min(root.status.total, root.status.position + 10))
+          }
         }
 
         PanelSeparator {}
 
         // Transport.
-        Row {
+        Flow {
+          width: content.width
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Prev"
             foreground: root.barForeground
             bordered: true
             enabled: root.running
             onClicked: if (root.hostWidget) root.hostWidget.prev()
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: root.playing ? "Pause" : "Play"
             foreground: root.barForeground
             bordered: true
             onClicked: if (root.hostWidget) root.hostWidget.playPause()
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Next"
             foreground: root.barForeground
             bordered: true
             enabled: root.running
             onClicked: if (root.hostWidget) root.hostWidget.next()
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             text: "Stop"
             foreground: root.barForeground
             bordered: true
@@ -188,25 +234,30 @@ Panel {
         }
 
         // Volume — cliamp adjusts in dB, relative.
-        Row {
+        Flow {
+          width: content.width
           spacing: Style.space(8)
           visible: root.running
 
           Text {
-            anchors.verticalCenter: parent.verticalCenter
             text: "Volume"
              color: root.barForeground
-             opacity: 0.6
              font.family: Style.font.family
              font.pixelSize: Style.font.bodySmall
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Decrease volume by 2 dB"
             text: "-2 dB"
             foreground: root.barForeground
             bordered: true
             onClicked: if (root.hostWidget) root.hostWidget.nudgeVolume(-2)
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Increase volume by 2 dB"
             text: "+2 dB"
             foreground: root.barForeground
             bordered: true
@@ -218,7 +269,13 @@ Panel {
 
         Toggle {
           width: content.width
-          activeFocusOnTab: false
+          activeFocusOnTab: true
+          Accessible.role: Accessible.CheckBox
+          Accessible.name: label
+          Accessible.checkable: true
+          Accessible.checked: checked
+          Accessible.onPressAction: clicked()
+          Accessible.onToggleAction: clicked()
           visible: root.running
           label: "Shuffle"
           description: root.status.shuffle ? "On" : "Off"
@@ -235,11 +292,14 @@ Panel {
             anchors.verticalCenter: parent.verticalCenter
             text: "Repeat"
              color: root.barForeground
-             opacity: 0.6
              font.family: Style.font.family
              font.pixelSize: Style.font.bodySmall
           }
-          Button {
+          Kit.ActionButton {
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Repeat mode: " + text
+            Accessible.description: "Activate to cycle repeat mode."
             text: root.status.repeat && root.status.repeat.length ? root.status.repeat : "Off"
             foreground: root.barForeground
             bordered: true
@@ -260,7 +320,11 @@ Panel {
           visible: root.running
           width: content.width
           showLabel: false
-          activeFocusOnTab: false
+          Accessible.role: Accessible.ComboBox
+          Accessible.name: "Visualiser mode"
+          Accessible.description: "Current mode: " + (root.status.visualizer || "Bars")
+          Accessible.focusable: true
+          Accessible.onPressAction: visDropdown.toggle()
           options: root.visModes
           value: root.status.visualizer || "Bars"
           foreground: root.barForeground
@@ -276,7 +340,10 @@ Panel {
           hint: "Start it in a terminal to control playback from here."
         }
 
-        Button {
+        Kit.ActionButton {
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: text
           visible: !root.running
           text: "Launch cliamp"
           foreground: root.barForeground
@@ -286,7 +353,7 @@ Panel {
 
         Text {
           text: "Space: play/pause  ·  X: stop  ·  Esc: close"
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }

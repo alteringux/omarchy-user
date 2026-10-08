@@ -8,7 +8,7 @@
 #      observations about where it fell short, to
 #      ~/.local/state/omarchy/improve/<tool>/insights.jsonl
 #   2. CRITIC    — `critic` feeds the accumulated insights + roadmap + current
-#      source to Featherless (llm-blurb, off the Claude subscription) and asks
+#      source to NanoGPT (llm-blurb, off the Claude subscription) and asks
 #      for <=3 minimal unified diffs, written to
 #      ~/.local/state/omarchy/improve/<tool>/proposals/<date>.md
 #      GATED by the kill switch (`toggle on` to allow it) — it spends API

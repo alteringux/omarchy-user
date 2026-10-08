@@ -20,7 +20,7 @@
 #
 # Flow (hotkey use): reads the primary selection, else the clipboard; rewrites;
 # puts the result on the clipboard; toasts "[ctx.mode] ~IN -> ~OUT tok (dN%)"
-# with 👍/👎 buttons. The requirement text leaves the machine (Featherless).
+# with 👍/👎 buttons. The requirement text leaves the machine (NanoGPT).
 #
 # Telemetry: every run appends one JSON line to
 #   ${XDG_STATE_HOME:-~/.local/state}/omarchy-promptopt/runs.jsonl
@@ -296,7 +296,7 @@ At most 5 proposals, most impactful first. Plain markdown, no code fences around
                "CURRENT PROMPTS:"$'\n'"$CURRENT"$'\n\n'"RECENT RUNS:"$'\n'"$DIGEST" 2>/dev/null)" || OUT_MD=""
     [[ -n "${OUT_MD// }" ]] && break
   done
-  [[ -n "${OUT_MD// }" ]] || { echo "reflect: model returned nothing (Featherless down?)" >&2; exit 1; }
+  [[ -n "${OUT_MD// }" ]] || { echo "reflect: model returned nothing (NanoGPT down?)" >&2; exit 1; }
 
   mkdir -p "$STATE_DIR"
   PROP="$STATE_DIR/reflect-proposal.md"
@@ -504,7 +504,7 @@ START_MS="$(date +%s%3N)"
 LAST_CHAIN_ERR=""
 run_rewrite "$TEXT" && OUT="$REWRITE_RESULT" || OUT=""
 if [[ -z "${OUT// }" ]]; then
-  note "Featherless request failed." "${LAST_CHAIN_ERR:-all models unavailable}"
+  note "NanoGPT request failed." "${LAST_CHAIN_ERR:-all models unavailable}"
   OUT=""; log_run 0
   echo "omarchy-promptopt: ${LAST_CHAIN_ERR:-failed}" >&2
   exit 1

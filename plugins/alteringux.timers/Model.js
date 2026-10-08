@@ -207,7 +207,7 @@ function longestElapsedMs(entries, nowMs) {
   return max
 }
 
-// Bar-widget label: icon + count of running timers, e.g. "⏳ 3". No elapsed
+// Bar-widget label: timer glyph + count of running timers, e.g. "timer 3". No elapsed
 // time on the bar itself — the count-up only lives in the panel cards. Just
 // the icon + word when nothing is running.
 function formatBadge(entries) {

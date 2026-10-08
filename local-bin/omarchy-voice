@@ -6,7 +6,7 @@
 #           ->  whisper-cli (STT, tiny.en + fast decode); a too-quiet or
 #               non-speech clip is dropped here
 #           ->  the transcript is handed verbatim to a headless
-#               `opencode run --pure --auto` agent with a short "you are the
+#               `hermes -z` agent backed by the local NanoGPT adapter with a short "you are the
 #               voice assistant for this Omarchy box" preamble
 #           ->  the agent decides everything: run commands, read/write files,
 #               inspect state, or just answer — nothing is hard-coded here
@@ -37,9 +37,8 @@
 #   OMARCHY_VOICE_NO_DUCK       set to 1 to NOT mute the output sink while recording
 #   OMARCHY_VOICE_RATE          piper length-scale, lower = faster speech (default 0.85)
 #   OMARCHY_VOICE_AGENT_DIR     working directory for the agent (default ~/.local/state/omarchy/voice)
-#   OMARCHY_VOICE_AGENT_MODEL   opencode model for the agent
-#                              (default anthropic/claude-sonnet-5; empty = opencode default)
-#   OMARCHY_VOICE_OPENCODE      opencode binary (default: opencode on PATH)
+#   OMARCHY_VOICE_AGENT_MODEL   NanoGPT model for the agent
+#                              (default deepseek-v3-0324; empty = Hermes default)
 #   OMARCHY_VOICE_TIMEOUT       max seconds for the agent run (default 240)
 #
 
@@ -51,7 +50,7 @@ WHISPER_MODEL="${OMARCHY_VOICE_WHISPER_MODEL:-${WHISPER_MODEL:-$HOME/.cache/whis
 SILENCE="${OMARCHY_VOICE_SILENCE:-1.0}"
 RATE="${OMARCHY_VOICE_RATE:-0.85}"
 AGENT_DIR="${OMARCHY_VOICE_AGENT_DIR:-$HOME/.local/state/omarchy/voice}"
-AGENT_MODEL="${OMARCHY_VOICE_AGENT_MODEL-anthropic/claude-sonnet-5}"
+AGENT_MODEL="${OMARCHY_VOICE_AGENT_MODEL-deepseek-v3-0324}"
 AGENT_TIMEOUT="${OMARCHY_VOICE_TIMEOUT:-240}"
 
 DRY_RUN=0
@@ -70,7 +69,7 @@ say() { # speak (faster than default rate) + echo + toast for headless (keybind)
   local msg="$1"
   echo "🔊 $msg" >&2
   notify "🔊 Voice assistant" "$msg"
-  [[ -n "${msg// }" ]] && printf '%s' "$msg" | piper-tts --tag "$TAG" --length-scale "$RATE" || true
+  [[ -n "${msg// }" ]] && printf '%s' "$msg" | piper-tts --tag "$TAG" --length-scale "$RATE" --profile narration || true
 }
 
 die() { echo "omarchy-voice: $*" >&2; notify "⚠ Voice assistant" "$*"; exit 1; }
@@ -79,7 +78,7 @@ die() { echo "omarchy-voice: $*" >&2; notify "⚠ Voice assistant" "$*"; exit 1;
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --stop)    exec piper-tts --stop --tag "$TAG" ;;
-    --toggle)  shift; exec piper-tts --toggle --tag "$TAG" --length-scale "$RATE" "$@" ;;
+    --toggle)  shift; exec piper-tts --toggle --tag "$TAG" --length-scale "$RATE" --profile narration "$@" ;;
     --text)    TEXT="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     -h|--help)
@@ -115,7 +114,7 @@ if [[ -z "$TEXT" ]]; then
   for p in $(pgrep -f 'omarchy-voice$' 2>/dev/null || true); do
     [[ "$p" == "$$" ]] || kill "$p" 2>/dev/null || true
   done
-  pkill -f "opencode run --pure .*${AGENT_DIR}" 2>/dev/null || true
+  pkill -f "hermes -z .*${AGENT_DIR}" 2>/dev/null || true
   pkill -f 'pw-record .*-omarchy-voice\.wav' 2>/dev/null || true
 
   WAV="$(mktemp --suffix=-omarchy-voice.wav)"
@@ -245,9 +244,14 @@ Anything else: plain shell (wpctl, brightnessctl, bluetoothctl, rfkill, nmcli,
 systemctl --user, playerctl, ...).
 
 A pure question (no state change) is answered directly. Never ask the user to
-confirm. Never run a skill, changelog, or git command. If a command exits 0, trust
-it and stop. If it truly fails or needs something absent (no config, a password you
-lack), say exactly that and name what would fix it.
+confirm. For current or time-sensitive facts — including weather, news, sports
+ schedules, prices, stock data, travel, events, or anything phrased "today",
+ "right now", "next year", or "in the last hour" — you MUST use web search
+ before answering. Do not claim an API is unavailable until you have attempted
+ a web search. For general timeless knowledge, answer directly. Never run a
+ skill, changelog, or git command. If a command exits 0, trust it and stop. If
+ it truly fails or needs something absent (no config, a password you lack), say
+ exactly that and name what would fix it.
 
 Finish with ONE spoken line: what the command actually did, or that it failed.
 Read aloud, so under 30 words, plain text, no markdown or lists or code or emoji.
@@ -264,21 +268,12 @@ if (( DRY_RUN )); then
   exit 0
 fi
 
-# ----------------------------------------------------------------- 3. run the opencode agent
-# Prefer the real mise-installed binary: the `opencode` PATH shim runs
-# `mise use -g` first and prints a line to stdout that would corrupt the JSON.
-oc="${OMARCHY_VOICE_OPENCODE:-}"
-if [[ -z "$oc" ]]; then
-  for cand in "$HOME/.local/share/mise/installs/opencode/latest/opencode" \
-              "$(command -v opencode 2>/dev/null || true)"; do
-    [[ -n "$cand" && -x "$cand" ]] && { oc="$cand"; break; }
-  done
-fi
-[[ -n "$oc" ]] && { [[ -x "$oc" ]] || command -v "$oc" >/dev/null 2>&1; } || die "opencode not found"
+# ----------------------------------------------------------------- 3. run the Hermes agent through NanoGPT
+command -v hermes >/dev/null 2>&1 || die "hermes not found"
 
 mkdir -p "$AGENT_DIR"
 # Local AGENTS.md: keep this sandbox lean — no changelog/skill/git ritual from
-# the global opencode AGENTS.md, which would balloon a one-line action.
+# global instructions, which would balloon a one-line action.
 if [[ ! -f "$AGENT_DIR/AGENTS.md" ]]; then
   cat > "$AGENT_DIR/AGENTS.md" <<'EOF'
 # Voice-assistant sandbox
@@ -292,42 +287,19 @@ Ignore any global instruction to log or commit desktop changes here.
 EOF
 fi
 
-model_args=()
-[[ -n "$AGENT_MODEL" ]] && model_args=(-m "$AGENT_MODEL")
 echo "▶ agent (${AGENT_TIMEOUT}s max, ${AGENT_MODEL:-default model}) in $AGENT_DIR" >&2
 notify "🧠 Working…" "$TEXT"
 
-# --pure disables opencode plugins (e.g. the `snip` bash wrapper, which prints
-# a passthrough notice the model loops on).
-out=$(timeout "$AGENT_TIMEOUT" "$oc" run --pure --format json --auto "${model_args[@]}" --dir "$AGENT_DIR" -- "$PROMPT" 2>/dev/null)
+model_args=()
+[[ -n "$AGENT_MODEL" ]] && model_args=(-m "$AGENT_MODEL")
+out=$(timeout "$AGENT_TIMEOUT" hermes -z "$PROMPT" --in "$AGENT_DIR" --ignore-rules "${model_args[@]}" 2>/dev/null)
 rc=$?
 if (( rc == 124 )); then
   say "I started that but ran out of time, so it may not have finished."
   exit 1
 fi
 
-# keep only the JSON event lines, in case anything leaked a plain line to stdout
-json=$(printf '%s\n' "$out" | grep '^[[:space:]]*{')
-
-# the agent's own closing sentence, if it sent one
-reply=$(printf '%s\n' "$json" \
-  | jq -rs '[.[] | select(.type=="text") | .part.text] | map(select(length > 0)) | last // ""' 2>/dev/null)
-reply="$(printf '%s' "$reply" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-
-# fallback: the model acted but never summarised — narrate the commands it ran
-if [[ -z "${reply// }" ]]; then
-  digest=$(printf '%s\n' "$json" | jq -rs '
-    [.[] | select(.type=="tool_use") | .part.state
-      | "$ " + ((.input.command) // (.input | tostring))
-        + " => " + (((.output) // "") | gsub("\n"; " ") | .[0:300])]
-    | join("\n")' 2>/dev/null)
-  if [[ -n "${digest// }" ]]; then
-    reply=$(llm-blurb --model "$MODEL_NAME" --max-tokens 90 --timeout 40 \
-      --system "You are a spoken voice assistant. In one past-tense sentence under 25 words, say what these shell commands just did. No markdown, no lists, no emoji." \
-      "$digest")
-    reply="${reply:-Done.}"
-  fi
-fi
+reply="$(printf '%s' "$out" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
 
 if [[ -z "${reply// }" ]]; then
   say "That did not work."

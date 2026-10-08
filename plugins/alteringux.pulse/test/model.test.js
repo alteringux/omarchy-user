@@ -89,6 +89,48 @@ test("summary: unread counts events after lastReadTs; topLevel from attention", 
   assert.equal(s.topLevel, "critical")
 })
 
+test("activityDescription summarizes retained feed and attention-only state", () => {
+  const activity = M.parseActivity(
+    [
+      JSON.stringify(ev({ id: "a", ts: T0, plugin: "alteringux.grip", message: "old" })),
+      JSON.stringify(ev({ id: "b", ts: T0 + 100, plugin: "alteringux.grip", level: "critical" })),
+      JSON.stringify(ev({ id: "c", ts: T0 + 200, plugin: "alteringux.pulse", level: "warning" }))
+    ].join("\n"),
+    T0 + 300
+  )
+  const attention = M.parseAttention({
+    items: { "alteringux.timers": { label: "Timer ended", level: "urgent", ts: T0 } }
+  })
+  const state = M.parseState({ lastReadTs: T0 + 50 })
+
+  assert.equal(M.activityDescription(activity, state, attention),
+    "3 recent notifications from 2 plugins · 2 unread · 1 alert needs action · 1 urgent or critical\nMost: grip (2) · pulse (1)")
+  assert.match(M.activityDescription(activity, state, attention, 1), /newest 1 shown below/)
+  assert.equal(M.activityDescription(M.defaultActivity(), state, attention), "1 alert needs action")
+  assert.equal(M.activityDescription(M.defaultActivity(), state, M.defaultAttention()), "")
+})
+
+test("activityMessageSummary uses the full feed and surfaces repeated messages", () => {
+  const activity = M.parseActivity([
+    JSON.stringify(ev({ id: "a", ts: T0, message: "Shared warning" })),
+    JSON.stringify(ev({ id: "b", ts: T0 + 100, message: "Older unique message" })),
+    JSON.stringify(ev({ id: "c", ts: T0 + 200, message: "Shared   warning" })),
+    JSON.stringify(ev({ id: "d", ts: T0 + 300, message: "Newest unique message" }))
+  ].join("\n"), T0 + 400)
+
+  assert.equal(M.activityMessageSummary(activity), "grip: Shared warning ×2 · grip: Newest unique message")
+  assert.equal(M.activityMessageSummary(M.defaultActivity()), "")
+})
+
+test("activityMessageSummary keeps identical messages distinct by plugin", () => {
+  const activity = M.parseActivity([
+    JSON.stringify(ev({ id: "a", ts: T0, message: "Shared warning" })),
+    JSON.stringify(ev({ id: "b", ts: T0 + 100, plugin: "alteringux.pulse", message: "Shared warning" }))
+  ].join("\n"), T0 + 200)
+
+  assert.equal(M.activityMessageSummary(activity), "pulse: Shared warning · grip: Shared warning")
+})
+
 test("plugin usage normalises tracked, untracked, most/least-used and stale rows", () => {
   const usage = M.parseUsage({
     generatedAt: "2026-09-18T00:00:00Z",

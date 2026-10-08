@@ -3,6 +3,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The metrics block of the breathe panel: what you actually did, rendered so
 // it can be read at a glance rather than parsed. Every figure comes from a
@@ -12,10 +13,11 @@ import "../alteringux.kit" as Kit
 // It is a Column so the host panel can drop it straight into its own content
 // column and let implicitHeight do the work.
 Column {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
-  property color foreground: Color.foreground
+  property color foreground: _webPalette.foreground
 
   readonly property var stats: hostWidget ? hostWidget.stats : Model.defaultStats()
   readonly property var history: hostWidget ? hostWidget.history : Model.defaultHistory()
@@ -47,13 +49,13 @@ Column {
     onTriggered: root.nowMs = Date.now()
   }
 
-  readonly property color dim: Qt.darker(root.foreground, 1.4)
+  readonly property color dim: _webPalette.contrastColorFor(Qt.darker(root.foreground, 1.4), _webPalette.background)
 
   function toneColor(tone) {
-    if (tone === "positive") return Kit.Palette.positive
-    if (tone === "negative") return Kit.Palette.negative
-    if (tone === "warning") return Kit.Palette.warning
-    if (tone === "info") return Kit.Palette.info
+    if (tone === "positive") return _webPalette.positive
+    if (tone === "negative") return _webPalette.negative
+    if (tone === "warning") return _webPalette.warning
+    if (tone === "info") return _webPalette.info
     return root.foreground
   }
 
@@ -83,7 +85,7 @@ Column {
           sub: "7 days", tint: root.foreground },
         { label: "Streak",    value: root.streak.current + "d",
           sub: "best " + root.streak.best + "d",
-          tint: root.streak.current > 0 ? Kit.Palette.positive : root.dim }
+          tint: root.streak.current > 0 ? _webPalette.positive : root.dim }
       ]
 
       Rectangle {
@@ -91,9 +93,9 @@ Column {
         width: (root.width - Style.space(16)) / 3
         height: tile.implicitHeight + Style.space(18)
         radius: Style.cornerRadius
-        color: Kit.Palette.cardBg
+        color: _webPalette.cardBg
         border.width: 1
-        border.color: Kit.Palette.cardBorder
+        border.color: _webPalette.cardBorder
 
         Column {
           id: tile
@@ -101,32 +103,32 @@ Column {
           width: parent.width - Style.space(16)
           spacing: Style.space(2)
 
-          Text {
+          MarqueeText {
             width: parent.width
             text: modelData.label.toUpperCase()
             color: root.dim
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            font.bold: true
-            font.letterSpacing: 1.2
-            elide: Text.ElideRight
+            textFont.family: Style.font.family
+            textFont.pixelSize: Style.font.caption
+            textFont.bold: true
+            textFont.letterSpacing: 1.2
+            requestedElide: Text.ElideRight
           }
-          Text {
+          MarqueeText {
             width: parent.width
             text: modelData.value
             color: modelData.tint
-            font.family: Style.font.family
-            font.pixelSize: Style.font.title
-            font.bold: true
-            elide: Text.ElideRight
+            textFont.family: Style.font.family
+            textFont.pixelSize: Style.font.title
+            textFont.bold: true
+            requestedElide: Text.ElideRight
           }
-          Text {
+          MarqueeText {
             width: parent.width
             text: modelData.sub
-            color: Kit.Palette.faint
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
+            color: _webPalette.faint
+            textFont.family: Style.font.family
+            textFont.pixelSize: Style.font.caption
+            requestedElide: Text.ElideRight
           }
         }
       }
@@ -176,7 +178,7 @@ Column {
             width: parent.width
             radius: Style.cornerRadius > 0 ? Math.min(3, Style.cornerRadius) : 0
             height: Math.max(2, (weekRow.height - Style.space(18)) * (modelData.seconds / weekRow.peak))
-            color: modelData.seconds > 0 ? Kit.Palette.info : Kit.Palette.faint
+            color: modelData.seconds > 0 ? _webPalette.info : _webPalette.faint
             opacity: modelData.seconds > 0 ? (index === 6 ? 1 : 0.75) : 0.3
 
             Behavior on height { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
@@ -189,7 +191,7 @@ Column {
             // Single letter: seven three-letter labels wrap badly in a narrow
             // panel, and the shape of the week is what is being read here.
             text: new Date(modelData.date + "T00:00:00").toLocaleDateString(Qt.locale(), "ddd").charAt(0)
-            color: index === 6 ? root.foreground : Kit.Palette.faint
+            color: index === 6 ? root.foreground : _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             font.bold: index === 6
@@ -218,23 +220,23 @@ Column {
         width: parent.width
         height: Style.space(30)
 
-        Text {
+        MarqueeText {
           id: techName
           anchors.left: parent.left
           anchors.top: parent.top
           width: parent.width * 0.42
           text: modelData.name
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          elide: Text.ElideRight
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.bodySmall
+          requestedElide: Text.ElideRight
         }
 
         Text {
           anchors.right: parent.right
           anchors.top: parent.top
           text: Model.formatDuration(modelData.seconds) + " · " + Math.round(modelData.pct * 100) + "%"
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -248,7 +250,7 @@ Column {
           anchors.bottomMargin: Style.space(4)
           height: Math.max(3, Style.spaceReal(3))
           radius: height / 2
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           opacity: 0.28
         }
         Rectangle {
@@ -297,7 +299,7 @@ Column {
           width: (hourRow.width - 2 * 23) / 24
           height: Style.space(18)
           radius: Style.cornerRadius > 0 ? 2 : 0
-          color: count > 0 ? Kit.Palette.info : Kit.Palette.faint
+          color: count > 0 ? _webPalette.info : _webPalette.faint
           opacity: count > 0 ? (0.25 + 0.75 * (count / hourRow.peak)) : 0.14
         }
       }
@@ -311,7 +313,7 @@ Column {
           required property var modelData
           width: parent.width / 5
           text: modelData
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -350,7 +352,6 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           text: modelData.label
           color: root.foreground
-          opacity: 0.6
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }
@@ -373,9 +374,9 @@ Column {
     visible: root.suggestion !== null
     height: suggestionRow.implicitHeight + Style.space(18)
     radius: Style.cornerRadius
-    color: Kit.Palette.cardBg
+    color: _webPalette.cardBg
     border.width: 1
-    border.color: Kit.Palette.cardBorder
+    border.color: _webPalette.cardBorder
 
     Row {
       id: suggestionRow
@@ -386,7 +387,7 @@ Column {
       Text {
         anchors.verticalCenter: parent.verticalCenter
         text: ""                     // fa-lightbulb-o
-        color: Kit.Palette.warning
+        color: _webPalette.warning
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
       }
@@ -406,7 +407,10 @@ Column {
         }
       }
 
-      Button {
+      Kit.ActionButton {
+        focusable: true
+        Accessible.role: Accessible.Button
+        Accessible.name: text
         anchors.verticalCenter: parent.verticalCenter
         text: "Try"
         bordered: true

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Mock pactl for the omarchy-stopwatch test suite: serves fixture mute / volume
+# values from MOCK_* env so output_muted() can be exercised without a running
+# sound server.
+#
+#   pactl get-default-sink        -> $MOCK_DEFAULT_SINK           (default "sink0")
+#   pactl get-sink-mute <sink>    -> "Mute: $MOCK_SINK_MUTE"      (default "no")
+#   pactl get-sink-volume <sink>  -> a volume line at $MOCK_SINK_VOLUME %  (default 75)
+#
+# MOCK_PACTL_FAIL=1  -> every call exits 1 (simulates a missing / broken server).
+
+[ "${MOCK_PACTL_FAIL:-0}" = 1 ] && exit 1
+
+case "${1:-}" in
+  get-default-sink)
+    printf '%s\n' "${MOCK_DEFAULT_SINK:-sink0}"
+    ;;
+  get-sink-mute)
+    printf 'Mute: %s\n' "${MOCK_SINK_MUTE:-no}"
+    ;;
+  get-sink-volume)
+    v="${MOCK_SINK_VOLUME:-75}"
+    printf 'Volume: front-left: 0 / %s%% / -0.00 dB,   front-right: 0 / %s%% / -0.00 dB\n' "$v" "$v"
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+exit 0

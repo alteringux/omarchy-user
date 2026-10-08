@@ -6,11 +6,13 @@ import qs.Ui
 import "../alteringux.sysmon/Model.js" as Model
 import "../alteringux.sysmon" as Sysmon
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Detail popup for CPU: overall gauge, per-core bars, load average, uptime, a
 // 10-minute trend sparkline with min/avg/max, and the top processes by CPU
 // (`omarchy-sysmon top`). Binds to the host widget's watched store; never writes.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.cpumon"
   ipcTarget: "alteringux.cpumon"
@@ -53,11 +55,20 @@ Panel {
   readonly property var stats: Model.historyStats(root.trendHistory, "cpu")
 
   property var topRows: []
+  property string topError: ""
+  property bool topFeedbackSent: false
+  signal topFeedback(string message)
+  function reportTopError(message) {
+    if (root.topFeedbackSent) return
+    root.topFeedbackSent = true
+    root.topError = message
+    root.topFeedback(message)
+  }
 
   function levelColor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.positive
+    if (level === "critical") return _webPalette.negative
+    if (level === "warning") return _webPalette.warning
+    return _webPalette.positive
   }
 
   function open() { root.controller.show(); refreshTop() }
@@ -73,6 +84,8 @@ Panel {
   function refreshTop() {
     guard.run("refreshTop", function () {
       if (topProc.running) return
+      root.topError = ""
+      root.topFeedbackSent = false
       topProc.command = [Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon", "top", "--json"]
       topProc.running = true
     })
@@ -80,23 +93,40 @@ Panel {
 
   Process {
     id: topProc
+    property bool started: false
+    property bool attempted: false
     running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportTopError("CPU process list unavailable. Check ~/.local/bin/omarchy-sysmon.")
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportTopError("CPU process list failed (exit " + code + ").")
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         guard.run("topProc.onStreamFinished", function () {
           try {
             var d = JSON.parse(text || "{}")
-            root.topRows = Array.isArray(d.byCpu) ? d.byCpu : []
+            if (!d || !Array.isArray(d.byCpu)) throw new Error("missing byCpu")
+            root.topRows = d.byCpu
           } catch (e) {
             root.topRows = []
+            root.reportTopError("CPU process list could not be read.")
           }
         })
       }
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -107,12 +137,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
+      sectionNavigation: true
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshTop() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh CPU metrics", context: "CPU monitor · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -122,6 +156,33 @@ Panel {
           id: body
           width: parent.width
           spacing: Style.space(16)
+
+          Text {
+            width: body.width
+            height: visible ? implicitHeight : 0
+            visible: !!(root.topError || (root.hostWidget && root.hostWidget.sampleError))
+            text: (root.hostWidget && root.hostWidget.sampleError ? root.hostWidget.sampleError : "")
+              + (root.hostWidget && root.hostWidget.sampleError && root.topError ? "\n" : "") + root.topError
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onSampleFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+            Connections {
+              target: root
+              function onTopFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.PanelHead {
             width: parent.width
@@ -276,19 +337,19 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.name
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: Style.space(150)
                 }
                 Item { width: parent.width - x - cpuv.width; height: 1 }
                 Text {
                   id: cpuv
                   text: (modelData.cpu != null ? modelData.cpu.toFixed(1) : "0.0") + "%"
-                  color: Qt.darker(root.barForeground, 1.3)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.3), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true

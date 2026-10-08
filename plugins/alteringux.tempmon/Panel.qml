@@ -6,12 +6,14 @@ import qs.Ui
 import "../alteringux.sysmon/Model.js" as Model
 import "../alteringux.sysmon" as Sysmon
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Detail popup for temperature: current package reading against the warn /
 // critical thresholds, a 10-minute trend sparkline with min/avg/max, and a
 // per-sensor breakdown (`omarchy-sysmon sensors`). Binds to the host widget's
 // watched store; never writes.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.tempmon"
   ipcTarget: "alteringux.tempmon"
@@ -50,11 +52,20 @@ Panel {
 
 
   property var sensorRows: []
+  property string sensorError: ""
+  property bool sensorFeedbackSent: false
+  signal sensorFeedback(string message)
+  function reportSensorError(message) {
+    if (root.sensorFeedbackSent) return
+    root.sensorFeedbackSent = true
+    root.sensorError = message
+    root.sensorFeedback(message)
+  }
 
   function levelColor(level) {
-    if (level === "critical") return Kit.Palette.negative
-    if (level === "warning") return Kit.Palette.warning
-    return Kit.Palette.positive
+    if (level === "critical") return _webPalette.negative
+    if (level === "warning") return _webPalette.warning
+    return _webPalette.positive
   }
 
   function open() { root.controller.show(); refreshSensors() }
@@ -70,6 +81,8 @@ Panel {
   function refreshSensors() {
     guard.run("refreshSensors", function () {
       if (sensorsProc.running) return
+      root.sensorError = ""
+      root.sensorFeedbackSent = false
       sensorsProc.command = [Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon", "sensors"]
       sensorsProc.running = true
     })
@@ -77,23 +90,40 @@ Panel {
 
   Process {
     id: sensorsProc
+    property bool started: false
+    property bool attempted: false
     running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportSensorError("Sensor list unavailable. Check ~/.local/bin/omarchy-sysmon.")
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportSensorError("Sensor list failed (exit " + code + ").")
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         guard.run("sensorsProc.onStreamFinished", function () {
           try {
             var d = JSON.parse(text || "[]")
-            root.sensorRows = Array.isArray(d) ? d : []
+            if (!Array.isArray(d)) throw new Error("expected array")
+            root.sensorRows = d
           } catch (e) {
             root.sensorRows = []
+            root.reportSensorError("Sensor list could not be read.")
           }
         })
       }
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -104,12 +134,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(360))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       id: keyCatcher
       anchors.fill: parent
+      sectionNavigation: true
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshSensors() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh temperature sensors", context: "Temperature monitor · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -119,6 +153,33 @@ Panel {
           id: body
           width: parent.width
           spacing: Style.space(16)
+
+          Text {
+            width: body.width
+            height: visible ? implicitHeight : 0
+            visible: !!(root.sensorError || (root.hostWidget && root.hostWidget.sampleError))
+            text: (root.hostWidget && root.hostWidget.sampleError ? root.hostWidget.sampleError : "")
+              + (root.hostWidget && root.hostWidget.sampleError && root.sensorError ? "\n" : "") + root.sensorError
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onSampleFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+            Connections {
+              target: root
+              function onSensorFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.PanelHead {
             width: parent.width
@@ -151,7 +212,7 @@ Panel {
                 if (l === "warning") return "Warm · at or above 75°C"
                 return "Normal · below 75°C"
               }
-              color: Qt.darker(root.barForeground, 1.3)
+              color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.3), _webPalette.barBackground)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -201,12 +262,12 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.chip + "  " + modelData.label
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: Style.space(190)
                 }
                 Item { width: parent.width - x - sv.width; height: 1 }

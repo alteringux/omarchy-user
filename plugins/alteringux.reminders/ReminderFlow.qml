@@ -1,12 +1,15 @@
 import Quickshell
 import Quickshell.Wayland
+import Quickshell.Io
 import QtQuick
 import qs.Commons
 import qs.Ui
 import "ReminderFlowModel.js" as ReminderFlowModel
 import "../alteringux.kit" as Kit
+import "../shared"
 
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property string omarchyPath: Quickshell.env("OMARCHY_PATH")
@@ -19,28 +22,69 @@ Item {
   property string minutes: ""
   property string filterText: ""
   property string validationError: ""
+  property bool creatingReminder: false
+  property bool reminderCreated: false
+  property bool operationFailed: false
+  property string operationMessage: ""
+  property string createErrorOutput: ""
   property bool repeat: false
   property string fontFamily: Style.font.menuFamily
 
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
+  property color background: _webPalette.menuBackground
+  property color foreground: _webPalette.menuText
+  property color border: _webPalette.menuBorder
   property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color scrim: Color.menu.scrim
+  property color scrim: _webPalette.menuScrim
   readonly property int cornerRadius: Style.cornerRadius
   property int contentMargin: Style.spacing.panelPadding
   property int headerHeight: Math.max(Style.space(34), Style.font.title + Style.spacing.controlPaddingY * 2)
   property int cardWidth: Math.min(Style.space(300), panel.width - Style.gapsOut * 2)
-  readonly property int validationHeight: root.validationError.length > 0
-    ? Style.font.caption + Style.spacing.panelGap
+  readonly property string footerMessage: root.validationError || root.operationMessage
+  onFooterMessageChanged: {
+    var message = root.footerMessage
+    if (!root.opened || !message) return
+    Qt.callLater(function() {
+      if (root.opened && footerStatus.visible && root.footerMessage === message)
+        footerStatus.Accessible.announce(message)
+    })
+  }
+  readonly property int validationHeight: root.footerMessage.length > 0
+    ? Style.font.caption * 3 + Style.spacing.panelGap
     : 0
-  property int cardHeight: Math.min(contentMargin * 2 + headerHeight + validationHeight, panel.height - Style.gapsOut * 2)
+  readonly property int shortcutHintHeight: Style.font.caption * 2 + Style.spacing.panelGap
+  property int cardHeight: Math.min(contentMargin * 2 + headerHeight + validationHeight + shortcutHintHeight, panel.height - Style.gapsOut * 2)
   readonly property string promptText: root.step === "message" ? "Reminder message" : "Remind in minutes"
+  readonly property string shortcutHint: root.creatingReminder
+    ? "Creating reminder…  ·  F1: help"
+    : root.reminderCreated
+      ? "Esc: close  ·  F1: help"
+      : root.step === "minutes"
+        ? "Enter: continue  ·  Tab: Repeat  ·  Esc: clear/close  ·  F1: help"
+        : "Enter: create  ·  Tab: Repeat  ·  Esc: clear/back  ·  F1: help"
 
   readonly property var guard: Kit.BugGuard.create("alteringux.reminders", function(argv) { Quickshell.execDetached(argv) })
 
+  Process {
+    id: createProc
+    running: false
+    stderr: StdioCollector { onStreamFinished: root.createErrorOutput = this.text }
+    onExited: function (code) {
+      root.creatingReminder = false
+      if (code === 0) {
+        root.reminderCreated = true
+        root.operationFailed = false
+        root.operationMessage = "Reminder created. Press Esc to close."
+      } else {
+        var detail = String(root.createErrorOutput || "").trim().split(/\r?\n/)[0].slice(0, 180)
+        root.operationFailed = true
+        root.operationMessage = "Could not create reminder: " + (detail || ("process exited with code " + code))
+      }
+    }
+  }
+
   function open(payloadJson) {
     guard.run("open", function() {
+      if (root.creatingReminder) return
       var payload = ({})
       try { payload = JSON.parse(payloadJson || "{}") } catch (e) { payload = ({}) }
       // Bug fix: this only ever assigned fontFamily when the payload carried
@@ -55,6 +99,9 @@ Item {
       root.minutes = ""
       root.filterText = ""
       root.validationError = ""
+      root.operationMessage = ""
+      root.operationFailed = false
+      root.reminderCreated = false
       root.repeat = false
 
       Qt.callLater(function() { keyCatcher.forceActiveFocus() })
@@ -62,10 +109,16 @@ Item {
   }
 
   function close() {
+    if (root.creatingReminder) return
     root.opened = false
   }
 
+  function toggleRepeat() {
+    root.repeat = !root.repeat
+  }
+
   function dismiss() {
+    if (root.creatingReminder) return
     root.opened = false
     if (root.shell && typeof root.shell.hide === "function")
       root.shell.hide((root.manifest && root.manifest.id) || "omarchy.reminders")
@@ -79,6 +132,9 @@ Item {
   function setFilter(nextFilter) {
     root.filterText = nextFilter
     root.validationError = ""
+    root.operationMessage = ""
+    root.operationFailed = false
+    root.reminderCreated = false
   }
 
   // Feature: step back to the minutes prompt instead of only being able to
@@ -93,6 +149,7 @@ Item {
 
   function submit() {
     guard.run("submit", function() {
+      if (root.creatingReminder || root.reminderCreated) return
       var selection = root.filterText
 
       if (root.step === "minutes") {
@@ -119,8 +176,18 @@ Item {
         var args = root.repeat
           ? [root.remindBin].concat(ReminderFlowModel.repeatReminderArgs(root.minutes, selection))
           : [root.omarchyPath + "/bin/omarchy-reminder"].concat(ReminderFlowModel.reminderArgs(root.minutes, selection))
-        root.dismiss()
-        Quickshell.execDetached(args)
+        if (!args.length || args[0] === "") {
+          root.validationError = "Could not prepare the reminder command. Check the Omarchy paths and try again."
+          return
+        }
+        root.validationError = ""
+        root.operationFailed = false
+        root.reminderCreated = false
+        root.operationMessage = "Creating reminder…"
+        root.createErrorOutput = ""
+        root.creatingReminder = true
+        createProc.command = args
+        createProc.running = true
       }
     })
   }
@@ -145,7 +212,7 @@ Item {
       onClicked: root.dismiss()
     }
 
-    BorderSurface {
+      BorderSurface {
       id: card
       width: root.cardWidth
       height: root.cardHeight
@@ -161,16 +228,31 @@ Item {
         id: keyCatcher
         anchors.fill: parent
         focus: true
+        readonly property var shortcutDescriptions: [
+          { keys: "F1", description: "Open recovery and keyboard shortcut help", context: "Reminders" },
+          { keys: "Enter / Return", description: root.step === "minutes" ? "Continue to the reminder message" : "Create the reminder", context: "Reminders · " + root.step + " step" },
+          { keys: "Tab / Shift + Tab", description: "Move focus to or from the Repeat option", context: "Reminders" },
+          { keys: "Enter / Space", description: "Toggle repeating reminders", context: "Reminders · Repeat option" },
+          { keys: "Escape", description: root.creatingReminder ? "Wait for reminder creation to finish" : (root.reminderCreated ? "Close the completed reminder" : "Clear text; when empty, go back one step or close"), context: "Reminders" }
+        ]
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
-            if (root.filterText) root.setFilter("")
-            else if (root.step === "message") root.backToMinutes()
-            else root.dismiss()
+          if (event.key === Qt.Key_F1) {
+            shortcutHelp.show()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
+            if (!root.creatingReminder) {
+              if (root.reminderCreated) root.dismiss()
+              else if (root.filterText) root.setFilter("")
+              else if (root.step === "message") root.backToMinutes()
+              else root.dismiss()
+            }
+            event.accepted = true
+          } else if (root.creatingReminder) {
             event.accepted = true
           } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
-            root.repeat = !root.repeat
+            repeatToggle.forceActiveFocus()
             event.accepted = true
           } else if (Util.editsFilter(event, root.filterText)) {
             root.setFilter(Util.editedFilter(event, root.filterText))
@@ -189,28 +271,59 @@ Item {
         anchors.fill: parent
         anchors.topMargin: card.contentTopInset
         anchors.rightMargin: card.contentRightInset
-        anchors.bottomMargin: card.contentBottomInset + root.validationHeight
+        anchors.bottomMargin: card.contentBottomInset + root.validationHeight + root.shortcutHintHeight
         anchors.leftMargin: card.contentLeftInset
 
-        Text {
-          textFormat: Text.PlainText
+        MarqueeText {
+          requestedTextFormat: Text.PlainText
           anchors.left: parent.left
           anchors.right: repeatToggle.left
           anchors.rightMargin: Style.spacing.panelGap
           anchors.verticalCenter: parent.verticalCenter
           text: root.filterText || (root.promptText + "...")
           color: root.foreground
-          opacity: root.filterText ? 1 : 0.58
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.heading
-          elide: Text.ElideRight
+          textFont.family: root.fontFamily
+          textFont.pixelSize: Style.font.heading
+          requestedElide: Text.ElideRight
         }
 
-        // Repeat checkbox: toggle with a click or Tab. When checked, submitting
+        // Repeat checkbox: toggle by click, keyboard, or assistive action. When checked, submitting
         // routes through `omarchy-remind --every <minutes>` instead of the
         // stock one-shot `omarchy-reminder`.
         Item {
           id: repeatToggle
+          activeFocusOnTab: true
+          Accessible.role: Accessible.CheckBox
+          Accessible.name: "Repeat reminder"
+          Accessible.description: "Press Space or Enter to toggle. Tab moves focus."
+          Accessible.checked: root.repeat
+          Accessible.onToggleAction: root.toggleRepeat()
+          enabled: !root.creatingReminder && !root.reminderCreated
+          Keys.priority: Keys.BeforeItem
+          Keys.onPressed: function(event) {
+            if (event.key === Qt.Key_Escape) {
+              if (!root.creatingReminder) {
+                if (root.reminderCreated) root.dismiss()
+                else if (root.filterText) root.setFilter("")
+                else if (root.step === "message") root.backToMinutes()
+                else root.dismiss()
+              }
+              event.accepted = true
+            } else if (root.creatingReminder) {
+              event.accepted = true
+            } else if (event.key === Qt.Key_F1) {
+              shortcutHelp.show()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Tab || event.key === Qt.Key_Backtab) {
+              keyCatcher.forceActiveFocus()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Space || event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              if (!root.reminderCreated) root.toggleRepeat()
+              event.accepted = true
+            } else {
+              event.accepted = true
+            }
+          }
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           implicitWidth: repeatRow.implicitWidth
@@ -218,11 +331,19 @@ Item {
           width: implicitWidth
           height: implicitHeight
 
+          Rectangle {
+            anchors.fill: parent
+            anchors.margins: -Style.space(3)
+            radius: root.cornerRadius
+            color: "transparent"
+            border.width: repeatToggle.activeFocus ? 1 : 0
+            border.color: _webPalette.accent
+          }
+
           Row {
             id: repeatRow
             anchors.verticalCenter: parent.verticalCenter
             spacing: Style.spacing.sm
-            opacity: root.repeat ? 1 : 0.55
 
             Rectangle {
               id: box
@@ -230,9 +351,9 @@ Item {
               height: width
               anchors.verticalCenter: parent.verticalCenter
               radius: root.cornerRadius > 0 ? Style.space(3) : 0
-              color: root.repeat ? Color.accent : "transparent"
+              color: root.repeat ? _webPalette.accent : "transparent"
               border.width: Math.max(1, Style.space(1))
-              border.color: root.repeat ? Color.accent : Util.alpha(root.foreground, 0.5)
+              border.color: root.repeat ? _webPalette.accent : Util.alpha(root.foreground, 0.5)
 
               Behavior on color { ColorAnimation { duration: 100 } }
 
@@ -260,29 +381,49 @@ Item {
           MouseArea {
             anchors.fill: parent
             cursorShape: Qt.PointingHandCursor
-            onClicked: {
-              root.repeat = !root.repeat
-              keyCatcher.forceActiveFocus()
-            }
+            onClicked: { repeatToggle.forceActiveFocus(); root.toggleRepeat() }
           }
         }
       }
 
       Text {
-        visible: root.validationError.length > 0
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: card.contentLeftInset
+        anchors.rightMargin: card.contentRightInset
+        anchors.bottomMargin: card.contentBottomInset + root.validationHeight
+        text: root.shortcutHint
+        color: _webPalette.faint
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        Accessible.ignored: true
+      }
+
+      Text {
+        id: footerStatus
+        visible: root.footerMessage.length > 0
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.leftMargin: card.contentLeftInset
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
-        text: root.validationError
-        color: Kit.Palette.negative
+        text: root.footerMessage
+        color: root.validationError || root.operationFailed ? _webPalette.negative
+          : (root.reminderCreated ? _webPalette.positive : _webPalette.faint)
+        Accessible.role: Accessible.StaticText
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
         textFormat: Text.PlainText
       }
+    }
+
+    Kit.RecoveryHelp {
+      id: shortcutHelp
+      returnFocusItem: keyCatcher
     }
   }
 }

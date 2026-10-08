@@ -22,6 +22,7 @@ import qs.Commons
 // breathe. The host is still responsible for the louder cues that pair with it
 // (WidgetButton.active, a reddened glyph) — this is just the dot.
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property bool active: false
@@ -35,19 +36,18 @@ Rectangle {
   visible: root.active
 
   color: {
-    if (root.level === "critical") return Kit.Palette.negative
-    if (root.level === "warning") return Kit.Palette.warning
-    if (root.level === "info") return Kit.Palette.info
-    return Kit.Palette.urgent
+    if (root.level === "critical") return _webPalette.barNegative
+    if (root.level === "warning") return _webPalette.barWarning
+    if (root.level === "info") return _webPalette.barAccent
+    return _webPalette.barUrgent
   }
 
-  SequentialAnimation on opacity {
+  SequentialAnimation on scale {
     running: root.visible && root.pulsing
     loops: Animation.Infinite
-    NumberAnimation { to: 0.25; duration: 650; easing.type: Easing.InOutSine }
+    NumberAnimation { to: 1.3; duration: 650; easing.type: Easing.InOutSine }
     NumberAnimation { to: 1.0; duration: 650; easing.type: Easing.InOutSine }
   }
 
-  // Steady levels still want full opacity when the animation isn't running.
-  onPulsingChanged: if (!pulsing) opacity = 1.0
+  onPulsingChanged: if (!pulsing) scale = 1.0
 }

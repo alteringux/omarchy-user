@@ -7,6 +7,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The phone panel: pick a contact and call them, edit a contact's persona /
 // voice / flags, read (or wipe) what a contact remembers about you, and set up
@@ -18,6 +19,7 @@ import "../alteringux.kit" as Kit
 // the field ids directly, and Component-scoped ids are not reachable from the
 // file scope.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.phone"
   ipcTarget: ""
@@ -36,11 +38,13 @@ Panel {
   property string view: "list"           // "list" | "edit"
   property var editing: null             // the contact being edited (null = new)
   property string memoryText: ""
+  property string memoryError: ""
 
   readonly property var frequencies: ["off", "rare", "occasional", "often"]
 
   readonly property bool anyFieldFocused:
     fName.activeFocus || fLength.activeFocus || fModel.activeFocus ||
+    quietFrom.activeFocus || quietTo.activeFocus ||
     fBackstory.focused || fPersonality.focused || fSpeech.focused || fRules.focused
 
   function openNew() {
@@ -52,9 +56,10 @@ Panel {
   function openEdit(c) {
     root.editing = c
     root.memoryText = ""
+    root.memoryError = ""
     loadForm(c)
     root.view = "edit"
-    if (root.hostWidget) { memoryProc.command = [root.hostWidget.scriptPath, "memory", c.id]; memoryProc.running = true }
+    if (root.hostWidget && !memoryProc.running) { memoryProc.command = [root.hostWidget.scriptPath, "memory", c.id]; memoryProc.running = true }
   }
   function backToList() { root.view = "list"; root.editing = null }
 
@@ -101,9 +106,26 @@ Panel {
   Process {
     id: memoryProc
     running: false
+    property bool started: false
+    property bool attempted: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.memoryError = "Contact memory unavailable. Check ~/.local/bin/omarchy-phone."
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.memoryError = "Contact memory could not be loaded (exit " + code + ")."
+    }
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.memoryText = String(text || "").trim()
+      onStreamFinished: {
+        root.memoryText = String(text || "").trim()
+      }
     }
   }
 
@@ -114,7 +136,7 @@ Panel {
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -124,9 +146,14 @@ Panel {
     contentHeight: panel.fittedContentHeight(Math.min(
       root.view === "edit" ? editCol.implicitHeight : listCol.implicitHeight, Style.space(520)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: voiceDropdown.popupOpen || freqDropdown.popupOpen || root.anyFieldFocused
+      escapeShortcutDescription: root.view === "edit" ? "Return to contacts" : "Close the panel"
+      escapeShortcutContext: root.view === "edit" ? "Phone · contact editor shortcut focus" : "Phone · shortcut focus"
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Return / Space", description: "Call the focused contact", context: "Phone contacts · control focus" }
+      ]
       onCloseRequested: { if (root.view === "edit") root.backToList(); else root.close() }
 
       // ─────────────────────────────────────────────── LIST ──
@@ -150,6 +177,26 @@ Panel {
               : (root.contacts.length + " contacts")
             foreground: root.barForeground
           }
+          Text {
+            id: phoneActionFeedback
+            width: listCol.width
+            visible: root.view === "list" && !!(root.hostWidget && root.hostWidget.actionStatus)
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onActionFeedback(message) {
+                if (root.opened && phoneActionFeedback.visible) phoneActionFeedback.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.EmptyState {
             visible: root.contacts.length === 0
@@ -164,19 +211,37 @@ Panel {
             delegate: Rectangle {
               id: crow
               required property var modelData
+              activeFocusOnTab: !root.onCall
+              Accessible.role: Accessible.Button
+              Accessible.name: "Call " + crow.modelData.name
+              Accessible.onPressAction: activate()
               width: listCol.width
               implicitHeight: crowLayout.implicitHeight + Style.space(16)
               radius: Style.cornerRadius
+              border.width: activeFocus ? Style.spacing.hairline : 0
+              border.color: _webPalette.accent
               color: crowArea.containsMouse
                 ? Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.08)
                 : "transparent"
+
+              function activate() {
+                if (!root.onCall && root.hostWidget) root.hostWidget.startCall(crow.modelData.id)
+              }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
 
               MouseArea {
                 id: crowArea
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: root.onCall ? Qt.ArrowCursor : Qt.PointingHandCursor
-                onClicked: if (!root.onCall && root.hostWidget) root.hostWidget.startCall(crow.modelData.id)
+                onClicked: {
+                  if (!root.onCall && root.hostWidget) {
+                    crow.forceActiveFocus()
+                    crow.activate()
+                  }
+                }
               }
 
               RowLayout {
@@ -188,35 +253,43 @@ Panel {
                 ColumnLayout {
                   Layout.fillWidth: true
                   spacing: 2
-                  Text {
+                  MarqueeText {
                     text: crow.modelData.name + (crow.modelData.looseGuard ? "  ·  unfiltered" : "")
-                    color: Color.foreground
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.body
-                    font.bold: true
-                    elide: Text.ElideRight
+                    focusableOnOverflow: false
+                    color: _webPalette.foreground
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.body
+                    textFont.bold: true
+                    requestedElide: Text.ElideRight
                     Layout.fillWidth: true
                   }
-                  Text {
+                  MarqueeText {
                     text: crow.modelData.voice
                       + (crow.modelData.canInitiate && crow.modelData.frequency !== "off"
                          ? "  ·  may call you (" + crow.modelData.frequency + ")" : "")
-                    color: Kit.Palette.faint
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    elide: Text.ElideRight
+                    focusableOnOverflow: false
+                    color: _webPalette.faint
+                    textFont.family: Style.font.family
+                    textFont.pixelSize: Style.font.caption
+                    requestedElide: Text.ElideRight
                     Layout.fillWidth: true
                   }
                 }
 
-                Button {
+                Kit.ActionButton {
                   text: "Edit"
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Edit contact " + crow.modelData.name
                   foreground: root.barForeground
                   bordered: true
                   onClicked: root.openEdit(crow.modelData)
                 }
-                Button {
+                Kit.ActionButton {
                   text: "Call"
+                  focusable: true
+                  Accessible.role: Accessible.Button
+                  Accessible.name: "Call " + crow.modelData.name
                   foreground: root.barForeground
                   bordered: true
                   enabled: !root.onCall
@@ -226,8 +299,11 @@ Panel {
             }
           }
 
-          Button {
+          Kit.ActionButton {
             text: "New contact"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text
             foreground: root.barForeground
             bordered: true
             onClicked: root.openNew()
@@ -238,7 +314,7 @@ Panel {
 
           Toggle {
             width: listCol.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
             label: "Let contacts call me"
             description: root.config.incomingEnabled
               ? "On — contacts marked \"may call\" ring you at their set frequency"
@@ -250,7 +326,7 @@ Panel {
 
           Toggle {
             width: listCol.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
             label: "Do not disturb"
             description: (root.hostWidget && root.hostWidget.dnd) ? "No incoming calls right now" : "Incoming calls allowed"
             checked: root.hostWidget && root.hostWidget.dnd
@@ -266,7 +342,7 @@ Panel {
 
             ColumnLayout {
               spacing: 2
-              Text { text: "Quiet from"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Text { text: "Quiet from"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
               TextField {
                 id: quietFrom
                 text: root.config.quietHours ? root.config.quietHours.start : "22:00"
@@ -277,7 +353,7 @@ Panel {
             }
             ColumnLayout {
               spacing: 2
-              Text { text: "to"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Text { text: "to"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
               TextField {
                 id: quietTo
                 text: root.config.quietHours ? root.config.quietHours.end : "08:00"
@@ -299,7 +375,7 @@ Panel {
           Text {
             width: listCol.width
             text: "Click a contact to call  ·  Esc: close"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -324,6 +400,26 @@ Panel {
             title: root.editing ? ("Edit " + root.editing.name) : "New contact"
             meta: root.editing ? root.editing.id : "voice · persona · memory"
             foreground: root.barForeground
+          }
+          Text {
+            id: phoneEditActionFeedback
+            width: editCol.width
+            visible: root.view === "edit" && !!(root.hostWidget && root.hostWidget.actionStatus)
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onActionFeedback(message) {
+                if (root.opened && phoneEditActionFeedback.visible) phoneEditActionFeedback.Accessible.announce(message)
+              }
+            }
           }
 
           Text { text: "NAME"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true }
@@ -365,7 +461,7 @@ Panel {
             }
           }
 
-          Text { text: "MODEL — optional NanoGPT id, blank uses the default"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { text: "MODEL — optional NanoGPT id, blank uses the default"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           TextField {
             id: fModel
             width: editCol.width
@@ -400,7 +496,7 @@ Panel {
           Toggle {
             id: fCanInitiate
             width: editCol.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
             label: "Allow this contact to start calls"
             description: "Needs \"Let contacts call me\" on, and a frequency above"
             checked: false
@@ -409,7 +505,7 @@ Panel {
           Toggle {
             id: fSpeaksFirst
             width: editCol.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
             label: "Speaks first"
             description: "Opens the call with a greeting instead of waiting for you"
             checked: true
@@ -418,7 +514,7 @@ Panel {
           Toggle {
             id: fLooseGuard
             width: editCol.width
-            activeFocusOnTab: false
+            activeFocusOnTab: true
             label: "Unfiltered persona"
             description: "Drops the stay-in-character guard: can break the fourth wall, refuse for fun, mislead. Content limits are the model's."
             checked: false
@@ -436,23 +532,32 @@ Panel {
           RowLayout {
             width: editCol.width
             spacing: Style.space(8)
-            Button {
+            Kit.ActionButton {
               text: root.editing ? "Save changes" : "Create contact"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: root.saveForm()
             }
-            Button {
+            Kit.ActionButton {
               text: "Cancel"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               foreground: root.barForeground
               bordered: true
               onClicked: root.backToList()
             }
             Item { Layout.fillWidth: true }
-            Button {
+            Kit.ActionButton {
               visible: root.editing !== null
               text: "Delete"
-              foreground: Kit.Palette.negative
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: root.editing ? "Delete contact " + root.editing.name : "Delete contact"
+              foreground: _webPalette.negative
               bordered: true
               onClicked: { if (root.hostWidget && root.editing) root.hostWidget.deleteContact(root.editing.id); root.backToList() }
             }
@@ -468,18 +573,33 @@ Panel {
             PanelSectionHeader { text: "WHAT THEY REMEMBER"; foreground: root.barForeground }
             Text {
               width: editCol.width
+              visible: root.memoryError.length > 0
+              text: root.memoryError
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: _webPalette.warning
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              Accessible.role: Accessible.StaticText
+              Accessible.name: text
+            }
+            Text {
+              width: editCol.width
               text: (root.memoryText && root.memoryText.length)
                 ? root.memoryText
                 : "Nothing yet — memory is written after your first call."
-              color: (root.memoryText && root.memoryText.length) ? Color.foreground : Kit.Palette.faint
+              color: (root.memoryText && root.memoryText.length) ? _webPalette.foreground : _webPalette.faint
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
               textFormat: Text.PlainText
             }
-            Button {
+            Kit.ActionButton {
               text: "Forget everything"
-              foreground: Kit.Palette.negative
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: root.editing ? "Forget everything remembered about " + root.editing.name : text
+              foreground: _webPalette.negative
               bordered: true
               visible: !!(root.memoryText && root.memoryText.length)
               onClicked: {
@@ -505,7 +625,7 @@ Panel {
 
     Text {
       text: pf.heading
-      color: Kit.Palette.faint
+      color: _webPalette.faint
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -516,7 +636,7 @@ Panel {
       color: Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.06)
       border.width: 1
       border.color: area.activeFocus
-        ? Color.accent
+        ? _webPalette.accent
         : Qt.rgba(root.barForeground.r, root.barForeground.g, root.barForeground.b, 0.18)
 
       QQC.TextArea {
@@ -526,10 +646,10 @@ Panel {
         wrapMode: TextEdit.Wrap
         textFormat: TextEdit.PlainText
         placeholderText: pf.placeholder
-        color: Color.foreground
-        placeholderTextColor: Qt.darker(Color.foreground, 1.7)
-        selectionColor: Style.selectionFillFor(Color.foreground, Color.accent)
-        selectedTextColor: Color.foreground
+        color: _webPalette.foreground
+        placeholderTextColor: _webPalette.muted
+        selectionColor: Style.selectionFillFor(_webPalette.foreground, _webPalette.accent)
+        selectedTextColor: _webPalette.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         background: null

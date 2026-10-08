@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Cache CLI status for Omarchy; workspace changes are explicit."""
+import argparse
+import json
+import os
+import shutil
+import shlex
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from urllib.parse import urlsplit
+
+STATE = Path(os.environ.get("OMARCHY_STATE_DIR", Path.home() / ".local/state/omarchy")) / "agentglass.json"
+
+
+def cli(*args, stdin_data=None):
+    server = urlsplit(os.environ.get("AGENTGLASS_SERVER", "http://127.0.0.1:4000"))
+    if server.scheme not in ("http", "https") or server.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise RuntimeError("Omarchy requires a local agentglass server")
+    script = Path(__file__).resolve()
+    candidates = [script.with_name("agentglass-agent"), script.parents[4] / "bin/agentglass-agent"]
+    command = next(([sys.executable, str(p)] for p in candidates if p.is_file()), None)
+    if command is None:
+        executable = shutil.which("agentglass-agent")
+        if not executable:
+            raise RuntimeError("agentglass-agent is not installed")
+        command = [executable]
+    timeout = 190 if args[0] in ("workspace", "setup") else 25 if args[0] in ("start", "run") else 20
+    run = subprocess.run(command + list(args), capture_output=True, text=True, input=stdin_data, timeout=timeout)
+    try:
+        answer = json.loads(run.stdout)
+    except ValueError:
+        raise RuntimeError("agentglass-agent returned no status; install the current CLI") from None
+    if run.returncode or not isinstance(answer, dict) or answer.get("ok") is not True:
+        raise RuntimeError(answer.get("error", "agentglass CLI failed") if isinstance(answer, dict) else "invalid CLI answer")
+    return answer
+
+
+def refresh(details=False):
+    try:
+        state = cli("status", "--json", "--limit", "12", *(["--details"] if details else []))["result"]
+        if not isinstance(state, dict):
+            raise ValueError("invalid CLI status")
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        try:
+            state = json.loads(STATE.read_text())
+        except (OSError, ValueError):
+            state = {}
+        if not isinstance(state, dict):
+            state = {}
+        state.update({"reachable": False, "stale": True, "error": str(exc)[:180]})
+    try:
+        runs = cli("runs", "--json", "--limit", "12")["result"]
+        items = runs.get("runs") if isinstance(runs, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("invalid managed workflow list")
+        state["managedRuns"] = items[:12]
+        state["managedRunsOmitted"] = max(0, int(runs.get("total", len(items))) - len(state["managedRuns"]))
+        state.pop("managedRunsError", None)
+    except (OSError, RuntimeError, ValueError, KeyError, subprocess.TimeoutExpired) as exc:
+        state["managedRunsError"] = str(exc)[:180]
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", dir=STATE.parent, delete=False) as cache:
+        json.dump(state, cache, separators=(",", ":"))
+    os.replace(cache.name, STATE)
+    return state
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=("refresh", "setup", "set-home", "focus", "start", "run", "run-stop"), nargs="?", default="refresh")
+    parser.add_argument("args", nargs="*")
+    parser.add_argument("--details", action="store_true")
+    args = parser.parse_args()
+    if args.command == "setup":
+        cli("setup")
+        refresh(details=True)
+        return 0
+    if args.command == "set-home":
+        cli("workspace", "--home", "--discover")
+    if args.command == "focus":
+        if len(args.args) != 2:
+            parser.error("focus requires the exact agent name and pane id from the current dashboard")
+        cli("focus", *args.args)
+    if args.command == "start":
+        if len(args.args) != 3:
+            parser.error("start requires an agent name, working directory, and installed kind")
+        try:
+            prompt = json.loads(sys.stdin.readline(32769))
+        except (ValueError, TypeError):
+            raise RuntimeError("first instruction must be one JSON string line") from None
+        try:
+            prompt_size = len(prompt.encode("utf-8")) if isinstance(prompt, str) else 4097
+        except UnicodeEncodeError:
+            prompt_size = 4097
+        if prompt_size > 4096:
+            raise RuntimeError("first instruction must be a string of at most 4096 bytes")
+        cli("start", args.args[0], "--cwd", args.args[1], "--kind", args.args[2],
+            "--timeout", "15000", "--prompt-stdin", stdin_data=json.dumps(prompt) + "\n")
+        refresh(details=True)
+        return 0
+    if args.command == "run":
+        if len(args.args) != 4:
+            parser.error("run requires a name, working directory, priority, and memory-high value or empty string")
+        try:
+            request = json.loads(sys.stdin.readline(8193))
+            command_text = request.get("command") if isinstance(request, dict) else None
+            if not isinstance(command_text, str) or len(command_text.encode("utf-8")) > 4096:
+                raise ValueError
+            command = shlex.split(command_text)
+        except (ValueError, UnicodeEncodeError):
+            raise RuntimeError("command must be valid shell-style argv text up to 4096 bytes") from None
+        if not command or len(command) > 128:
+            raise RuntimeError("command must contain 1–128 arguments")
+        name, cwd, priority, memory_high = args.args
+        cli("run", name, "--cwd", cwd, "--priority", priority,
+            *( ["--memory-high", memory_high] if memory_high else [] ), "--", *command)
+        refresh(details=True)
+        return 0
+    if args.command == "run-stop":
+        if len(args.args) != 1:
+            parser.error("run-stop requires the exact managed unit from the dashboard")
+        cli("run-stop", args.args[0])
+        refresh(details=True)
+        return 0
+    state = refresh(args.details)
+    return 0 if state.get("reachable") and not state.get("stale") else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"agentglass-omarchy: {exc}", file=sys.stderr)
+        sys.exit(1)

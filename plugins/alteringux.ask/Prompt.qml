@@ -6,8 +6,10 @@ import qs.Commons
 import qs.Ui
 import "../alteringux.kit" as Kit
 import "RequestGeneration.js" as RequestGeneration
+import "../shared"
 
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var shell: null
@@ -27,10 +29,10 @@ Item {
   readonly property string piperBin: root.home + "/.local/bin/piper-tts"
   readonly property string ttsTag: "nanogpt-ask"
 
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
-  property color scrim: Color.menu.scrim
+  property color background: _webPalette.menuBackground
+  property color foreground: _webPalette.menuText
+  property color border: _webPalette.menuBorder
+  property color scrim: _webPalette.menuScrim
   property var borderSpec: Border.surfaceSpec("menu", "border", root.border, Math.max(1, Style.space(2)))
   readonly property int cornerRadius: Style.cornerRadius
   property int contentMargin: Style.spacing.panelPadding
@@ -244,7 +246,7 @@ Item {
             spacing: Style.spacing.md
 
             Text {
-              width: parent.width - statusText.width - parent.spacing
+              width: Math.max(0, parent.width - statusText.width - parent.spacing)
               anchors.verticalCenter: parent.verticalCenter
               text: "Ask NanoGPT"
               color: root.foreground
@@ -256,12 +258,22 @@ Item {
             Text {
               id: statusText
               anchors.verticalCenter: parent.verticalCenter
-              text: root.busy ? "Thinking…" : "Enter to ask  ·  Esc to close"
+              text: root.busy ? "Thinking…" : ""
               color: root.foreground
-              opacity: 0.55
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.bodySmall
             }
+          }
+
+          Text {
+            id: shortcutHint
+            width: parent.width
+            text: root.busy ? "Esc: cancel and close" : "Enter: ask  ·  Esc: close"
+            textFormat: Text.PlainText
+            wrapMode: Text.WordWrap
+            color: root.foreground
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.bodySmall
           }
 
           Rectangle {
@@ -270,9 +282,9 @@ Item {
             radius: root.cornerRadius
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
             border.width: 1
-            border.color: root.query.length > 0 ? Color.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+            border.color: root.query.length > 0 ? _webPalette.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
 
-            Text {
+            MarqueeText {
               anchors.left: parent.left
               anchors.right: parent.right
               anchors.verticalCenter: parent.verticalCenter
@@ -280,10 +292,9 @@ Item {
               anchors.rightMargin: Style.space(12)
               text: root.query || "Type a question…"
               color: root.foreground
-              opacity: root.query ? 1 : 0.5
-              font.family: Style.font.menuFamily
-              font.pixelSize: Style.font.body
-              elide: Text.ElideRight
+              textFont.family: Style.font.menuFamily
+              textFont.pixelSize: Style.font.body
+              requestedElide: Text.ElideRight
             }
           }
 
@@ -292,6 +303,22 @@ Item {
             width: parent.width
             height: root.voiceRowHeight
             spacing: Style.spacing.md
+            activeFocusOnTab: configStore.loaded
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: "Voice responses"
+            Accessible.checkable: true
+            Accessible.checked: root.voiceEnabled
+            Accessible.focusable: configStore.loaded
+            Accessible.onPressAction: toggleVoice()
+            Accessible.onToggleAction: toggleVoice()
+
+            function toggleVoice() {
+              if (configStore.loaded) root.setVoiceEnabled(!root.voiceEnabled)
+            }
+
+            Keys.onReturnPressed: toggleVoice()
+            Keys.onEnterPressed: toggleVoice()
+            Keys.onSpacePressed: toggleVoice()
 
             Text {
               anchors.verticalCenter: parent.verticalCenter
@@ -307,7 +334,9 @@ Item {
               height: Style.space(24)
               radius: height / 2
               anchors.verticalCenter: parent.verticalCenter
-              color: root.voiceEnabled ? Color.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+              color: root.voiceEnabled ? _webPalette.accent : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.18)
+              border.width: voiceRow.activeFocus ? Style.spacing.hairline : 0
+              border.color: _webPalette.accent
 
               Rectangle {
                 width: Style.space(18)
@@ -323,7 +352,6 @@ Item {
               anchors.verticalCenter: parent.verticalCenter
               text: root.voiceEnabled ? "On" : "Off"
               color: root.foreground
-              opacity: 0.65
               font.family: Style.font.menuFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -331,7 +359,7 @@ Item {
             MouseArea {
               anchors.fill: parent
               enabled: configStore.loaded
-              onClicked: root.setVoiceEnabled(!root.voiceEnabled)
+              onClicked: { voiceRow.forceActiveFocus(); voiceRow.toggleVoice() }
             }
           }
 
@@ -340,7 +368,7 @@ Item {
             width: parent.width
             visible: !!root.error
             text: root.error
-            color: Color.urgent
+            color: _webPalette.urgent
             wrapMode: Text.WordWrap
             font.family: Style.font.menuFamily
             font.pixelSize: Style.font.bodySmall
@@ -348,9 +376,9 @@ Item {
 
           Kit.PanelScroll {
             width: parent.width
-            height: parent.height - root.headerHeight - Style.space(42) - root.voiceRowHeight
-              - Style.spacing.panelGap * 3
-              - (root.error ? Style.font.bodySmall + Style.spacing.panelGap : 0)
+            height: Math.max(0, parent.height - root.headerHeight - Style.space(42) - root.voiceRowHeight
+              - shortcutHint.height - Style.spacing.panelGap * 4
+              - (root.error ? Style.font.bodySmall + Style.spacing.panelGap : 0))
             contentHeight: answerText.implicitHeight
             visible: !!root.answer
 

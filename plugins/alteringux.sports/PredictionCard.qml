@@ -9,18 +9,23 @@ import "Model.js" as Model
 // Prediction result card: predicted winner, confidence bar, and the four
 // factor rows from the predictor's breakdown.
 Rectangle {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   required property var prediction   // Model.parsePrediction() output
-  property color barForeground: Color.foreground
-  property color accentColor: Color.accent
+  property color barForeground: _webPalette.foreground
+  property color accentColor: _webPalette.accent
+  readonly property color textForeground: _webPalette.contrastColorFor(
+    root.barForeground, root.color, 4.5, Color.popups.background)
+  readonly property color textAccent: _webPalette.contrastColorFor(
+    root.accentColor, root.color, 4.5, Color.popups.background)
 
   Layout.preferredHeight: col.implicitHeight + Style.space(16)
   radius: Style.cornerRadius
   clip: true
-  color: Util.alpha(root.barForeground, 0.05)
+  color: _webPalette.cardBackgroundFor(root.barForeground)
   border.width: 1
-  border.color: Util.alpha(root.barForeground, 0.14)
+  border.color: _webPalette.cardBorderFor(root.barForeground)
 
   Column {
     id: col
@@ -36,7 +41,7 @@ Rectangle {
       text: (root.prediction && root.prediction.error) || ""
       width: parent.width
       wrapMode: Text.WordWrap
-      color: Kit.Palette.warning
+      color: _webPalette.contrastColorFor(_webPalette.warning, root.color, 4.5, Color.popups.background)
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -46,7 +51,7 @@ Rectangle {
       text: root.prediction && root.prediction.predictedWinner
         ? "Predicted winner: " + root.prediction.predictedWinner
         : ""
-      color: root.accentColor
+      color: root.textAccent
       font.family: Style.font.family
       font.pixelSize: Style.font.body
       font.bold: true
@@ -78,8 +83,7 @@ Rectangle {
         text: root.prediction && root.prediction.confidence !== null
           ? Math.round(root.prediction.confidence * 100) + "% confidence"
           : ""
-        color: root.barForeground
-        opacity: 0.55
+        color: root.textForeground
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
       }
@@ -100,15 +104,18 @@ Rectangle {
         Text {
           text: modelData.label
           width: parent.width - valText.width - parent.spacing
-          color: root.barForeground
-          opacity: 0.6
+          color: root.textForeground
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
         Text {
           id: valText
           text: modelData.value === null || modelData.value === undefined ? "n/a" : (modelData.value > 0 ? "+" : "") + modelData.value
-          color: modelData.value > 0 ? Kit.Palette.positive : (modelData.value < 0 ? Kit.Palette.negative : root.barForeground)
+          color: modelData.value > 0
+            ? _webPalette.contrastColorFor(_webPalette.positive, root.color, 4.5, Color.popups.background)
+            : (modelData.value < 0
+              ? _webPalette.contrastColorFor(_webPalette.negative, root.color, 4.5, Color.popups.background)
+              : root.textForeground)
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           font.bold: true
@@ -119,7 +126,7 @@ Rectangle {
     Text {
       visible: !!(root.prediction && root.prediction.predictedWinner)
       text: "Comparisons only — not betting advice."
-      color: Kit.Palette.faint
+      color: _webPalette.faint
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }

@@ -6,8 +6,10 @@ import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 import "../alteringux.kit" as Kit
+import "../shared"
 
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var shell: null
@@ -31,13 +33,13 @@ Item {
   // Self-improving suggestion: learns from starred/frequent words over time.
   property var dailySuggestion: null
 
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
+  property color background: _webPalette.menuBackground
+  property color foreground: _webPalette.menuText
+  property color border: _webPalette.menuBorder
   property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color scrim: Color.menu.scrim
-  property color selectedBackground: Color.menu.selectedBackground
-  property color selectedText: Color.menu.selectedText
+  property color scrim: _webPalette.menuScrim
+  property color selectedBackground: _webPalette.menuSelectedBackground
+  property color selectedText: _webPalette.menuSelectedText
   readonly property int cornerRadius: Style.cornerRadius
   property string fontFamily: Style.font.menuFamily
   property int contentMargin: Style.spacing.panelPadding
@@ -48,8 +50,8 @@ Item {
   property int rowHeight: Math.max(Style.space(56), Style.font.title + Style.spacing.controlPaddingY * 4)
 
   readonly property string keyHint: root.step === "overview"
-    ? "Esc: back"
-    : "↑↓: navigate  ·  Enter: select  ·  Esc: clear/close"
+    ? "Esc: back  ·  F1: help"
+    : "↑↓: navigate  ·  Enter: select  ·  Esc: clear/close  ·  F1: help"
 
   readonly property var guard: Kit.BugGuard.create("alteringux.dictionary", function(argv) { Quickshell.execDetached(argv) })
 
@@ -151,9 +153,10 @@ Item {
     if (!root.cursorActive) {
       root.cursorActive = true
       root.selectedIndex = delta < 0 ? suggestModel.count - 1 : 0
-      return
+    } else {
+      root.selectedIndex = (root.selectedIndex + delta + suggestModel.count) % suggestModel.count
     }
-    root.selectedIndex = (root.selectedIndex + delta + suggestModel.count) % suggestModel.count
+    resultList.positionViewAtIndex(root.selectedIndex, ListView.Contain)
   }
 
   function activateIndex(index) {
@@ -340,10 +343,20 @@ Item {
         id: keyCatcher
         anchors.fill: parent
         focus: true
+        readonly property var shortcutDescriptions: [
+          { keys: "F1", description: "Open recovery and keyboard shortcut help", context: "Dictionary" },
+          { keys: "Up / Down", description: "Move through word suggestions", context: "Dictionary · search" },
+          { keys: "Enter / Return", description: "Open the selected word, or look up the typed query when no suggestion is selected", context: "Dictionary · search" },
+          { keys: "Enter / Return / Space", description: "Look up the daily suggested word", context: "Dictionary · daily suggestion" },
+          { keys: "Escape", description: "Return to search from a word overview; in search, clear the query or close Dictionary when it is empty", context: "Dictionary" }
+        ]
 
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function(event) {
-          if (event.key === Qt.Key_Escape) {
+          if (event.key === Qt.Key_F1) {
+            shortcutHelp.show()
+            event.accepted = true
+          } else if (event.key === Qt.Key_Escape) {
             if (root.step === "overview") root.backToSearch()
             else if (root.filterText) root.setFilter("")
             else root.dismiss()
@@ -389,7 +402,7 @@ Item {
           radius: root.cornerRadius
           color: "transparent"
 
-          Text {
+          MarqueeText {
             id: headerTitle
             anchors.left: parent.left
             anchors.right: root.step === "overview" ? starToggle.left : headerHint.left
@@ -397,29 +410,27 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             text: root.step === "overview" ? ("← " + root.overviewWord) : (root.filterText || "Look up a word…")
             color: root.foreground
-            opacity: (root.step === "search" && !root.filterText) ? 0.58 : 1
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.heading
-            elide: Text.ElideRight
+            textFont.family: root.fontFamily
+            textFont.pixelSize: Style.font.heading
+            requestedElide: Text.ElideRight
           }
 
-          Text {
+          Kit.ActionButton {
             id: starToggle
             visible: root.step === "overview"
             anchors.right: headerHint.left
             anchors.rightMargin: Style.spacing.md
             anchors.verticalCenter: parent.verticalCenter
+            width: Style.spacing.controlHeight
+            height: Style.spacing.controlHeight
             text: root.overviewStarred ? "★" : "☆"
-            color: root.foreground
-            opacity: root.overviewStarred ? 1 : 0.5
-            font.pixelSize: Style.font.heading
-
-            MouseArea {
-              anchors.fill: parent
-              anchors.margins: -Style.spacing.sm
-              cursorShape: Qt.PointingHandCursor
-              onClicked: root.toggleStar()
-            }
+            focusable: true
+            Accessible.role: Accessible.CheckBox
+            Accessible.name: "Star " + root.overviewWord
+            Accessible.checked: root.overviewStarred
+            foreground: root.foreground
+            bordered: false
+            onClicked: root.toggleStar()
           }
 
           Text {
@@ -428,7 +439,6 @@ Item {
             anchors.verticalCenter: parent.verticalCenter
             text: root.keyHint
             color: root.foreground
-            opacity: 0.5
             font.family: root.fontFamily
             font.pixelSize: Style.font.bodySmall
           }
@@ -448,7 +458,12 @@ Item {
             spacing: Style.space(4)
             boundsBehavior: Flickable.StopAtBounds
 
-            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+            ScrollBar.vertical: ScrollBar {
+              policy: ScrollBar.AsNeeded
+              visible: size > 0 && size < 1
+              enabled: visible
+              interactive: visible
+            }
             Kit.WheelBoost { flick: resultList }
 
             delegate: Rectangle {
@@ -462,6 +477,11 @@ Item {
               height: root.rowHeight
               radius: root.cornerRadius
               color: hasCursor ? root.selectedBackground : "transparent"
+              Accessible.role: Accessible.Button
+              Accessible.name: word
+              Accessible.description: summary
+              Accessible.focusable: true
+              Accessible.onPressAction: root.selectWord(word)
 
               Column {
                 anchors.left: parent.left
@@ -470,22 +490,23 @@ Item {
                 anchors.margins: Style.spacing.controlPaddingY
                 spacing: Style.space(2)
 
-                Text {
+                MarqueeText {
                   text: word
+                  focusableOnOverflow: false
                   color: hasCursor ? root.selectedText : root.foreground
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                  font.bold: true
-                  elide: Text.ElideRight
+                  textFont.family: root.fontFamily
+                  textFont.pixelSize: Style.font.body
+                  textFont.bold: true
+                  requestedElide: Text.ElideRight
                   width: parent.width
                 }
-                Text {
+                MarqueeText {
                   text: summary
+                  focusableOnOverflow: false
                   color: hasCursor ? root.selectedText : root.foreground
-                  opacity: 0.7
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: root.fontFamily
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: parent.width
                 }
               }
@@ -516,28 +537,43 @@ Item {
 
           // Self-improving pick: a word related to what you've starred/looked
           // up before, suggested by claude and refreshed at most every 12h.
-          Column {
+          Rectangle {
+            id: dailySuggestionCard
             anchors.bottom: parent.bottom
             anchors.left: parent.left
             anchors.right: parent.right
             visible: !root.filterText && !!root.dailySuggestion
-            spacing: Style.space(2)
+            width: parent.width
+            height: suggestionContent.implicitHeight + Style.space(8)
+            radius: root.cornerRadius
+            color: "transparent"
+            border.width: activeFocus ? 1 : 0
+            border.color: _webPalette.accent
+            activeFocusOnTab: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Try word " + (root.dailySuggestion ? root.dailySuggestion.word : "")
+            Accessible.description: root.dailySuggestion ? root.dailySuggestion.note || "" : ""
+            Accessible.focusable: true
+            Accessible.onPressAction: if (root.dailySuggestion) root.selectWord(root.dailySuggestion.word)
+            Keys.onReturnPressed: { if (root.dailySuggestion) root.selectWord(root.dailySuggestion.word); event.accepted = true }
+            Keys.onEnterPressed: { if (root.dailySuggestion) root.selectWord(root.dailySuggestion.word); event.accepted = true }
+            Keys.onSpacePressed: { if (root.dailySuggestion) root.selectWord(root.dailySuggestion.word); event.accepted = true }
 
             MouseArea {
-              width: parent.width
-              height: suggestionWord.height + suggestionNote.height + Style.space(2)
+              anchors.fill: parent
               cursorShape: Qt.PointingHandCursor
-              onClicked: root.selectWord(root.dailySuggestion.word)
+              onClicked: { dailySuggestionCard.forceActiveFocus(); root.selectWord(root.dailySuggestion.word) }
 
               Column {
+                id: suggestionContent
                 anchors.fill: parent
+                anchors.margins: Style.space(4)
                 spacing: Style.space(2)
 
                 Text {
                   id: suggestionWord
                   text: "✦ Try: " + (root.dailySuggestion ? root.dailySuggestion.word : "")
                   color: root.foreground
-                  opacity: 0.75
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                   font.bold: true
@@ -548,7 +584,6 @@ Item {
                   text: root.dailySuggestion ? root.dailySuggestion.note || "" : ""
                   wrapMode: Text.WordWrap
                   color: root.foreground
-                  opacity: 0.55
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall
                 }
@@ -575,7 +610,6 @@ Item {
               text: (root.overviewData ? root.overviewData.pronunciation : "") +
                     (root.overviewData && root.overviewData.part_of_speech ? "  ·  " + root.overviewData.part_of_speech : "")
               color: root.foreground
-              opacity: 0.65
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -607,7 +641,6 @@ Item {
               visible: !!(root.overviewData && root.overviewData.examples && root.overviewData.examples.length)
               text: "Examples"
               color: root.foreground
-              opacity: 0.65
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.bold: true
@@ -632,7 +665,6 @@ Item {
               text: "Synonyms: " + (root.overviewData ? (root.overviewData.synonyms || []).join(", ") : "")
               wrapMode: Text.WordWrap
               color: root.foreground
-              opacity: 0.8
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -643,7 +675,6 @@ Item {
               text: "Etymology: " + (root.overviewData ? root.overviewData.etymology : "")
               wrapMode: Text.WordWrap
               color: root.foreground
-              opacity: 0.7
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
@@ -653,13 +684,17 @@ Item {
               visible: root.overviewLoading
               text: "Loading richer overview…"
               color: root.foreground
-              opacity: 0.5
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
           }
         }
       }
+    }
+
+    Kit.RecoveryHelp {
+      id: shortcutHelp
+      returnFocusItem: keyCatcher
     }
   }
 }

@@ -10,8 +10,10 @@ import qs.Commons
 
 import "components"
 import "NotificationLogic.js" as NotificationLogic
+import "../alteringux.kit" as Kit
 
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: service
 
   // Injected by omarchy-shell (the first-party service loader).
@@ -640,6 +642,20 @@ Item {
   // Set from the moment a read is queued until it starts, so a second
   // showHistory while one is still waiting its turn doesn't queue another.
   property bool historyReadQueued: false
+  // Only an explicit history request opens this keyboard owner. Incoming and
+  // restored notifications remain on the passive toast windows below.
+  property bool historyReaderOpen: false
+
+  function closeHistoryReader() {
+    service.historyReaderOpen = false
+  }
+
+  function focusHistoryControl(index) {
+    if (!service.historyReaderOpen) return
+    var card = historyCards.itemAt(Math.max(0, Math.min(index, historyCards.count - 1)))
+    var target = card && card.visible ? card : (historyHeader.closeControl || historyKeys)
+    target.forceActiveFocus()
+  }
 
   // Re-show what's in historyDir as toasts. The read goes through the file
   // queue and its own subprocess, so the replay lands in replayHistory once
@@ -729,6 +745,8 @@ Item {
     // The helper is idempotent: repeated empty replays keep one placeholder.
     if (rows.length === 0) {
       service.ensureEmptyHistoryPlaceholder()
+      service.historyReaderOpen = true
+      Qt.callLater(function() { service.focusHistoryControl(0) })
       return
     }
 
@@ -741,6 +759,8 @@ Item {
       service.restoredPopups[NotificationLogic.popupFileName(rows[i])] = true
       popupModel.append(rows[i])
     }
+    service.historyReaderOpen = true
+    Qt.callLater(function() { service.focusHistoryControl(0) })
   }
 
   Process {
@@ -976,6 +996,111 @@ Item {
     }
   }
 
+  // Deliberate history reading uses one keyboard owner. The same model and
+  // action functions preserve card actions; expiry pauses until it closes.
+  QtObject {
+    id: historyOwner
+    function close() { service.closeHistoryReader() }
+  }
+
+  Kit.KeyboardPanel {
+    id: historyPanel
+    anchorItem: null
+    bar: null
+    owner: historyOwner
+    screen: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
+    open: service.historyReaderOpen
+    contentWidth: historyPanel.fittedContentWidth(Style.space(420))
+    contentHeight: historyPanel.fittedContentHeight(historyColumn.implicitHeight, Style.space(640))
+    focusTarget: historyCards.count > 0 && historyCards.itemAt(0)
+      && historyCards.itemAt(0).visible ? historyCards.itemAt(0) : (historyHeader.closeControl || historyKeys)
+
+    Kit.PanelKeys {
+      id: historyKeys
+      anchors.fill: parent
+      visible: service.historyReaderOpen
+      enabled: visible
+      shortcutSource: "alteringux.notifications"
+      shortcutContext: "Notification history"
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Open the focused notification", context: "Notification card" },
+        { keys: "Delete", description: "Dismiss the focused notification", context: "Notification card" },
+        { keys: "F2", description: "Read the complete notification text", context: "Clipped notification card" }
+      ]
+      onCloseRequested: service.closeHistoryReader()
+
+      Kit.PanelScroll {
+        anchors.fill: parent
+        contentHeight: historyColumn.implicitHeight
+
+        Column {
+          id: historyColumn
+          width: parent.width
+          spacing: Style.space(8)
+
+          Kit.PanelHead {
+            id: historyHeader
+            property Item closeControl: null
+            title: "Notification history"
+            meta: "Enter: open · Delete: dismiss · Esc: close"
+            trailingControl: Component {
+              Kit.ActionButton {
+                text: "Close"
+                bordered: true
+                Accessible.name: "Close notification history"
+                Component.onCompleted: historyHeader.closeControl = this
+                onClicked: service.closeHistoryReader()
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: "No recent notifications"
+            textFormat: Text.PlainText
+            color: _webPalette.foreground
+            font.family: Style.font.menuFamily
+            font.pixelSize: Style.font.title
+            wrapMode: Text.Wrap
+            visible: popupModel.count === 0
+              || (popupModel.count === 1 && popupModel.get(0).originalId < 0)
+          }
+
+          Repeater {
+            id: historyCards
+            model: popupModel
+            delegate: NotificationCard {
+              required property int index
+              required property int originalId
+              required property var model
+              width: historyColumn.width
+              visible: originalId >= 0
+              app: model.app
+              appIcon: model.appIcon
+              summary: model.summary
+              body: model.body
+              image: model.image
+              glyph: model.glyph
+              urgency: model.urgency
+              timestamp: model.timestamp
+              cornerRadius: service.cornerRadius
+              fontFamily: service.shell && service.shell.bar ? service.shell.bar.fontFamily : ""
+              onCloseRequested: {
+                var nextIndex = index
+                service.dismissPopup(index)
+                Qt.callLater(function() { service.focusHistoryControl(nextIndex) })
+              }
+              onCardClicked: {
+                service.closeHistoryReader()
+                service.invokePopupDefault(index)
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   // -------------------------------------------------------------- popup UI
   //
   // One PanelWindow per output (Variants on Quickshell.screens) holding the
@@ -990,7 +1115,7 @@ Item {
       id: popupWindow
       required property var modelData
       screen: modelData
-      visible: popupModel.count > 0
+      visible: popupModel.count > 0 && !service.historyReaderOpen
 
       WlrLayershell.namespace: "omarchy-notifications"
       WlrLayershell.layer: WlrLayer.Overlay
@@ -1046,7 +1171,7 @@ Item {
 
             readonly property real lifetime: service.durationFor(cardSlot.urgency, cardSlot.expireTimeout)
             property real remainingLifetime: 1.0
-            readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered
+            readonly property bool ticking: cardSlot.lifetime > 0 && !card.hovered && !service.historyReaderOpen
 
             // A client updating this notification in place rewrites the row
             // under the card (see refreshPopup). New text deserves a full look,
@@ -1059,12 +1184,12 @@ Item {
             onImageChanged: cardSlot.remainingLifetime = 1.0
 
             Timer {
-              interval: 50
+              interval: 100
               repeat: true
               running: cardSlot.ticking
               onTriggered: {
                 if (cardSlot.lifetime <= 0) return
-                cardSlot.remainingLifetime -= 50.0 / cardSlot.lifetime
+                cardSlot.remainingLifetime -= 100.0 / cardSlot.lifetime
                 if (cardSlot.remainingLifetime <= 0) {
                   cardSlot.remainingLifetime = 0
                   service.expirePopup(cardSlot.index)
@@ -1085,6 +1210,7 @@ Item {
               cornerRadius: service.cornerRadius
               fontFamily: service.shell && service.shell.bar ? service.shell.bar.fontFamily : ""
               glyph: cardSlot.glyph
+              separateDetailsWindow: true
 
               onCloseRequested: service.dismissPopup(cardSlot.index)
               onCardClicked: service.invokePopupDefault(cardSlot.index)

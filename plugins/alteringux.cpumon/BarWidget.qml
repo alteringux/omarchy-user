@@ -11,6 +11,7 @@ import "../alteringux.kit" as Kit
 // sysmon widgets ticks a sampler; a flock in the CLI coalesces them to one
 // /proc read per tick, so any one widget present keeps the data fresh.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.cpumon"
 
@@ -51,6 +52,15 @@ BarWidget {
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-sysmon"
   readonly property int sampleIntervalMs: 4000
+  property string sampleError: ""
+  property bool sampleFailureAnnounced: false
+  signal sampleFeedback(string message)
+  function reportSampleFailure(message) {
+    root.sampleError = message
+    if (root.sampleFailureAnnounced) return
+    root.sampleFailureAnnounced = true
+    root.sampleFeedback(message)
+  }
 
   Kit.Store {
     id: stateStore
@@ -60,12 +70,32 @@ BarWidget {
     parse: function (raw) { return Model.parseState(raw) }
   }
 
-  Process { id: sampleProc; running: false; onExited: stateStore.reload() }
+  Process {
+    id: sampleProc
+    property bool started: false
+    property bool attempted: false
+    running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportSampleFailure("System sample unavailable. Check ~/.local/bin/omarchy-sysmon.")
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload()
+      started = false
+      attempted = false
+      if (code === 0 && status === 0) { root.sampleError = ""; root.sampleFailureAnnounced = false }
+      else root.reportSampleFailure("System sample failed (exit " + code + ").")
+    }
+  }
 
   function sampleNow() {
     guard.run("sampleNow", function () {
       // A busy sampleProc used to make this a silent no-op. If the CLI ever
-      // hung, or just overran one 2s tick, every future tick and every
+      // hung, or just overran one 4s tick, every future tick and every
       // middle-click sample request dropped forever, with the bar frozen on
       // whatever it last read. netwatch already fires a detached one-off in
       // that case, since the write to sysmon-state.json is the point, not
@@ -152,7 +182,7 @@ BarWidget {
     tooltipText: root.tooltipText
     dimmed: root.stale
     active: root.warn || root.crit
-    activeColor: root.crit ? Kit.Palette.negative : Kit.Palette.warning
+    activeColor: root.crit ? _webPalette.barNegative : _webPalette.barWarning
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

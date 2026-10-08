@@ -87,6 +87,7 @@ done
 RUN_BASE="${XDG_RUNTIME_DIR:-/tmp}/piper-tts"
 mkdir -p "$RUN_BASE" 2>/dev/null || true
 PGID_FILE="$RUN_BASE/$TAG.pgid"
+PAUSED_FILE="$RUN_BASE/$TAG.paused"
 LOCK_FILE="$RUN_BASE/queue.lock"     # shared across every tag: one voice at a time
 
 job_alive() {   # $1 = pgid ; true if any process in that group is alive
@@ -114,7 +115,10 @@ stop_job() {    # kill the recorded job group for this tag; 0 if something died
 
 # ----------------------------------------------------------------- stop / toggle
 if [[ "$MODE" == stop ]]; then
-  stop_job; exit $?
+  stop_job
+  stop_status=$?
+  rm -f "$PAUSED_FILE"
+  exit "$stop_status"
 fi
 if [[ "$MODE" == toggle ]]; then
   if stop_job; then exit 0; fi     # was running -> stopped -> done
@@ -204,7 +208,7 @@ cleanup() {
     _cur_g=$(sed -n 's/.*"pgid":[[:space:]]*\([0-9]\+\).*/\1/p' "$RUN_BASE/current.json" 2>/dev/null)
     if [[ "$_cur_g" == "$g" ]]; then
       rm -f "$RUN_BASE/current.json" "$RUN_BASE/current.played" \
-            "$RUN_BASE/paused" "$RUN_BASE/muted" 2>/dev/null || true
+            "$RUN_BASE/paused" "$RUN_BASE/muted" "$PAUSED_FILE" 2>/dev/null || true
     fi
   fi
   # We are the setsid session/group leader; reap any straggler worker or piper
@@ -376,8 +380,16 @@ play_raw() {   # $1 = path to a raw PCM file (may be a FIFO)
   "$PLAYER" "${RAWFLAGS[@]}" "${RATE_FLAG}${RATE}" "$1" 2>/dev/null
 }
 
+wait_unpaused() {
+  while [[ -e "$PAUSED_FILE" ]]; do
+    [[ -f "$WORK/pgid" ]] || return 1
+    sleep 0.05
+  done
+}
+
 # ----------------------------------------------------------------- chunk 0: streamed live
 if [[ $STREAM0 -eq 1 ]]; then
+  wait_unpaused || exit 0
   FIFO="$WORK/0000.fifo"
   mkfifo "$FIFO" 2>/dev/null
   ( "$PIPER" "${piper_args[@]}" < "$WORK/0000.txt" > "$FIFO" 2>/dev/null ) &
@@ -394,6 +406,7 @@ for ((i=START; i<N; i++)); do
     sleep 0.02
     [[ -f "$WORK/pgid" ]] || exit 0     # cleaned up / stopped
   done
+  wait_unpaused || exit 0
   printf '%s' "$i" > "$RUN_BASE/current.played" 2>/dev/null || true
   [[ -s "$WORK/$pad.raw" ]] && play_raw "$WORK/$pad.raw"
   rm -f "$WORK/$pad.raw" "$WORK/$pad.txt" "$WORK/$pad.done"

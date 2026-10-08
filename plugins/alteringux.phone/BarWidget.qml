@@ -18,6 +18,7 @@ import "../alteringux.kit" as Kit
 // config.json stays widget-owned here (ADR-0006 rule 4): the daemon reads and
 // seeds it, this widget is the only writer of user changes.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.phone"
 
@@ -45,8 +46,17 @@ BarWidget {
   // daemon's heartbeat writes.
   property int elapsedSeconds: 0
 
-  readonly property color barForeground: root.bar ? Color.bar.text : Color.foreground
+  readonly property color barForeground: root.bar ? _webPalette.barForeground : _webPalette.foreground
   readonly property var guard: Kit.BugGuard.create("alteringux.phone", function (argv) { Quickshell.execDetached(argv) })
+  property string actionStatus: ""
+  property bool actionFailed: false
+  property int actionGeneration: 0
+  signal actionFeedback(string message)
+  function reportActionStatus(message, failed) {
+    actionStatus = message
+    actionFailed = failed === true
+    actionFeedback(message)
+  }
 
   // installed piper voices — for the contact editor
   property var voices: []
@@ -125,16 +135,52 @@ BarWidget {
   // ---- the CLI ----------------------------------------------------
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: { callStore.reload(); runtimeStore.reload() }
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Phone helper unavailable. Check ~/.local/bin/omarchy-phone is installed and executable.", true)
+      }
+    }
+    onExited: function(code, status) {
+      callStore.reload(); runtimeStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation < 0 || generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Phone request accepted. Call state will confirm progress."
+        : "Phone request failed (exit " + code + "). Try again; check the Phone helper if it persists.", code !== 0 || status !== 0)
+    }
   }
 
-  function runVerb(args) {
+  function runVerb(args, feedback) {
     root.guard.run("runVerb:" + args.join(" "), function () {
-      var argv = [root.scriptPath].concat(args)
-      if (actionProc.running) { Quickshell.execDetached(argv); return }
-      actionProc.command = argv
-      actionProc.running = true
+      var report = feedback !== false
+      if (report) root.actionGeneration++
+      try {
+        var argv = [root.scriptPath].concat(args)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(argv)
+          if (report) root.reportActionStatus("Phone request sent. Completion cannot be confirmed while another request is running.", false)
+          return
+        }
+        actionProc.feedbackGeneration = report ? root.actionGeneration : -1
+        actionProc.feedbackStarted = false
+        actionProc.command = argv
+        if (report) {
+          root.actionFailed = false
+          root.actionStatus = "Working…"
+          root.actionFeedback(root.actionStatus)
+        }
+        actionProc.running = true
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        if (report) root.reportActionStatus("Phone request could not be sent. Try again; check the helper if it persists.", true)
+        throw error
+      }
     })
   }
 
@@ -152,11 +198,33 @@ BarWidget {
   // ---- contact list -----------------------------------------------
   Process {
     id: contactsProc
+    property bool started: false
+    property bool attempted: false
     command: [root.scriptPath, "contacts"]
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportActionStatus("Contacts unavailable. Check ~/.local/bin/omarchy-phone.", true)
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportActionStatus("Contacts could not be loaded (exit " + code + ").", true)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.guard.run("contacts", function () {
-        try { root.contacts = JSON.parse(text) || [] } catch (e) { root.contacts = [] }
+        try {
+          var data = JSON.parse(text || "[]")
+          if (!Array.isArray(data)) throw new Error("expected contact list")
+          root.contacts = data
+        } catch (e) {
+          root.contacts = []
+          root.reportActionStatus("Contacts could not be read. Check the Phone helper and try again.", true)
+        }
       })
     }
   }
@@ -164,30 +232,126 @@ BarWidget {
 
   Process {
     id: voicesProc
+    property bool started: false
+    property bool attempted: false
     command: [root.scriptPath, "voices"]
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportActionStatus("Voice list unavailable. Check ~/.local/bin/omarchy-phone.", true)
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportActionStatus("Voice list could not be loaded (exit " + code + ").", true)
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.guard.run("voices", function () {
-        try { root.voices = (JSON.parse(text) || {}).voices || [] } catch (e) { root.voices = [] }
+        try {
+          var data = JSON.parse(text || "{}")
+          if (!data || !Array.isArray(data.voices)) throw new Error("expected voice list")
+          root.voices = data.voices
+        } catch (e) {
+          root.voices = []
+          root.reportActionStatus("Voice list could not be read. Check the Phone helper and try again.", true)
+        }
       })
     }
   }
   function refreshVoices() { if (!voicesProc.running) voicesProc.running = true }
 
   // Save a contact object (the panel builds it). stdin JSON -> contact-save.
-  Process { id: saveProc; running: false; onExited: root.refreshContacts() }
+  Process {
+    id: saveProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
+    running: false
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Contact save unavailable. Check that ~/.local/bin/omarchy-phone can write its contact store.", true)
+      }
+    }
+    onExited: function(code, status) {
+      root.refreshContacts()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Contact save command completed."
+        : "Contact save failed (exit " + code + "). Check the Phone helper and try again.", code !== 0 || status !== 0)
+    }
+  }
   function saveContact(obj) {
     root.guard.run("saveContact", function () {
-      saveProc.command = ["bash", "-lc",
-        "printf '%s' " + shellQuote(JSON.stringify(obj)) + " | " + shellQuote(root.scriptPath) + " contact-save"]
-      saveProc.running = true
+      root.actionGeneration++
+      try {
+        if (saveProc.running) {
+          root.reportActionStatus("A contact save is already running. Wait for it to finish before retrying.", true)
+          return
+        }
+        saveProc.feedbackGeneration = root.actionGeneration
+        saveProc.feedbackStarted = false
+        saveProc.command = ["bash", "-lc",
+          "printf '%s' " + shellQuote(JSON.stringify(obj)) + " | " + shellQuote(root.scriptPath) + " contact-save"]
+        root.actionFailed = false
+        root.actionStatus = "Saving contact…"
+        root.actionFeedback(root.actionStatus)
+        saveProc.running = true
+      } catch (error) {
+        saveProc.feedbackGeneration = -1
+        root.reportActionStatus("Contact save could not be started. Try again.", true)
+        throw error
+      }
     })
   }
-  Process { id: deleteProc; running: false; onExited: root.refreshContacts() }
+  Process {
+    id: deleteProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
+    running: false
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Contact delete unavailable. Check that ~/.local/bin/omarchy-phone can write its contact store.", true)
+      }
+    }
+    onExited: function(code, status) {
+      root.refreshContacts()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Contact delete command completed."
+        : "Contact delete failed (exit " + code + "). Check the Phone helper and try again.", code !== 0 || status !== 0)
+    }
+  }
   function deleteContact(id) {
     root.guard.run("deleteContact", function () {
-      deleteProc.command = [root.scriptPath, "contact-delete", id]
-      deleteProc.running = true
+      root.actionGeneration++
+      try {
+        if (deleteProc.running) {
+          root.reportActionStatus("A contact delete is already running. Wait for it to finish before retrying.", true)
+          return
+        }
+        deleteProc.feedbackGeneration = root.actionGeneration
+        deleteProc.feedbackStarted = false
+        deleteProc.command = [root.scriptPath, "contact-delete", id]
+        root.actionFailed = false
+        root.actionStatus = "Deleting contact…"
+        root.actionFeedback(root.actionStatus)
+        deleteProc.running = true
+      } catch (error) {
+        deleteProc.feedbackGeneration = -1
+        root.reportActionStatus("Contact delete could not be started. Try again.", true)
+        throw error
+      }
     })
   }
 
@@ -214,13 +378,14 @@ BarWidget {
     })
   }
 
+  onConfigLoadedChanged: {
+    if (root.configLoaded && root.config && root.config.incomingEnabled)
+      root.runVerb(["arm"], false)
+  }
+
   Component.onCompleted: {
     root.refreshContacts()
     root.refreshVoices()
-    // If incoming was left enabled, make sure the scheduler is armed.
-    Qt.callLater(function () {
-      if (root.configLoaded && root.config && root.config.incomingEnabled) root.runVerb(["arm"])
-    })
   }
 
   // ---- the call screen (real layer-shell window; exists only when wanted) --

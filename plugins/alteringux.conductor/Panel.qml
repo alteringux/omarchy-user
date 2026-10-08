@@ -5,11 +5,13 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The conductor's cockpit: pick a ritual to run (Focus / Morning / Wind-down
 // or your own), watch the active ritual march through its steps, and read the
 // combined live state of every other alteringux plugin in one place.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.conductor"
   ipcTarget: ""
@@ -61,7 +63,7 @@ Panel {
     onTriggered: if (hostWidget) hostWidget.refreshSnapshot()
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -71,11 +73,14 @@ Panel {
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(560)))
     focusTarget: taskField
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: root.inputFocused
 
       onCloseRequested: root.close()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Return / Space", description: "Run the focused ritual", context: "Conductor · control focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -93,6 +98,26 @@ Panel {
               ? (Model.ritualName(root.state) + "  ·  " + Model.phaseLabel(root.state))
               : "idle"
             foreground: root.barForeground
+          }
+          Text {
+            id: actionFeedbackText
+            width: content.width
+            visible: !!(root.hostWidget && root.hostWidget.actionStatus)
+            text: root.hostWidget ? root.hostWidget.actionStatus : ""
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onActionFeedback(message) {
+                if (root.opened && actionFeedbackText.visible) actionFeedbackText.Accessible.announce(message)
+              }
+            }
           }
 
           // ---- optional label carried into the next ritual you run -----
@@ -133,12 +158,24 @@ Panel {
               required property var modelData
 
               width: content.width
-              color: rmouse.containsMouse && !root.active
+              activeFocusOnTab: !root.active
+              Accessible.role: Accessible.Button
+              Accessible.name: "Run ritual " + modelData.label
+              Accessible.description: Model.ritualSubtitle(modelData)
+              Accessible.focusable: !root.active
+              Accessible.onPressAction: activate()
+              color: (rmouse.containsMouse || activeFocus) && !root.active
                 ? Util.alpha(root.barForeground, 0.10)
-                : Kit.Palette.cardBg
-              opacity: root.active ? 0.5 : 1.0
+                : _webPalette.cardBg
+              border.width: activeFocus ? 2 : 1
+              border.color: activeFocus ? _webPalette.accent : _webPalette.cardBorder
               foreground: root.barForeground
               body: rcol
+
+              function activate() { if (!root.active) root.runRitual(rcard.modelData.id) }
+              Keys.onReturnPressed: activate()
+              Keys.onEnterPressed: activate()
+              Keys.onSpacePressed: activate()
 
               Column {
                 id: rcol
@@ -155,7 +192,7 @@ Panel {
                 Text {
                   width: rcol.width
                   text: Model.ritualSubtitle(rcard.modelData)
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -167,7 +204,7 @@ Panel {
                   // Explanatory sentence, not a status tag: hint role per
                   // docs/adr/0005-panel-text-hierarchy.md, not a darkened
                   // foreground.
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
@@ -179,7 +216,7 @@ Panel {
                 hoverEnabled: true
                 enabled: !root.active
                 cursorShape: root.active ? Qt.ArrowCursor : Qt.PointingHandCursor
-                onClicked: root.runRitual(rcard.modelData.id)
+                onClicked: { rcard.forceActiveFocus(); rcard.activate() }
               }
             }
           }
@@ -198,7 +235,7 @@ Panel {
             visible: root.active
             width: content.width
             text: Model.progressText(root.state)
-            color: Color.accent
+            color: _webPalette.accent
             font.family: Style.font.family
             font.pixelSize: Style.font.bodySmall
             font.bold: true
@@ -208,7 +245,7 @@ Panel {
             visible: root.active && root.state.startedAt > 0
             width: content.width
             text: "Running " + Model.fmtMs(Math.max(0, root.nowMs - root.state.startedAt))
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -227,29 +264,33 @@ Panel {
 
                 Text {
                   text: Model.stepGlyph(modelData.status)
-                  color: modelData.status === "ok" ? Kit.Palette.positive
-                    : modelData.status === "failed" ? Kit.Palette.negative
-                    : modelData.status === "skipped" ? Kit.Palette.warning
-                    : Kit.Palette.faint
+                  color: modelData.status === "ok" ? _webPalette.positive
+                    : modelData.status === "failed" ? _webPalette.negative
+                    : modelData.status === "skipped" ? _webPalette.warning
+                    : _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   width: Style.space(14)
                   horizontalAlignment: Text.AlignHCenter
                 }
-                Text {
-                  width: parent.width - Style.space(14) - parent.spacing * 2 - whenTag.implicitWidth
-                  elide: Text.ElideRight
+                MarqueeText {
+                  width: Math.max(0, parent.width - Style.space(14) - parent.spacing * 2 - whenTag.width)
+                  requestedElide: Text.ElideRight
                   text: Model.stepText(modelData)
-                  color: modelData.status === "pending" ? Qt.darker(root.barForeground, 1.4) : root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
+                  color: modelData.status === "pending" ? _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground) : root.barForeground
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
                 }
-                Text {
+                MarqueeText {
                   id: whenTag
+                  visible: parent.width >= Style.space(14) + parent.spacing * 2 + Style.space(72) + Style.space(40)
+                  width: visible ? Math.min(implicitWidth, parent.width * 0.3,
+                    parent.width - Style.space(14) - parent.spacing * 2 - Style.space(72)) : 0
                   text: modelData.when
-                  color: Kit.Palette.faint
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
+                  requestedElide: Text.ElideRight
+                  color: _webPalette.faint
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.caption
                 }
               }
             }
@@ -260,20 +301,29 @@ Panel {
             width: content.width
             spacing: Style.space(8)
 
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: "Advance"
               foreground: root.barForeground
               bordered: true
               enabled: root.counts.pending > 0
               onClicked: if (hostWidget) hostWidget.advance()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: "Stop"
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.stopRitual()
             }
-            Button {
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
               text: "Abort"
               foreground: root.barForeground
               bordered: true
@@ -285,7 +335,7 @@ Panel {
             visible: !root.active && root.state.lastSummary && root.state.lastSummary.length > 0
             width: content.width
             text: "Last run: " + root.state.lastSummary
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -319,7 +369,7 @@ Panel {
 
                 Text {
                   text: modelData.label
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                   width: Style.space(84)
@@ -342,21 +392,16 @@ Panel {
             width: content.width
             spacing: Style.space(12)
 
-            Text {
+            Kit.ActionButton {
               text: "↻ Refresh cockpit"
-              color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              MouseArea {
-                anchors.fill: parent
-                anchors.margins: -6
-                cursorShape: Qt.PointingHandCursor
-                onClicked: if (hostWidget) hostWidget.refreshSnapshot()
-              }
+              foreground: _webPalette.accent
+              bordered: true
+              Accessible.name: "Refresh cockpit"
+              onClicked: if (hostWidget) hostWidget.refreshSnapshot()
             }
             Text {
               text: "Right-click widget: advance  ·  middle-click: stop  ·  Esc: close"
-              color: Qt.darker(root.barForeground, 1.4)
+              color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }

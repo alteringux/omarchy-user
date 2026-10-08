@@ -5,6 +5,7 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // The fullscreen breath guide: a transparent layer-shell window (the same
 // shape as deskpet's Pet.qml and the stock OSD) carrying one large orb that
@@ -22,6 +23,7 @@ import "../alteringux.kit" as Kit
 // result. Re-deriving either here is what would let the overlay and the
 // panel's compact guide drift out of step.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -34,7 +36,7 @@ Item {
   readonly property bool done: hostWidget ? hostWidget.done : false
   readonly property bool reduceMotion: root.config && root.config.reduceMotion === true
 
-  readonly property color tone: hostWidget ? hostWidget.toneColor : Kit.Palette.info
+  readonly property color tone: hostWidget ? hostWidget.toneColor : _webPalette.info
   readonly property real orbScale: root.live ? root.live.orbScale : Model.SCALE_MIN
 
   readonly property string phaseKind: root.live ? root.live.phaseKind : ""
@@ -85,7 +87,7 @@ Item {
     // light theme as well as a dark one, and faded rather than snapped.
     Rectangle {
       anchors.fill: parent
-      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 1)
+      color: Qt.rgba(_webPalette.background.r, _webPalette.background.g, _webPalette.background.b, 1)
       opacity: root.done ? Math.max(0, (root.config.overlayDim || 0.82) - 0.15)
                          : (root.config.overlayDim || 0.82)
       Behavior on opacity { NumberAnimation { duration: 420; easing.type: Easing.OutCubic } }
@@ -192,7 +194,7 @@ Item {
         radius: width / 2
         color: Qt.rgba(root.tone.r, root.tone.g, root.tone.b, root.paused ? 0.10 : 0.22)
         border.width: Math.max(1.5, win.shortSide * 0.0022)
-        border.color: root.paused ? Kit.Palette.faint : root.tone
+        border.color: root.paused ? _webPalette.faint : root.tone
 
         // No Behavior on width: orbScale is already recomputed every frame
         // from the shared resolve, so animating it again would lag the breath
@@ -272,7 +274,7 @@ Item {
 
           // Whole-session progress, deliberately thinner and further out so
           // it never competes with the phase ring for attention.
-          var fg = Color.foreground
+          var fg = _webPalette.foreground
           ctx.lineWidth = Math.max(1, win.shortSide * 0.0018)
           ctx.strokeStyle = Qt.rgba(fg.r, fg.g, fg.b, 0.12)
           ctx.beginPath(); ctx.arc(cx, cy, outer, 0, Math.PI * 2); ctx.stroke()
@@ -293,15 +295,15 @@ Item {
         spacing: Style.space(6)
         width: win.orbMax * 1.9
 
-        Text {
+        MarqueeText {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
           text: root.live ? root.live.phaseLabel : ""
-          color: Color.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.display
-          font.bold: true
-          elide: Text.ElideRight
+          color: _webPalette.foreground
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.display
+          textFont.bold: true
+          requestedElide: Text.ElideRight
         }
 
         // The count. A hold counts UP, everything else counts down — during a
@@ -328,8 +330,7 @@ Item {
           visible: root.isPowerBreaths && root.live && root.live.breathCount
           text: root.live && root.live.breathCount
             ? "breath " + (root.live.breathIndex + 1) + " of " + root.live.breathCount : ""
-          color: Color.foreground
-          opacity: 0.75
+          color: _webPalette.foreground
           font.family: Style.font.family
           font.pixelSize: Style.font.subtitle
         }
@@ -349,24 +350,24 @@ Item {
 
         Item { width: 1; height: Style.space(4) }
 
-        Text {
+        MarqueeText {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
           text: root.technique
             ? root.technique.name + " · " + root.technique.pattern
             : ""
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          font.letterSpacing: 1.2
-          elide: Text.ElideRight
+          color: _webPalette.faint
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.caption
+          textFont.letterSpacing: 1.2
+          requestedElide: Text.ElideRight
         }
 
         Text {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
           text: root.live ? ("cycle " + (root.live.cycleIndex + 1) + " of " + root.live.cycleCount) : ""
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -382,7 +383,7 @@ Item {
       anchors.topMargin: Style.space(18)
       visible: root.paused && !root.done
       text: "Paused"
-      color: Kit.Palette.warning
+      color: _webPalette.warning
       font.family: Style.font.family
       font.pixelSize: Style.font.title
       font.bold: true
@@ -399,9 +400,9 @@ Item {
       width: Math.min(parent.width - Style.space(64), Style.space(560))
       height: warningText.implicitHeight + Style.space(24)
       radius: Style.cornerRadius
-      color: Kit.Palette.cardBg
+      color: _webPalette.cardBg
       border.width: 1
-      border.color: Kit.Palette.warning
+      border.color: _webPalette.warning
       opacity: 0.95
 
       Text {
@@ -410,7 +411,7 @@ Item {
         width: parent.width - Style.space(24)
         horizontalAlignment: Text.AlignHCenter
         text: root.technique && root.technique.warning ? root.technique.warning : ""
-        color: Color.foreground
+        color: _webPalette.foreground
         wrapMode: Text.WordWrap
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
@@ -431,14 +432,14 @@ Item {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: Model.PLUGIN_GLYPH
-        color: Kit.Palette.positive
+        color: _webPalette.positive
         font.family: Style.font.family
         font.pixelSize: Style.font.displayLarge
       }
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: root.technique ? root.technique.name + " complete" : "Complete"
-        color: Color.foreground
+        color: _webPalette.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.title
         font.bold: true
@@ -450,7 +451,7 @@ Item {
           var cycles = root.live.cycleCount
           return cycles + " cycles · " + Model.formatDuration(Math.round(root.live.sessionElapsedMs / 1000))
         }
-        color: Kit.Palette.faint
+        color: _webPalette.faint
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         font.letterSpacing: 1.2
@@ -460,7 +461,7 @@ Item {
         readonly property int streak: root.hostWidget ? Model.streakOf(root.hostWidget.stats).current : 0
         visible: streak > 0
         text: streak + (streak === 1 ? " day streak" : " day streak")
-        color: Kit.Palette.positive
+        color: _webPalette.positive
         font.family: Style.font.family
         font.pixelSize: Style.font.bodySmall
       }
@@ -492,20 +493,31 @@ Item {
         Rectangle {
           id: skipCtl
           visible: root.running && root.isHold
+          activeFocusOnTab: visible
+          Accessible.role: Accessible.Button
+          Accessible.name: "Skip current breath hold"
+          Accessible.focusable: visible
+          Accessible.onPressAction: activate()
           implicitWidth: skipLabel.implicitWidth + Style.space(20)
-          implicitHeight: skipLabel.implicitHeight + Style.space(10)
+          implicitHeight: Math.max(Style.spacing.controlHeight, skipLabel.implicitHeight + Style.space(10))
           radius: height / 2
           color: skipMouse.containsMouse
             ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.18) : "transparent"
           border.width: 1
-          border.color: Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4)
+          border.color: activeFocus ? _webPalette.accent : Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4)
+
+          function activate() {
+            if (root.running && root.isHold) root.act("skip", function () { root.hostWidget.skipHold() })
+          }
+          Keys.onReturnPressed: activate()
+          Keys.onEnterPressed: activate()
+          Keys.onSpacePressed: activate()
 
           Text {
             id: skipLabel
             anchors.centerIn: parent
             text: "Skip hold  →"
-            color: Color.foreground
-            opacity: 0.85
+            color: _webPalette.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -515,15 +527,23 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.act("skip", function () { root.hostWidget.skipHold() })
+            onClicked: { skipCtl.forceActiveFocus(); skipCtl.activate() }
           }
         }
 
         // Loop — flips the session in flight, not the saved default.
         Rectangle {
           id: loopCtl
+          activeFocusOnTab: true
+          Accessible.role: Accessible.CheckBox
+          Accessible.name: "Loop breathing session"
+          Accessible.checkable: true
+          Accessible.checked: root.looping
+          Accessible.focusable: true
+          Accessible.onPressAction: activate()
+          Accessible.onToggleAction: activate()
           implicitWidth: loopLabel.implicitWidth + Style.space(20)
-          implicitHeight: loopLabel.implicitHeight + Style.space(10)
+          implicitHeight: Math.max(Style.spacing.controlHeight, loopLabel.implicitHeight + Style.space(10))
           radius: height / 2
           color: root.looping
             ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.22)
@@ -531,14 +551,18 @@ Item {
                ? Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.12) : "transparent")
           border.width: 1
           border.color: root.looping
-            ? root.tone : Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4)
+            ? root.tone : (activeFocus ? _webPalette.accent : Qt.rgba(root.tone.r, root.tone.g, root.tone.b, 0.4))
+
+          function activate() { root.act("loop", function () { root.hostWidget.toggleSessionLoop() }) }
+          Keys.onReturnPressed: activate()
+          Keys.onEnterPressed: activate()
+          Keys.onSpacePressed: activate()
 
           Text {
             id: loopLabel
             anchors.centerIn: parent
             text: root.looping ? "↻  Looping" : "↻  Loop"
-            color: Color.foreground
-            opacity: root.looping ? 1 : 0.85
+            color: _webPalette.foreground
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -548,7 +572,7 @@ Item {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: root.act("loop", function () { root.hostWidget.toggleSessionLoop() })
+            onClicked: { loopCtl.forceActiveFocus(); loopCtl.activate() }
           }
         }
       }
@@ -556,10 +580,9 @@ Item {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: (root.running && root.isHold ? "→ skip · " : "") + "L loop · Space pause · Esc hide"
-        color: Kit.Palette.faint
+        color: _webPalette.faint
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
-        opacity: 0.7
       }
     }
   }

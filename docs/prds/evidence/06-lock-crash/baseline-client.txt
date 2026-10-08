@@ -1,0 +1,23 @@
+
+This GDB supports auto-downloading debuginfo from the following URLs:
+  <https://debuginfod.archlinux.org>
+Enable debuginfod for this session? (y or [n]) [answered N; input not from terminal]
+Debuginfod has been disabled.
+To make this setting permanent, add 'set debuginfod enabled off' to .gdbinit.
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/usr/lib/libthread_db.so.1".
+[New Thread 0x7fffeffff6c0 (LWP 14)]
+  INFO: Launching config: "/tmp/qs-lock-regression-q_nnyou1/probe.qml"
+  INFO: Shell ID: "c9ffb76e80bdf82a4927e1ccbab33290" Path ID "c9ffb76e80bdf82a4927e1ccbab33290"
+  INFO: Crash handling disabled.
+  INFO: Saving logs to "/tmp/qs-lock-regression-q_nnyou1/runtime/quickshell/by-id/bht1lmt/log.qslog"
+[New Thread 0x7fffef1ff6c0 (LWP 15)]
+[New Thread 0x7fffee3ff6c0 (LWP 16)]
+[New Thread 0x7fffedbfe6c0 (LWP 17)]
+[New Thread 0x7fffeadff6c0 (LWP 18)]
+  INFO: Configuration Loaded
+ DEBUG qml: HOLDER_SECURE
+ FATAL: Tried to show lockscreen surfaces without active lock
+
+Thread 1 "quickshell" received signal SIGABRT, Aborted.
+0x00007ffff449a17c in ?? () from /usr/bin/../lib/libc.so.6

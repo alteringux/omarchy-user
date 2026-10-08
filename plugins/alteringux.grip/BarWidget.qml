@@ -15,11 +15,21 @@ import "../alteringux.kit" as Kit
 // takeover. The widget watches those files, renders the current prompt through
 // Prompt.qml, and turns every user action back into an omarchy-grip verb.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.grip"
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-grip"
   readonly property var guard: Kit.BugGuard.create("alteringux.grip", function (argv) { Quickshell.execDetached(argv) })
+  property string actionStatus: ""
+  property bool actionFailed: false
+  property int actionGeneration: 0
+  signal actionFeedback(string message)
+  function reportActionStatus(message, failed) {
+    actionStatus = message
+    actionFailed = failed === true
+    actionFeedback(message)
+  }
 
   // Per-plugin usage analytics — every user action is recorded so the panel
   // can reorder its nudge buttons toward what this user actually reaches for.
@@ -72,23 +82,57 @@ BarWidget {
 
   readonly property color displayColor: {
     var s = root.summary
-    if (s.tone === "prompt") return Kit.Palette.urgent
-    if (s.tone === "overdue") return Kit.Palette.negative
-    if (s.tone === "paused" || s.tone === "off") return Kit.Palette.faint
-    return root.bar ? Color.bar.text : "#ffffff"
+    if (s.tone === "prompt") return _webPalette.barUrgent
+    if (s.tone === "overdue") return _webPalette.barNegative
+    if (s.tone === "paused" || s.tone === "off") return _webPalette.barMuted
+    return root.bar ? _webPalette.barForeground : _webPalette.foreground
   }
 
   // ---- the CLI bridge -----------------------------------------------
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: { stateStore.reload(); tasksStore.reload() }
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Grip helper unavailable. Check ~/.local/bin/omarchy-grip is installed and executable.", true)
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload(); tasksStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Grip command completed."
+        : "Grip command failed (exit " + code + "). Try again; check the Grip helper if it persists.", code !== 0 || status !== 0)
+    }
   }
   function runVerb(args) {
     guard.run("runVerb:" + args.join(" "), function () {
-      if (actionProc.running) { Quickshell.execDetached([root.scriptPath].concat(args)); return }
-      actionProc.command = [root.scriptPath].concat(args)
-      actionProc.running = true
+      root.actionGeneration++
+      try {
+        var cmd = [root.scriptPath].concat(args)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(cmd)
+          root.reportActionStatus("Request sent. Completion cannot be confirmed while another Grip command is running.", false)
+          return
+        }
+        actionProc.feedbackGeneration = root.actionGeneration
+        actionProc.feedbackStarted = false
+        actionProc.command = cmd
+        root.actionFailed = false
+        root.actionStatus = "Working…"
+        root.actionFeedback(root.actionStatus)
+        actionProc.running = true
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        root.reportActionStatus("Grip request could not be sent. Try again; check the Grip helper if it persists.", true)
+        throw error
+      }
     })
   }
 

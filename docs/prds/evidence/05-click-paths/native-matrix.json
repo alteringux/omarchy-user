@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "records": [
+    {
+      "plugin": "alteringux.kit",
+      "case": "attached_action_availability",
+      "revision": "ac58d89 + current working-tree probes",
+      "environment": "Qt 6.11.2 / installed Quickshell; offscreen, no window",
+      "input": "Accessible.pressAction enabled, disabled, hidden",
+      "expected": "one invocation; unavailable controls inert",
+      "observed": {
+        "checks": [
+          true,
+          true,
+          true,
+          true
+        ],
+        "invocations": 1
+      },
+      "status": "local-pass",
+      "evidence": [],
+      "scope": "Qt attached signal only; external AT-SPI is open"
+    },
+    {
+      "plugin": "alteringux.kit",
+      "case": "reader_geometry",
+      "revision": "ac58d89 + current working-tree probes; shared reader source unchanged",
+      "environment": "Qt 6.11.2 / installed Quickshell, private Sway/pixman 800x600, floating owner windows",
+      "input": "QML open/close at actual owner widths 340/340/640 with 16/32/32 px font",
+      "expected": "actual requested widths; popup/content/control geometry and close state pass",
+      "observed": "three cases, eight checks each passed",
+      "status": "geometry-pass",
+      "evidence": [
+        "docs/prds/evidence/05-click-paths/reader-layout-result.json"
+      ],
+      "scope": "Geometry only; no screenshot, native keyboard or AT-SPI verdict"
+    },
+    {
+      "plugin": "alteringux.skilldashboard",
+      "case": "palette_bindings",
+      "revision": "ac58d89 + current Panel.qml fix",
+      "environment": "Installed Quickshell / Qt 6.11.2 offscreen",
+      "input": "Evaluate all eight current palette role references",
+      "expected": "defined color values from a palette instance",
+      "observed": "eight undefined values before; eight valid colors after",
+      "status": "local-pass",
+      "evidence": [
+        "docs/prds/evidence/05-click-paths/skilldashboard-regressions.json"
+      ],
+      "scope": "Expression binding regression; full native lifecycle and rendered review remain open"
+    }
+  ]
+}

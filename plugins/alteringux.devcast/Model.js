@@ -386,7 +386,7 @@ function parseTranscript(text, options) {
   if (!meta.title) {
     var firstPrompt = raw.find(function (s) { return s.kind === "prompt" && s.text })
     if (firstPrompt) {
-      meta.title = firstPrompt.text.split("\n")[0].replace(/^\/\S+\s*/, "").slice(0, 64).trim()
+      meta.title = firstPrompt.text.split("\n")[0].replace(/^\/\S+\s*/, "").trim()
     }
     if (!meta.title) meta.title = "session"
   }

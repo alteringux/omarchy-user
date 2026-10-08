@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+# omarchy-wifi-vpn — bring Wi-Fi up (and wait for a real link) BEFORE starting
+# Proton VPN, or tear both down, in the right order.
+#
+# Networking is opt-in per session: hypr/autostart.lua re-asserts
+# `nmcli radio wifi off` on every login. This is the on-demand "go online"
+# button that pairs with it.
+#
+#   omarchy-wifi-vpn up        radio on -> wait for wifi:connected -> protonvpn-rotate connect
+#   omarchy-wifi-vpn down      protonvpn-rotate disconnect -> radio off
+#   omarchy-wifi-vpn toggle    down if the radio is on, up if it is off   (default)
+#   omarchy-wifi-vpn status    print radio + wifi-link + a one-line VPN status
+#
+# Options:
+#   --timeout <sec>   how long `up` waits for the wifi link to associate (default 45)
+#   --no-vpn          `up` stops once wifi is linked; does not touch the VPN
+#   --dry-run         print the steps, change nothing
+#   --quiet           no desktop notifications (still prints to stdout)
+#
+# Exit: 0 ok, 1 wifi never came up (or a step failed), 2 bad usage.
+
+set -uo pipefail
+
+ROTATE_BIN="${PROTONVPN_ROTATE_BIN:-$HOME/.local/bin/protonvpn-rotate}"
+VPN_TIMEOUT="${OMARCHY_WIFI_VPN_CLI_TIMEOUT:-90}"   # cap on a single protonvpn-rotate call
+TIMEOUT=45
+DO_VPN=1
+DRY=0
+QUIET=0
+ACTION=""
+
+die() { printf 'omarchy-wifi-vpn: %s\n' "$1" >&2; exit "${2:-2}"; }
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    up|down|toggle|status) ACTION="$1" ;;
+    --timeout) shift; TIMEOUT="${1:-}"; [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout needs a number"; ;;
+    --timeout=*) TIMEOUT="${1#*=}"; [[ "$TIMEOUT" =~ ^[0-9]+$ ]] || die "--timeout needs a number"; ;;
+    --no-vpn) DO_VPN=0 ;;
+    --dry-run) DRY=1 ;;
+    --quiet) QUIET=1 ;;
+    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *) die "unknown argument: $1" ;;
+  esac
+  shift
+done
+[ -n "$ACTION" ] || ACTION="toggle"
+
+note() {
+  printf '%s\n' "$1"
+  [ "$QUIET" = 1 ] && return 0
+  command -v notify-send >/dev/null 2>&1 && \
+    notify-send -a "Wi-Fi + VPN" -i network-wireless "${2:-Wi-Fi + VPN}" "$1" 2>/dev/null || true
+}
+
+run() {
+  if [ "$DRY" = 1 ]; then printf '  [dry-run] %s\n' "$*"; return 0; fi
+  "$@"
+}
+
+radio_on()  { [ "$(nmcli -t -f WIFI radio 2>/dev/null)" = enabled ]; }
+
+# echoes: connected | connecting | disconnected | unavailable | unknown
+wifi_link_state() {
+  local out line st best="" rank=0 r
+  out="$(nmcli -t -f TYPE,STATE dev 2>/dev/null)" || return 0
+  while IFS= read -r line; do
+    case "$line" in
+      wifi:*) ;;
+      *) continue ;;
+    esac
+    st="${line#wifi:}"
+    case "$st" in
+      connected)        r=4 ;;
+      connecting*|config|ip-config|ip-check|prepare|need-auth) r=3; st=connecting ;;
+      disconnected)     r=2 ;;
+      unavailable)      r=1 ;;
+      *)                r=1; st=unavailable ;;
+    esac
+    if [ "$r" -gt "$rank" ]; then rank=$r; best=$st; fi
+  done <<EOF
+$out
+EOF
+  printf '%s' "${best:-unknown}"
+}
+
+current_ssid() { nmcli -t -f ACTIVE,SSID dev wifi 2>/dev/null | sed -n 's/^yes://p' | head -n1; }
+
+vpn_status_line() {
+  [ -x "$ROTATE_BIN" ] || { echo "protonvpn-rotate not found"; return; }
+  "$ROTATE_BIN" status 2>/dev/null | head -n1
+}
+
+do_up() {
+  if radio_on; then
+    note "Wi-Fi radio already on." "Wi-Fi + VPN"
+  else
+    note "Turning Wi-Fi on…" "Wi-Fi + VPN"
+    run nmcli radio wifi on || die "could not enable the Wi-Fi radio" 1
+  fi
+
+  # Wait for a real association. NetworkManager auto-connects to a known AP;
+  # we just poll until it lands (or give up).
+  local waited=0 state
+  while :; do
+    state="$(wifi_link_state)"
+    [ "$state" = connected ] && break
+    if [ "$DRY" = 1 ]; then
+      printf '  [dry-run] would wait up to %ss for wifi:connected (now: %s)\n' "$TIMEOUT" "$state"
+      break
+    fi
+    if [ "$waited" -ge "$TIMEOUT" ]; then
+      note "Wi-Fi did not connect within ${TIMEOUT}s (state: ${state}). Left the radio on — pick a network, then run this again." "Wi-Fi + VPN"
+      exit 1
+    fi
+    sleep 2; waited=$((waited + 2))
+  done
+
+  local ssid; ssid="$(current_ssid)"
+  if [ "$DO_VPN" = 0 ]; then
+    note "Wi-Fi up${ssid:+ (${ssid})}. Leaving the VPN alone (--no-vpn)." "Wi-Fi + VPN"
+    return 0
+  fi
+
+  [ -x "$ROTATE_BIN" ] || die "protonvpn-rotate not found at $ROTATE_BIN" 1
+  note "Wi-Fi up${ssid:+ (${ssid})}. Connecting Proton VPN…" "Wi-Fi + VPN"
+  local out rc
+  if [ "$DRY" = 1 ]; then
+    printf '  [dry-run] %s connect\n' "$ROTATE_BIN"; return 0
+  fi
+  out="$(timeout "$VPN_TIMEOUT" "$ROTATE_BIN" connect 2>&1)"; rc=$?
+  if [ "$rc" -eq 0 ]; then
+    note "Proton VPN: ${out:-connected}" "Wi-Fi + VPN"
+  elif [ "$rc" -eq 124 ]; then
+    note "Proton VPN still connecting after ${VPN_TIMEOUT}s — the CLI is slow. Wi-Fi is up; check the shield or run 'protonvpn-rotate connect' again." "Wi-Fi + VPN"
+    exit 1
+  else
+    note "Proton VPN connect failed (rc=$rc): ${out:-see protonvpn-rotate}" "Wi-Fi + VPN"
+    exit 1
+  fi
+}
+
+do_down() {
+  if [ -x "$ROTATE_BIN" ]; then
+    note "Disconnecting Proton VPN…" "Wi-Fi + VPN"
+    if [ "$DRY" = 1 ]; then
+      printf '  [dry-run] timeout %s %s disconnect\n' "$VPN_TIMEOUT" "$ROTATE_BIN"
+    else
+      timeout "$VPN_TIMEOUT" "$ROTATE_BIN" disconnect >/dev/null 2>&1 || \
+        note "Proton VPN disconnect was slow/failed — turning Wi-Fi off anyway; the tunnel dies with the link." "Wi-Fi + VPN"
+    fi
+  fi
+  note "Turning Wi-Fi off." "Wi-Fi + VPN"
+  run nmcli radio wifi off || die "could not disable the Wi-Fi radio" 1
+}
+
+case "$ACTION" in
+  up)   do_up ;;
+  down) do_down ;;
+  toggle)
+    if radio_on; then do_down; else do_up; fi
+    ;;
+  status)
+    printf 'radio:     %s\n' "$(nmcli -t -f WIFI radio 2>/dev/null || echo '?')"
+    printf 'wifi link: %s%s\n' "$(wifi_link_state)" "$( s=$(current_ssid); [ -n "$s" ] && printf ' (%s)' "$s" )"
+    printf 'vpn:       %s\n' "$(vpn_status_line)"
+    ;;
+esac

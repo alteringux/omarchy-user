@@ -91,20 +91,62 @@ BarWidget {
   // ---- the CLI that owns every write to timers.json / timers-history.json
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-timers"
 
+  property string actionStatus: ""
+  property int actionGeneration: 0
+  readonly property bool actionPending: actionProc.feedbackGeneration === actionGeneration && actionProc.feedbackGeneration >= 0
+  signal actionFeedback(string message, int generation, bool success)
+  function reportActionStatus(message, success) {
+    actionStatus = message
+    actionFeedback(message, actionGeneration, success)
+  }
+
   Process {
     id: actionProc
+    property int feedbackGeneration: -1
+    property bool feedbackStarted: false
     running: false
-    onExited: { stateStore.reload(); historyStore.reload() }
+    onStarted: feedbackStarted = true
+    onRunningChanged: {
+      // Quickshell emits runningChanged(false), without exited, on launch failure.
+      if (!running && !feedbackStarted && feedbackGeneration === root.actionGeneration) {
+        feedbackGeneration = -1
+        root.reportActionStatus("Timer helper unavailable. Check ~/.local/bin/omarchy-timers is installed and executable, then try again.", false)
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload(); historyStore.reload()
+      var generation = feedbackGeneration
+      feedbackGeneration = -1
+      if (generation !== root.actionGeneration) return
+      root.reportActionStatus(code === 0 && status === 0
+        ? "Timer request completed."
+        : "Timer request failed (exit " + code + "). Try again; check that ~/.local/state/omarchy is writable.", code === 0 && status === 0)
+    }
   }
 
   // Run one omarchy-timers verb (argv after the script path). Serialised
   // through actionProc; a verb fired mid-run falls back to execDetached.
   function runVerb(argv) {
-    guard.run("runVerb:" + argv[0], function() {
-      var cmd = [root.scriptPath].concat(argv)
-      if (actionProc.running) { Quickshell.execDetached(cmd); return }
-      actionProc.command = cmd
-      actionProc.running = true
+    return guard.run("runVerb:" + argv[0], function() {
+      root.actionGeneration++
+      try {
+        var cmd = [root.scriptPath].concat(argv)
+        if (actionProc.running || actionProc.feedbackGeneration >= 0) {
+          Quickshell.execDetached(cmd)
+          root.reportActionStatus("Request sent. Completion is unavailable; check the timer list before trying again.", false)
+          return -1
+        }
+        actionProc.feedbackGeneration = root.actionGeneration
+        actionProc.feedbackStarted = false
+        actionProc.command = cmd
+        root.actionStatus = "Working…"
+        actionProc.running = true
+        return root.actionGeneration
+      } catch (error) {
+        actionProc.feedbackGeneration = -1
+        root.reportActionStatus("Timer request could not be sent. Check ~/.local/bin/omarchy-timers is installed and executable, then try again.", false)
+        throw error
+      }
     })
   }
 
@@ -119,9 +161,10 @@ BarWidget {
   //      The CLI also owns folding a removed/cleared timer into the log.
   function addEntry(label) {
     if (!label || label.trim().length === 0) return
-    root.runVerb(["add", label])
+    var generation = root.runVerb(["add", label])
     root.nowMs = Date.now()
     usage.record("add")
+    return generation
   }
 
   function removeEntry(id) {

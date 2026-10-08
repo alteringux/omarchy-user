@@ -5,11 +5,13 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Analytics overlay for netwatch: live rate + sparkline, a today/week/month
 // rollup with a mini bar chart, the monthly-quota gauge, and a live connection
 // breakdown from `omarchy-netwatch top`.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.netwatch"
   ipcTarget: "alteringux.netwatch"
@@ -35,6 +37,15 @@ Panel {
     : { rx: [], tx: [], max: 1, n: 0 }
 
   property var topData: ({ total: 0, byState: {}, byProc: [], byPeer: [] })
+  property string topError: ""
+  property bool topFeedbackSent: false
+  signal topFeedback(string message)
+  function reportTopError(message) {
+    if (root.topFeedbackSent) return
+    root.topFeedbackSent = true
+    root.topError = message
+    root.topFeedback(message)
+  }
 
   function fmt(n) { return Model.formatBytes(n) }
   function fmtRate(n) { return Model.formatRate(n) }
@@ -52,6 +63,8 @@ Panel {
   function refreshTop() {
     guard.run("refreshTop", function () {
       if (topProc.running) return
+      root.topError = ""
+      root.topFeedbackSent = false
       topProc.command = [Quickshell.env("HOME") + "/.local/bin/omarchy-netwatch", "top", "--json"]
       topProc.running = true
     })
@@ -59,13 +72,29 @@ Panel {
 
   Process {
     id: topProc
+    property bool started: false
+    property bool attempted: false
     running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportTopError("Connection details unavailable. Check ~/.local/bin/omarchy-netwatch.")
+      }
+    }
+    onExited: function(code, status) {
+      started = false
+      attempted = false
+      if (code !== 0 || status !== 0) root.reportTopError("Connection details failed (exit " + code + ").")
+    }
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: {
         guard.run("topProc.onStreamFinished", function () {
           try {
             var d = JSON.parse(text || "{}")
+            if (!d || !Array.isArray(d.byProc) || !Array.isArray(d.byPeer)) throw new Error("missing connection data")
             root.topData = {
               total: d.total || 0,
               byState: d.byState || {},
@@ -74,13 +103,14 @@ Panel {
             }
           } catch (e) {
             root.topData = { total: 0, byState: {}, byProc: [], byPeer: [] }
+            root.reportTopError("Connection details could not be read.")
           }
         })
       }
     }
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root.barIdentity
@@ -91,12 +121,16 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(body.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       id: keyCatcher
       anchors.fill: parent
+      sectionNavigation: true
       onCloseRequested: root.close()
       onTabRequested: function (direction) { root.switchPanel(direction) }
       onActivateRequested: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshTop() }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh network metrics", context: "Netwatch · shortcut focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -106,6 +140,33 @@ Panel {
           id: body
           width: parent.width
           spacing: Style.space(16)
+
+          Text {
+            width: body.width
+            height: visible ? implicitHeight : 0
+            visible: !!(root.topError || (root.hostWidget && root.hostWidget.sampleError))
+            text: (root.hostWidget && root.hostWidget.sampleError ? root.hostWidget.sampleError : "")
+              + (root.hostWidget && root.hostWidget.sampleError && root.topError ? "\n" : "") + root.topError
+            color: _webPalette.negative
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.Wrap
+            Accessible.role: Accessible.StaticText
+            Accessible.name: text
+            Connections {
+              target: root.hostWidget
+              ignoreUnknownSignals: true
+              function onSampleFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+            Connections {
+              target: root
+              function onTopFeedback(message) {
+                if (root.opened && asyncStatusText.visible) asyncStatusText.Accessible.announce(message)
+              }
+            }
+          }
 
           Kit.PanelHead {
             width: parent.width
@@ -118,26 +179,17 @@ Panel {
                 + (root.stat.stale ? "  ·  STALE" : "")
               : "NO DATA YET"
             foreground: root.barForeground
-            trailingControl: Rectangle {
-              width: Style.space(30); height: Style.space(24)
-              radius: Style.cornerRadius
-              color: refreshArea.containsMouse
-                ? Style.hoverFillFor(root.barForeground, Color.accent)
-                : Util.alpha(root.barForeground, 0.1)
-              Text {
-                anchors.centerIn: parent
-                text: "" // nf-fa-refresh
-                color: root.barForeground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.bodySmall
-              }
-              MouseArea {
-                id: refreshArea
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshTop() }
-              }
+            trailingControl: PanelActionButton {
+              size: Style.space(32)
+              iconText: "" // nf-fa-refresh
+              tooltipText: "Refresh network data"
+              Accessible.role: Accessible.Button
+              Accessible.name: tooltipText
+              foreground: root.barForeground
+              hoverColor: _webPalette.accent
+              focusable: true
+              bordered: true
+              onClicked: { if (root.hostWidget) root.hostWidget.sampleNow(); root.refreshTop() }
             }
           }
 
@@ -148,8 +200,8 @@ Panel {
 
             Repeater {
               model: [
-                { k: "↓", label: "DOWN", rate: root.stat ? root.stat.rxRate : 0, c: Kit.Palette.info },
-                { k: "↑", label: "UP",   rate: root.stat ? root.stat.txRate : 0, c: Kit.Palette.positive }
+                { k: "↓", label: "DOWN", rate: root.stat ? root.stat.rxRate : 0, c: _webPalette.info },
+                { k: "↑", label: "UP",   rate: root.stat ? root.stat.txRate : 0, c: _webPalette.positive }
               ]
               delegate: Column {
                 required property var modelData
@@ -207,8 +259,8 @@ Panel {
                   ctx.fill()
                 }
               }
-              drawSeries(s.rx, Kit.Palette.info, true)
-              drawSeries(s.tx, Kit.Palette.positive, false)
+              drawSeries(s.rx, _webPalette.info, true)
+              drawSeries(s.tx, _webPalette.positive, false)
             }
           }
 
@@ -220,30 +272,19 @@ Panel {
             spacing: Style.space(8)
             Repeater {
               model: [ { k: "today", t: "Today" }, { k: "week", t: "Week" }, { k: "month", t: "Month" } ]
-              delegate: Rectangle {
+              delegate: Kit.ActionButton {
                 required property var modelData
                 width: (parent.width - Style.space(16)) / 3
                 height: Style.space(30)
-                radius: Style.cornerRadius
                 readonly property bool sel: root.range === modelData.k
-                color: sel
-                  ? Util.alpha(Color.accent, 0.25)
-                  : (rangeArea.containsMouse ? Util.alpha(root.barForeground, 0.12) : Util.alpha(root.barForeground, 0.06))
-                Text {
-                  anchors.centerIn: parent
-                  text: modelData.t
-                  color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  font.bold: parent.sel
-                }
-                MouseArea {
-                  id: rangeArea
-                  anchors.fill: parent
-                  hoverEnabled: true
-                  cursorShape: Qt.PointingHandCursor
-                  onClicked: root.range = modelData.k
-                }
+                text: modelData.t
+                focusable: true
+                Accessible.role: Accessible.RadioButton
+                Accessible.name: modelData.t + " network data range"
+                Accessible.checked: sel
+                foreground: root.barForeground
+                bordered: sel
+                onClicked: root.range = modelData.k
               }
             }
           }
@@ -305,13 +346,13 @@ Panel {
                     Rectangle {
                       width: parent.width
                       height: parent.parent.colH * (modelData.tx / Math.max(1, modelData.rx + modelData.tx))
-                      color: Kit.Palette.positive
+                      color: _webPalette.positive
                       opacity: 0.85
                     }
                     Rectangle {
                       width: parent.width
                       height: parent.parent.colH * (modelData.rx / Math.max(1, modelData.rx + modelData.tx))
-                      color: Kit.Palette.info
+                      color: _webPalette.info
                       opacity: 0.85
                     }
                   }
@@ -352,9 +393,9 @@ Panel {
                 width: parent.width * Math.max(0, Math.min(1, (root.stat ? root.stat.quota.pct : 0) / 100))
                 color: {
                   var p = root.stat ? root.stat.quota.pct : 0
-                  if (p >= 100) return Kit.Palette.negative
-                  if (p >= 80) return Kit.Palette.warning
-                  return Kit.Palette.positive
+                  if (p >= 100) return _webPalette.negative
+                  if (p >= 80) return _webPalette.warning
+                  return _webPalette.positive
                 }
               }
             }
@@ -384,7 +425,7 @@ Panel {
                 return e.map(function (x) { return x.k + " " + x.n }).join("   ")
               }
               visible: text.length > 0
-              color: Qt.darker(root.barForeground, 1.4)
+              color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
@@ -397,17 +438,17 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.name
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: Style.space(150)
                 }
                 Text {
                   text: modelData.conns + " conn"
-                  color: Qt.darker(root.barForeground, 1.4)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }
@@ -415,7 +456,7 @@ Panel {
                 Text {
                   id: qtext
                   text: "q " + (modelData.queued || "0/0")
-                  color: Qt.darker(root.barForeground, 1.6)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.6), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                 }
@@ -429,19 +470,19 @@ Panel {
                 required property var modelData
                 width: parent.width
                 spacing: Style.space(8)
-                Text {
+                MarqueeText {
                   text: modelData.addr
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                   width: Style.space(200)
                 }
                 Item { width: parent.width - x - pc.width; height: 1 }
                 Text {
                   id: pc
                   text: modelData.conns + ""
-                  color: Qt.darker(root.barForeground, 1.4)
+                  color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
                   font.family: Style.font.family
                   font.pixelSize: Style.font.bodySmall
                 }

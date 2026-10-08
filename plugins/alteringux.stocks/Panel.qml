@@ -12,6 +12,7 @@ import "../alteringux.kit" as Kit
 // See ADR 0001 (local shortcuts + hint row) and ADR 0002 (this is its own
 // plugin, not a Dashboard card).
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.stocks"
   ipcTarget: ""
@@ -28,6 +29,13 @@ Panel {
   readonly property bool providerStale: hostWidget ? hostWidget.providerStale : false
   readonly property string providerError: hostWidget && hostWidget.providerError ? hostWidget.providerError : ""
 
+  function quoteFreshness() {
+    var updatedAt = hostWidget && hostWidget.state ? Date.parse(hostWidget.state.updatedAt || "") : NaN
+    return isFinite(updatedAt)
+      ? "Yahoo Finance · fetched " + Qt.formatDateTime(new Date(updatedAt), "hh:mm")
+      : "Yahoo Finance · no successful fetch yet"
+  }
+
   // Panel-local, not persisted: resets to FILTER_ALL each time the panel opens.
   property string filterMode: Model.FILTER_ALL
 
@@ -37,8 +45,8 @@ Panel {
   readonly property var heroTop: gainers.length ? gainers[0] : null
   readonly property var heroWorst: losers.length ? losers[0] : null
 
-  readonly property color upColor: "#3fb950"
-  readonly property color downColor: Color.urgent
+  readonly property color upColor: _webPalette.statusColorFor("positive", _webPalette.cardBackgroundFor(root.barForeground))
+  readonly property color downColor: _webPalette.statusColorFor("negative", _webPalette.cardBackgroundFor(root.barForeground))
   function moveColor(pct) {
     var dir = Model.changeDirection(pct)
     if (dir === "up") return root.upColor
@@ -60,7 +68,7 @@ Panel {
     { key: Model.FILTER_NEAR_LOW, label: "Near 52w Low" }
   ]
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -69,11 +77,14 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(640))
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(560)))
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
 
       onCloseRequested: root.close()
       onActivateRequested: if (hostWidget) hostWidget.runRefresh()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Refresh stock data", context: "Stocks · shortcut focus" }
+      ]
 
     Kit.PanelScroll {
       anchors.fill: parent
@@ -88,14 +99,19 @@ Panel {
           glyph: ""   // nf-fa-line_chart, matches the bar widget
           title: "Stocks"
           meta: root.refreshing
-            ? "refreshing…"
+            ? "refreshing" + (root.providerStale ? " · stale" : "") + " · " + root.quoteFreshness()
             : (root.providerStale
-              ? "provider unavailable · showing stale data"
-              : (root.providerError || "global top movers"))
+              ? "provider unavailable · stale · " + root.quoteFreshness()
+              : (root.providerError
+                ? root.providerError + " · " + root.quoteFreshness()
+                : root.quoteFreshness() + " · global top movers"))
           foreground: root.barForeground
           trailingControl: Component {
-            Button {
+            Kit.ActionButton {
               text: "Refresh"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Refresh stock movers"
               foreground: root.barForeground
               bordered: true
               onClicked: if (hostWidget) hostWidget.runRefresh()
@@ -114,14 +130,14 @@ Panel {
             Layout.preferredWidth: 1
             height: Style.space(52)
             radius: Style.cornerRadius
-            color: Util.alpha(root.barForeground, 0.05)
+            color: _webPalette.cardBackgroundFor(root.barForeground)
             border.width: 1
-            border.color: Util.alpha(root.barForeground, 0.14)
+            border.color: _webPalette.cardBorderFor(root.barForeground)
 
             Column {
               anchors.centerIn: parent
               spacing: Style.space(2)
-              Text { text: "Top gainer"; color: root.barForeground; opacity: 0.6; font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.horizontalCenter: parent.horizontalCenter }
+              Text { text: "Top gainer"; color: _webPalette.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.horizontalCenter: parent.horizontalCenter }
               Text {
                 text: root.heroTop ? (root.heroTop.symbol + "  " + Model.formatChangePct(root.heroTop.changePct)) : "—"
                 color: root.heroTop ? root.moveColor(root.heroTop.changePct) : root.barForeground
@@ -138,14 +154,14 @@ Panel {
             Layout.preferredWidth: 1
             height: Style.space(52)
             radius: Style.cornerRadius
-            color: Util.alpha(root.barForeground, 0.05)
+            color: _webPalette.cardBackgroundFor(root.barForeground)
             border.width: 1
-            border.color: Util.alpha(root.barForeground, 0.14)
+            border.color: _webPalette.cardBorderFor(root.barForeground)
 
             Column {
               anchors.centerIn: parent
               spacing: Style.space(2)
-              Text { text: "Top loser"; color: root.barForeground; opacity: 0.6; font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.horizontalCenter: parent.horizontalCenter }
+              Text { text: "Top loser"; color: _webPalette.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; anchors.horizontalCenter: parent.horizontalCenter }
               Text {
                 text: root.heroWorst ? (root.heroWorst.symbol + "  " + Model.formatChangePct(root.heroWorst.changePct)) : "—"
                 color: root.heroWorst ? root.moveColor(root.heroWorst.changePct) : root.barForeground
@@ -164,11 +180,14 @@ Panel {
 
           Repeater {
             model: root.filterOptions
-            delegate: Button {
+            delegate: Kit.ActionButton {
               required property var modelData
               text: modelData.label
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Filter stock movers: " + modelData.label
               bordered: true
-              foreground: root.filterMode === modelData.key ? Color.accent : root.barForeground
+              foreground: root.filterMode === modelData.key ? _webPalette.accent : root.barForeground
               onClicked: root.filterMode = modelData.key
             }
           }
@@ -245,7 +264,6 @@ Panel {
         Text {
           text: "Trending searches — click to view"
           color: root.barForeground
-          opacity: 0.6
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -256,29 +274,16 @@ Panel {
 
           Repeater {
             model: root.trendingSymbols
-            delegate: Rectangle {
+            delegate: Kit.ActionButton {
               required property string modelData
-              radius: Style.cornerRadius
-              color: Util.alpha(root.barForeground, 0.07)
-              border.width: 1
-              border.color: Util.alpha(root.barForeground, 0.16)
-              width: pillText.implicitWidth + Style.space(16)
-              height: pillText.implicitHeight + Style.space(8)
-
-              Text {
-                id: pillText
-                anchors.centerIn: parent
-                text: modelData
-                color: root.barForeground
-                font.family: Style.font.family
-                font.pixelSize: Style.font.caption
-              }
-
-              MouseArea {
-                anchors.fill: parent
-                cursorShape: Qt.PointingHandCursor
-                onClicked: root.openSymbol(modelData)
-              }
+              text: modelData
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "View stock quote for " + modelData
+              foreground: root.barForeground
+              fontSize: Style.font.caption
+              bordered: true
+              onClicked: root.openSymbol(modelData)
             }
           }
         }
@@ -287,7 +292,7 @@ Panel {
 
         Text {
           text: "Enter: refresh now  ·  Esc: close"
-          color: Qt.darker(root.barForeground, 1.4)
+          color: _webPalette.contrastColorFor(Qt.darker(root.barForeground, 1.4), _webPalette.barBackground)
           font.family: Style.font.family
           font.pixelSize: Style.font.bodySmall
         }

@@ -10,6 +10,7 @@ import "../alteringux.kit" as Kit
 // reset buttons here call the same functions the keybinding IPC calls, so
 // there is exactly one implementation of each control.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.pomodoro"
   ipcTarget: ""
@@ -52,7 +53,7 @@ Panel {
     return false
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -61,7 +62,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(320))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: root.anyFieldFocused()
 
@@ -71,258 +72,281 @@ Panel {
       onTextKey: function(t) {
         if ((t === "r" || t === "R") && hostWidget) hostWidget.resetSession()
       }
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Start or pause the Pomodoro session", context: "Pomodoro · shortcut focus" },
+        { keys: "X", description: "Skip the current phase", context: "Pomodoro · shortcut focus" },
+        { keys: "R", description: "Reset the session", context: "Pomodoro · shortcut focus" }
+      ]
 
-    Column {
-      id: content
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
-      spacing: Style.space(14)
+      Kit.PanelScroll {
+        anchors.fill: parent
+        contentHeight: content.implicitHeight
 
-      Kit.PanelHead {
-        glyph: "\uf017"   // nf-fa-clock_o, matches the bar widget at rest
-        title: "Pomodoro"
-        meta: hostWidget && hostWidget.phase !== Model.PHASE_IDLE
-          ? Model.phaseLabel(hostWidget.phase) + (hostWidget.running ? " · running" : hostWidget.ready ? " · ready" : " · paused")
-          : "idle"
-        foreground: root.barForeground
-      }
+        Column {
+          id: content
+          width: parent.width
+          spacing: Style.space(14)
 
-      PanelSectionHeader {
-        text: "STATISTICS"
-        foreground: root.barForeground
-      }
-
-      Grid {
-        width: parent.width
-        columns: 2
-        columnSpacing: Style.space(10)
-        rowSpacing: Style.space(6)
-
-        Text { text: "Completed today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: String(root.todayBucket.completed); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
-        Text { text: "Focused today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: Model.formatDuration(root.hostWidget ? root.hostWidget.focusedTodayMs : root.todayBucket.focusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
-        Text { text: "This week"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: root.weekly.completed + " (" + Model.formatDuration(root.weekly.focusedMs) + ")"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-        Text { text: "All-time focus"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: Model.formatDuration(root.allTimeFocusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
-        Text { text: "Daily goal"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: Model.formatDuration(root.config.dailyGoalMinutes * 60000); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
-        Text { text: "Remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: root.hostWidget ? root.hostWidget.goalText : "0m remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-
-        Text { text: "Streak"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
-        Text { text: root.stats.streak + (root.stats.streak === 1 ? " day" : " days"); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
-      }
-
-      PanelSeparator {}
-
-      PanelSectionHeader {
-        text: "CONTROLS"
-        foreground: root.barForeground
-      }
-
-      Row {
-        spacing: Style.space(8)
-
-        Button {
-          text: hostWidget && hostWidget.running ? "Pause" : "Start"
-          foreground: root.barForeground
-          bordered: true
-          onClicked: if (hostWidget) hostWidget.togglePause()
-        }
-        Button {
-          text: "Skip"
-          foreground: root.barForeground
-          bordered: true
-          onClicked: if (hostWidget) hostWidget.skipPhase()
-        }
-        Button {
-          text: "Reset"
-          foreground: root.barForeground
-          bordered: true
-          onClicked: if (hostWidget) hostWidget.resetSession()
-        }
-      }
-
-      PanelSeparator {}
-
-      PanelSectionHeader {
-        text: "DURATIONS"
-        foreground: root.barForeground
-      }
-
-      Row {
-        spacing: Style.space(14)
-
-        NumberField {
-          id: workField
-          label: "Work (min)"
-          value: root.config.workMinutes
-          from: 1
-          to: 180
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ workMinutes: v }) }
-        }
-        NumberField {
-          id: shortBreakField
-          label: "Short break"
-          value: root.config.shortBreakMinutes
-          from: 1
-          to: 60
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ shortBreakMinutes: v }) }
-        }
-      }
-      Row {
-        spacing: Style.space(14)
-
-        NumberField {
-          id: dailyGoalField
-          label: "Daily goal (min)"
-          value: root.config.dailyGoalMinutes
-          from: 1
-          to: 1440
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ dailyGoalMinutes: v }) }
-        }
-      }
-
-      // Adaptive hint, built from recent completion/interruption history at
-      // the current work length. Never applied automatically — the user
-      // clicks Apply or ignores it.
-      Row {
-        visible: hostWidget && hostWidget.workSuggestion !== null && hostWidget.workSuggestion !== undefined && hostWidget.workSuggestion !== root.config.workMinutes
-        spacing: Style.space(8)
-
-        Text {
-          text: hostWidget && hostWidget.workSuggestion > root.config.workMinutes
-                ? "You've been finishing every " + root.config.workMinutes + "m block lately — try " + (hostWidget ? hostWidget.workSuggestion : "") + "m?"
-                : "You've been cutting " + root.config.workMinutes + "m blocks short lately — try " + (hostWidget ? hostWidget.workSuggestion : "") + "m?"
-          color: root.barForeground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          width: content.width - applySuggestionButton.implicitWidth - Style.space(8)
-          wrapMode: Text.WordWrap
-        }
-        Button {
-          id: applySuggestionButton
-          text: "Apply"
-          foreground: root.barForeground
-          bordered: true
-          onClicked: if (hostWidget) root.updateConfig({ workMinutes: hostWidget.workSuggestion })
-        }
-      }
-
-      Row {
-        spacing: Style.space(14)
-
-        NumberField {
-          id: longBreakField
-          label: "Long break"
-          value: root.config.longBreakMinutes
-          from: 1
-          to: 120
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ longBreakMinutes: v }) }
-        }
-        NumberField {
-          id: cycleField
-          label: "Cycle length"
-          value: root.config.longBreakCycle
-          from: 1
-          to: 12
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ longBreakCycle: v }) }
-        }
-      }
-
-      Row {
-        spacing: Style.space(14)
-
-        NumberField {
-          id: reminderField
-          label: "Reminder (min)"
-          value: root.config.reminderMinutes
-          from: 1
-          to: 60
-          foreground: root.barForeground
-          onModified: function(v) { root.updateConfig({ reminderMinutes: v }) }
-        }
-      }
-
-      PanelSeparator {}
-
-      PanelSectionHeader {
-        text: "SOUNDS (blank = default)"
-        foreground: root.barForeground
-      }
-
-      Repeater {
-        id: soundRepeater
-        model: [
-          { key: "workStart", label: "Work start" },
-          { key: "breakStart", label: "Short break start" },
-          { key: "longBreakStart", label: "Long break start" }
-        ]
-
-        Row {
-          id: soundRow
-          required property var modelData
-          property alias field: soundField
-          width: content.width
-          spacing: Style.space(8)
-
-          Text {
-            id: soundLabel
-            width: Style.space(110)
-            text: modelData.label
-            color: root.barForeground
-            font.family: Style.font.family
-            font.pixelSize: Style.font.bodySmall
-            anchors.verticalCenter: parent.verticalCenter
+          Kit.PanelHead {
+            glyph: "\uf017"   // nf-fa-clock_o, matches the bar widget at rest
+            title: "Pomodoro"
+            meta: hostWidget && hostWidget.phase !== Model.PHASE_IDLE
+              ? Model.phaseLabel(hostWidget.phase) + (hostWidget.running ? " · running" : hostWidget.ready ? " · ready" : " · paused")
+              : "idle"
+            foreground: root.barForeground
           }
 
-          TextField {
-            id: soundField
-            width: soundRow.width - soundLabel.width - testButton.implicitWidth - soundRow.spacing * 2
-            text: root.config.sounds[modelData.key] || ""
+          PanelSectionHeader {
+            text: "STATISTICS"
             foreground: root.barForeground
-            placeholderText: "/path/to/sound.oga"
-            onEditingFinished: {
-              var patch = { sounds: {} }
-              patch.sounds[modelData.key] = text
-              root.updateConfig(patch)
+          }
+
+          Grid {
+            width: parent.width
+            columns: 2
+            columnSpacing: Style.space(10)
+            rowSpacing: Style.space(6)
+
+            Text { text: "Completed today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: String(root.todayBucket.completed); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+            Text { text: "Focused today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: Model.formatDuration(root.hostWidget ? root.hostWidget.focusedTodayMs : root.todayBucket.focusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+            Text { text: "This week"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: root.weekly.completed + " (" + Model.formatDuration(root.weekly.focusedMs) + ")"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+            Text { text: "All-time focus"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: Model.formatDuration(root.allTimeFocusedMs); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+            Text { text: "Daily goal"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: Model.formatDuration(root.config.dailyGoalMinutes * 60000); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+            Text { text: "Remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: root.hostWidget ? root.hostWidget.goalText : "0m remaining today"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+
+            Text { text: "Streak"; color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+            Text { text: root.stats.streak + (root.stats.streak === 1 ? " day" : " days"); color: root.barForeground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true }
+          }
+
+          PanelSeparator {}
+
+          PanelSectionHeader {
+            text: "CONTROLS"
+            foreground: root.barForeground
+          }
+
+          Row {
+            spacing: Style.space(8)
+
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              text: hostWidget && hostWidget.running ? "Pause" : "Start"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (hostWidget) hostWidget.togglePause()
+            }
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              text: "Skip"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (hostWidget) hostWidget.skipPhase()
+            }
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              text: "Reset"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (hostWidget) hostWidget.resetSession()
             }
           }
 
-          Button {
-            id: testButton
-            text: "Test"
+          PanelSeparator {}
+
+          PanelSectionHeader {
+            text: "DURATIONS"
             foreground: root.barForeground
-            bordered: true
-            onClicked: root.playSound(modelData.key)
+          }
+
+          Row {
+            spacing: Style.space(14)
+
+            NumberField {
+              id: workField
+              label: "Work (min)"
+              value: root.config.workMinutes
+              from: 1
+              to: 180
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ workMinutes: v }) }
+            }
+            NumberField {
+              id: shortBreakField
+              label: "Short break"
+              value: root.config.shortBreakMinutes
+              from: 1
+              to: 60
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ shortBreakMinutes: v }) }
+            }
+          }
+          Row {
+            spacing: Style.space(14)
+
+            NumberField {
+              id: dailyGoalField
+              label: "Daily goal (min)"
+              value: root.config.dailyGoalMinutes
+              from: 1
+              to: 1440
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ dailyGoalMinutes: v }) }
+            }
+          }
+
+          // Adaptive hint, built from recent completion/interruption history at
+          // the current work length. Never applied automatically — the user
+          // clicks Apply or ignores it.
+          Row {
+            visible: hostWidget && hostWidget.workSuggestion !== null && hostWidget.workSuggestion !== undefined && hostWidget.workSuggestion !== root.config.workMinutes
+            spacing: Style.space(8)
+
+            Text {
+              text: hostWidget && hostWidget.workSuggestion > root.config.workMinutes
+                    ? "You've been finishing every " + root.config.workMinutes + "m block lately — try " + (hostWidget ? hostWidget.workSuggestion : "") + "m?"
+                    : "You've been cutting " + root.config.workMinutes + "m blocks short lately — try " + (hostWidget ? hostWidget.workSuggestion : "") + "m?"
+              color: root.barForeground
+              font.family: Style.font.family
+              font.pixelSize: Style.font.bodySmall
+              width: content.width - applySuggestionButton.implicitWidth - Style.space(8)
+              wrapMode: Text.WordWrap
+            }
+            Kit.ActionButton {
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: text
+              id: applySuggestionButton
+              text: "Apply"
+              foreground: root.barForeground
+              bordered: true
+              onClicked: if (hostWidget) root.updateConfig({ workMinutes: hostWidget.workSuggestion })
+            }
+          }
+
+          Row {
+            spacing: Style.space(14)
+
+            NumberField {
+              id: longBreakField
+              label: "Long break"
+              value: root.config.longBreakMinutes
+              from: 1
+              to: 120
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ longBreakMinutes: v }) }
+            }
+            NumberField {
+              id: cycleField
+              label: "Cycle length"
+              value: root.config.longBreakCycle
+              from: 1
+              to: 12
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ longBreakCycle: v }) }
+            }
+          }
+
+          Row {
+            spacing: Style.space(14)
+
+            NumberField {
+              id: reminderField
+              label: "Reminder (min)"
+              value: root.config.reminderMinutes
+              from: 1
+              to: 60
+              foreground: root.barForeground
+              onModified: function(v) { root.updateConfig({ reminderMinutes: v }) }
+            }
+          }
+
+          PanelSeparator {}
+
+          PanelSectionHeader {
+            text: "SOUNDS (blank = default)"
+            foreground: root.barForeground
+          }
+
+          Repeater {
+            id: soundRepeater
+            model: [
+              { key: "workStart", label: "Work start" },
+              { key: "breakStart", label: "Short break start" },
+              { key: "longBreakStart", label: "Long break start" }
+            ]
+
+            Row {
+              id: soundRow
+              required property var modelData
+              property alias field: soundField
+              width: content.width
+              spacing: Style.space(8)
+
+              Text {
+                id: soundLabel
+                width: Style.space(110)
+                text: modelData.label
+                color: root.barForeground
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              TextField {
+                id: soundField
+                width: soundRow.width - soundLabel.width - testButton.implicitWidth - soundRow.spacing * 2
+                text: root.config.sounds[modelData.key] || ""
+                foreground: root.barForeground
+                placeholderText: "/path/to/sound.oga"
+                onEditingFinished: {
+                  var patch = { sounds: {} }
+                  patch.sounds[modelData.key] = text
+                  root.updateConfig(patch)
+                }
+              }
+
+              Kit.ActionButton {
+                focusable: true
+                Accessible.role: Accessible.Button
+                Accessible.name: text
+                id: testButton
+                text: "Test"
+                foreground: root.barForeground
+                bordered: true
+                onClicked: root.playSound(modelData.key)
+              }
+            }
+          }
+
+          PanelSeparator {}
+
+          // Hint / tertiary line — Style.font.caption + Kit.Palette.faint per the
+          // panel text-hierarchy ramp (docs/adr/0005), not the meta-tag treatment
+          // (this is a full sentence, not a glanceable status).
+          Text {
+            text: "Enter: start/pause  ·  X: skip  ·  R: reset  ·  Esc: close"
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
           }
         }
       }
-
-      PanelSeparator {}
-
-      // Hint / tertiary line — Style.font.caption + Kit.Palette.faint per the
-      // panel text-hierarchy ramp (docs/adr/0005), not the meta-tag treatment
-      // (this is a full sentence, not a glanceable status).
-      Text {
-        text: "Enter: start/pause  ·  X: skip  ·  R: reset  ·  Esc: close"
-        color: Kit.Palette.faint
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-      }
-    }
     }
   }
 }

@@ -14,6 +14,7 @@ import "../alteringux.kit" as Kit
 // movers; the popup panel shows the full gainers/losers card grid plus
 // trending searches.
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.stocks"
 
@@ -67,9 +68,9 @@ BarWidget {
     cycleIndex = (((cycleIndex + delta) % n) + n) % n
   }
 
-  readonly property color upColor: "#3fb950"
-  readonly property color downColor: bar ? bar.urgent : Color.urgent
-  readonly property color neutralColor: bar ? bar.barForeground : Color.foreground
+  readonly property color upColor: _webPalette.barPositive
+  readonly property color downColor: _webPalette.barUrgent
+  readonly property color neutralColor: bar ? _webPalette.barTextColorFor(bar.barForeground) : _webPalette.foreground
   readonly property color tickerColor: {
     var p = currentQuote ? currentQuote.changePct : null
     if (p === null || p === undefined || isNaN(p))
@@ -152,10 +153,10 @@ BarWidget {
   Component.onCompleted: root.runRefresh()
 
   // Poll cadence. Yahoo's keyless endpoints have no push/stream, so this is
-  // plain polling — default every 30s (the floor). Global movers change more
+  // plain polling — default every 5m with a 2m floor. Global movers change more
   // than a personal watchlist did, so this stays livelier than the old
   // 120s default; override per-widget with "refreshSeconds" in this widget's
-  // shell.json layout entry (e.g. 60 for a lighter poll) if Yahoo's screener
+  // shell.json layout entry (e.g. 120 for a lighter poll) if Yahoo's screener
   // starts rate-limiting at this cadence.
   readonly property int refreshIntervalMs: Math.max(120, setting("refreshSeconds", 300)) * 1000
 

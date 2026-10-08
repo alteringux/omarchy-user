@@ -7,6 +7,7 @@ import "Model.js" as Model
 import "../alteringux.kit" as Kit
 
 BarWidget {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.sysmon"
 
@@ -67,8 +68,37 @@ BarWidget {
   // ---- the sampler. No systemd timer — this data is only meaningful while
   //      the shell is running to show it, unlike netwatch's accruing buckets.
   readonly property int sampleIntervalMs: 2000
+  property string sampleError: ""
+  property bool sampleFailureAnnounced: false
+  signal sampleFeedback(string message)
+  function reportSampleFailure(message) {
+    root.sampleError = message
+    if (root.sampleFailureAnnounced) return
+    root.sampleFailureAnnounced = true
+    root.sampleFeedback(message)
+  }
 
-  Process { id: sampleProc; running: false; onExited: stateStore.reload() }
+  Process {
+    id: sampleProc
+    property bool started: false
+    property bool attempted: false
+    running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportSampleFailure("System sample unavailable. Check ~/.local/bin/omarchy-sysmon.")
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload()
+      started = false
+      attempted = false
+      if (code === 0 && status === 0) { root.sampleError = ""; root.sampleFailureAnnounced = false }
+      else root.reportSampleFailure("System sample failed (exit " + code + ").")
+    }
+  }
 
   function sampleNow() {
     guard.run("sampleNow", function () {
@@ -161,7 +191,7 @@ BarWidget {
     tooltipText: root.tooltipText
     dimmed: root.stale
     active: root.anyWarning || root.anyCritical
-    activeColor: root.anyCritical ? Kit.Palette.negative : Kit.Palette.warning
+    activeColor: root.anyCritical ? _webPalette.barNegative : _webPalette.barWarning
     horizontalMargin: 8.75
     verticalPadding: 8.75
 

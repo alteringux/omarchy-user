@@ -2,14 +2,17 @@ import QtQuick
 import Quickshell
 import Quickshell.Wayland
 import qs.Commons
+import "../alteringux.kit" as Kit
 
-// The bottom bar's crawl: a Marquee plus the summary card that pops above it
-// while a headline is hovered. Factored out of NewsBar.qml to keep the ~100
-// lines of popup placement separate from the bar/refresh plumbing.
+// One half of the bottom bar: a Marquee plus the summary card that pops above
+// it while a headline is hovered. Factored out of NewsBar.qml so the bar can
+// run two independent crawls (world news on the right, Literotica's newest on
+// the left) without duplicating the ~100 lines of popup placement each.
 //
 // The host passes its PanelWindow as `panelWindow` (the popup anchors to it)
 // and the already-age-annotated `headlines`; clicks come back as activate(url).
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: seg
 
   property var panelWindow: null
@@ -17,8 +20,8 @@ Item {
   property string placeholder: ""
   property bool hostHidden: false
 
-  property color textColor: Color.bar.text
-  property color accentColor: Color.bar.active
+  property color textColor: _webPalette.barForeground
+  property color accentColor: _webPalette.barActive
   property string fontFamily: Style.font.family
   property int fontSize: Style.font.body
 
@@ -87,10 +90,10 @@ Item {
       id: tipCard
       width: parent ? parent.width : 0
       implicitHeight: tipCol.implicitHeight + 16
-      color: Color.popups.background
+      color: _webPalette.popupBackground
       radius: Style.cornerRadius
       border.width: 1
-      border.color: Color.popups.border
+      border.color: _webPalette.popupBorder
 
       Column {
         id: tipCol
@@ -103,6 +106,7 @@ Item {
           spacing: 8
           Text {
             text: summaryTip.h ? summaryTip.h.source : ""
+            textFormat: Text.PlainText
             color: crawl.accentColor
             font.family: Style.font.family
             font.pixelSize: Math.max(1, Style.font.body - 1)
@@ -111,6 +115,7 @@ Item {
           Text {
             visible: summaryTip.h && !!summaryTip.h.category
             text: summaryTip.h && summaryTip.h.category ? summaryTip.h.category.toUpperCase() : ""
+            textFormat: Text.PlainText
             color: summaryTip.h ? crawl.categoryColor(summaryTip.h.categoryBucket) : crawl.dimColor
             font.family: Style.font.family
             font.pixelSize: Math.max(1, Style.font.body - 1)
@@ -119,6 +124,15 @@ Item {
           Text {
             visible: summaryTip.h && !!summaryTip.h.age
             text: summaryTip.h && summaryTip.h.age ? "· " + summaryTip.h.age : ""
+            textFormat: Text.PlainText
+            color: crawl.dimColor
+            font.family: Style.font.family
+            font.pixelSize: Math.max(1, Style.font.body - 1)
+          }
+          Text {
+            visible: summaryTip.h && !!summaryTip.h.readTime
+            text: summaryTip.h && summaryTip.h.readTime ? "· " + summaryTip.h.readTime : ""
+            textFormat: Text.PlainText
             color: crawl.dimColor
             font.family: Style.font.family
             font.pixelSize: Math.max(1, Style.font.body - 1)
@@ -128,7 +142,8 @@ Item {
         Text {
           width: parent.width
           text: summaryTip.h ? summaryTip.h.title : ""
-          color: Color.popups.text
+          textFormat: Text.PlainText
+          color: _webPalette.popupText
           font.family: Style.font.family
           font.pixelSize: Style.font.body
           font.bold: true
@@ -139,7 +154,8 @@ Item {
           width: parent.width
           visible: summaryTip.h && !!summaryTip.h.summary
           text: summaryTip.h ? summaryTip.h.summary : ""
-          color: Qt.rgba(Color.popups.text.r, Color.popups.text.g, Color.popups.text.b, 0.8)
+          textFormat: Text.PlainText
+          color: _webPalette.popupText
           font.family: Style.font.family
           font.pixelSize: Math.max(1, Style.font.body - 1)
           wrapMode: Text.WordWrap

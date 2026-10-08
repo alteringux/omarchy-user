@@ -92,6 +92,41 @@ test("withAges + headlineLabel", () => {
   assert.strictEqual(Model.headlineLabel(h2), "AP   Undated");
 });
 
+// -------------------------------------------------------------- readingMinutes
+test("readingMinutes: threaded through, drives readTime + label", () => {
+  const now = Date.parse("2026-01-01T03:00:00Z");
+  const [h] = Model.withAges(
+    [{ source: "Lit", title: "A long one", url: "https://x/1",
+       published: "2026-01-01T00:00:00Z", readingMinutes: 17 }],
+    now
+  );
+  assert.strictEqual(h.readingMinutes, 17);
+  assert.strictEqual(h.readTime, "17 min read");
+  assert.strictEqual(Model.headlineLabel(h), "Lit   A long one  · 3h  · 17 min read");
+});
+
+test("formatReadTime: minutes, then hours past 60", () => {
+  assert.strictEqual(Model.formatReadTime(0), "");
+  assert.strictEqual(Model.formatReadTime(-3), "");
+  assert.strictEqual(Model.formatReadTime(1), "1 min read");
+  assert.strictEqual(Model.formatReadTime(59), "59 min read");
+  assert.strictEqual(Model.formatReadTime(60), "1h read");
+  assert.strictEqual(Model.formatReadTime(125), "2h 5m read");
+  assert.strictEqual(Model.formatReadTime(358), "5h 58m read");
+});
+
+test("readingMinutes: absent / zero / junk -> 0 and no readTime", () => {
+  assert.strictEqual(Model.sanitizeHeadline({ title: "T", url: "https://x/1" }).readingMinutes, 0);
+  assert.strictEqual(
+    Model.sanitizeHeadline({ title: "T", url: "https://x/2", readingMinutes: "abc" }).readingMinutes, 0);
+  assert.strictEqual(
+    Model.sanitizeHeadline({ title: "T", url: "https://x/3", readingMinutes: -4 }).readingMinutes, 0);
+  const [h] = Model.withAges(
+    [{ source: "BBC", title: "News", url: "https://x/4", published: "" }], Date.now());
+  assert.strictEqual(h.readTime, "");
+  assert.strictEqual(Model.headlineLabel(h), "BBC   News");
+});
+
 // --------------------------------------------------------- category / sector
 test("sanitizeHeadline: keeps and caps category", () => {
   const h = Model.sanitizeHeadline({

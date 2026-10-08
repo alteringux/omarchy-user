@@ -2,7 +2,8 @@
 # Focused black-box coverage for replay replacement and stale indexing.
 set -euo pipefail
 
-CLI="${OMARCHY_DEVCAST_BIN:-$HOME/.local/bin/omarchy-devcast}"
+REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
+CLI="${OMARCHY_DEVCAST_BIN:-$REPO/local-bin/omarchy-devcast}"
 [ -x "$CLI" ] || { echo "not executable: $CLI" >&2; exit 1; }
 
 WORK="$(mktemp -d)"

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "id": "alteringux.cursortrail",
+  "name": "Cursor Trail",
+  "version": "1.0.0",
+  "author": "AlteringUX",
+  "description": "A lightweight click-through fading cursor trail.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": { "displayName": "Cursor Trail", "description": "Fading pointer trail overlay.", "category": "Appearance", "allowMultiple": false }
+}

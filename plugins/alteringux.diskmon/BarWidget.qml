@@ -43,8 +43,17 @@ BarWidget {
     : "Loading…"
 
   readonly property string scriptPath: Quickshell.env("HOME") + "/.local/bin/omarchy-diskmon"
-  // Disk usage moves slowly; sampling every 30s is plenty and keeps df calls
-  // (and the resulting flash-storage wear) low compared to cpumon's 2s.
+  property string sampleError: ""
+  property bool sampleFailureAnnounced: false
+  signal sampleFeedback(string message)
+  function reportSampleFailure(message) {
+    root.sampleError = message
+    if (root.sampleFailureAnnounced) return
+    root.sampleFailureAnnounced = true
+    root.sampleFeedback(message)
+  }
+  // Disk usage moves slowly; sampling every 60s keeps df calls low compared
+  // with the 4s CPU/memory sampling cadence.
   readonly property int sampleIntervalMs: 60000
 
   Kit.Store {
@@ -55,7 +64,27 @@ BarWidget {
     parse: function (raw) { return Model.parseState(raw) }
   }
 
-  Process { id: sampleProc; running: false; onExited: stateStore.reload() }
+  Process {
+    id: sampleProc
+    property bool started: false
+    property bool attempted: false
+    running: false
+    onStarted: started = true
+    onRunningChanged: {
+      if (running) { started = false; attempted = true }
+      else if (attempted && !started) {
+        attempted = false
+        root.reportSampleFailure("Disk sample unavailable. Check ~/.local/bin/omarchy-diskmon.")
+      }
+    }
+    onExited: function(code, status) {
+      stateStore.reload()
+      started = false
+      attempted = false
+      if (code === 0 && status === 0) { root.sampleError = ""; root.sampleFailureAnnounced = false }
+      else root.reportSampleFailure("Disk sample failed (exit " + code + ").")
+    }
+  }
 
   function sampleNow() {
     guard.run("sampleNow", function () {

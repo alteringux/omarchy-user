@@ -1,0 +1,3 @@
+function defaults() { return { version: 1, generatedAt: null, thresholdDays: 30, skills: [], summary: {} } }
+function parse(raw) { var out = defaults(); try { var v = typeof raw === "string" ? JSON.parse(raw || "{}") : raw; if (!v || typeof v !== "object") return out; out.generatedAt = typeof v.generatedAt === "string" ? v.generatedAt : null; out.thresholdDays = Number(v.thresholdDays) || 30; out.summary = v.summary && typeof v.summary === "object" ? v.summary : {}; out.skills = Array.isArray(v.skills) ? v.skills.filter(function (s) { return s && typeof s.id === "string" }) : [] } catch (e) {} return out }
+if (typeof module !== "undefined") module.exports = { defaults: defaults, parse: parse }

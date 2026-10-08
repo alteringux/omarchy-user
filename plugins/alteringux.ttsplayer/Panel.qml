@@ -5,11 +5,13 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Transport panel for the currently-speaking Piper TTS job. Everything here
 // acts on hostWidget (the BarWidget), which owns the state and the calls out
 // to tts-player-ctl / piper-tts.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.ttsplayer"
   ipcTarget: ""
@@ -50,7 +52,7 @@ Panel {
     return Model.chunkLabel({ chunks: hostWidget.state.chunks, played: hostWidget.playedIndex })
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -59,7 +61,7 @@ Panel {
     contentWidth: panel.fittedContentWidth(Style.space(280))
     contentHeight: panel.fittedContentHeight(content.implicitHeight)
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
 
       // While the Voice dropdown's popup owns the keyboard, stop this catcher
@@ -69,6 +71,10 @@ Panel {
       onCloseRequested: root.close()
       onActivateRequested: if (root.speaking && hostWidget) hostWidget.togglePause()
       onDeleteRequested: if (root.speaking && hostWidget) hostWidget.stopPlayback()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Space", description: "Pause or resume current speech", context: "TTS Player · shortcut focus" },
+        { keys: "X", description: "Stop current speech", context: "TTS Player · shortcut focus" }
+      ]
 
       Column {
         id: content
@@ -84,7 +90,7 @@ Panel {
           foreground: root.barForeground
         }
 
-        Text {
+        MarqueeText {
           visible: root.speaking
           width: content.width
           text: {
@@ -95,10 +101,10 @@ Panel {
           // Supplementary detail, not the primary status (that's the
           // PanelHead meta line above) — the hint-role treatment, matching
           // cliamp's analogous position/total line (ADR-0005).
-          color: Kit.Palette.faint
-          font.family: Style.font.family
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+          color: _webPalette.faint
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.caption
+          requestedElide: Text.ElideRight
         }
 
         // Progress. Deliberately not a slider: piper-tts streams chunk by
@@ -125,7 +131,7 @@ Panel {
           visible: root.speaking
           width: content.width
           text: "Seeking isn't available for streaming TTS."
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -137,15 +143,21 @@ Panel {
         Row {
           spacing: Style.space(8)
 
-          Button {
+          Kit.ActionButton {
             text: (hostWidget && hostWidget.paused) ? "Resume" : "Pause"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: text + " reading"
             foreground: root.barForeground
             bordered: true
             enabled: root.speaking
             onClicked: if (hostWidget) hostWidget.togglePause()
           }
-          Button {
+          Kit.ActionButton {
             text: "Stop"
+            focusable: true
+            Accessible.role: Accessible.Button
+            Accessible.name: "Stop reading aloud"
             foreground: root.barForeground
             bordered: true
             enabled: root.speaking
@@ -166,9 +178,12 @@ Panel {
 
           Repeater {
             model: root.speeds
-            Button {
+            Kit.ActionButton {
               required property var modelData
               text: (modelData === 1 ? "1" : String(modelData)) + "×"
+              focusable: true
+              Accessible.role: Accessible.Button
+              Accessible.name: "Set reading speed to " + String(modelData) + " times normal"
               foreground: root.barForeground
               bordered: hostWidget && Math.abs(hostWidget.speed - modelData) < 0.001
               onClicked: if (hostWidget) hostWidget.setSpeed(modelData)
@@ -176,8 +191,11 @@ Panel {
           }
         }
 
-        Button {
+        Kit.ActionButton {
           text: "Restart now at " + (hostWidget ? (hostWidget.speed === 1 ? "1" : String(hostWidget.speed)) : "1") + "×"
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: text
           foreground: root.barForeground
           bordered: true
           visible: root.speaking
@@ -199,7 +217,7 @@ Panel {
           id: voiceDropdown
           width: content.width
           showLabel: false
-          activeFocusOnTab: false
+          activeFocusOnTab: true
           options: hostWidget ? hostWidget.voices : []
           value: root.voiceSelection
           foreground: root.barForeground
@@ -213,7 +231,7 @@ Panel {
           visible: root.speaking
           width: content.width
           text: "Changing voice restarts the current reading."
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
@@ -223,7 +241,7 @@ Panel {
 
         Toggle {
           width: content.width
-          activeFocusOnTab: false
+          activeFocusOnTab: true
           label: "Loop reading"
           description: (hostWidget && hostWidget.loopEnabled)
             ? "Restarts automatically when it finishes"
@@ -235,7 +253,7 @@ Panel {
 
         Toggle {
           width: content.width
-          activeFocusOnTab: false
+          activeFocusOnTab: true
           label: "Mute"
           description: (hostWidget && hostWidget.muted)
             ? "Silenced — piper keeps running"
@@ -248,7 +266,7 @@ Panel {
 
         Text {
           text: "Space: pause  ·  X: stop  ·  Esc: close"
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }

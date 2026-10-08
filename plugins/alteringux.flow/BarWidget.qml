@@ -37,6 +37,9 @@ BarWidget {
   property var pendingDoc: null
   property string pendingDocRaw: ""
   property string pendingExpectedRaw: ""
+  property var localDoc: null
+  property string docSaveStatus: ""
+  property bool docWriteBlocked: false
   property string inFlightDocRaw: ""
   property string inFlightFlowId: ""
   property string inFlightExpectedRaw: ""
@@ -91,7 +94,7 @@ BarWidget {
     onExited: function (code) { root._finishDocWrite(code) }
   }
 
-  property alias doc: docStore.value
+  readonly property var doc: root.localDoc !== null ? root.localDoc : docStore.value
   property alias runState: runStore.value
   readonly property string focusSector: focusStore.value || ""
   readonly property bool ready: docStore.loaded && runStore.loaded
@@ -104,6 +107,9 @@ BarWidget {
     pendingDoc = null
     pendingDocRaw = ""
     pendingExpectedRaw = ""
+    localDoc = null
+    docSaveStatus = ""
+    docWriteBlocked = false
     docWriteConflict = false
     docStore.reload()
     runStore.reload()
@@ -176,7 +182,15 @@ BarWidget {
         : (docWriteProc.running ? root.inFlightDocRaw : docStore._lastRaw)
       root.pendingDoc = newDoc
       root.pendingDocRaw = Model.serializeDoc(newDoc)
-      docStore.value = newDoc
+      root.localDoc = newDoc
+      if (root.docWriteBlocked) {
+        root.pendingDoc = null
+        root.pendingDocRaw = ""
+        root.pendingExpectedRaw = ""
+        root.docSaveStatus = "The flow file changed elsewhere. Your canvas edits are still here; retry to save over that version, or discard them."
+        return
+      }
+      root.docSaveStatus = "Saving canvas edits…"
       docWriteTimer.restart()
     })
   }
@@ -189,6 +203,7 @@ BarWidget {
     root.pendingDoc = null
     root.pendingDocRaw = ""
     root.pendingExpectedRaw = ""
+    root.docSaveStatus = "Saving canvas edits…"
     docWriteProc.command = [
       root.docSaveBin, docStore.path, root.inFlightExpectedRaw, root.inFlightDocRaw
     ]
@@ -205,6 +220,16 @@ BarWidget {
       root.ignoreDocRaw = ""
       if (selfRefresh) return
     }
+    if (root.localDoc !== null) {
+      root.docWriteBlocked = true
+      if (docWriteTimer.running) docWriteTimer.stop()
+      root.pendingDoc = null
+      root.pendingDocRaw = ""
+      root.pendingExpectedRaw = ""
+      if (docWriteProc.running) root.docWriteConflict = true
+      root.docSaveStatus = "The flow file changed elsewhere. Your canvas edits are still here; retry to save over that version, or discard them."
+      return
+    }
     // External state wins over a not-yet-written local edit. This makes a
     // refresh/write collision deterministic instead of last-timer-wins.
     if (docWriteTimer.running) docWriteTimer.stop()
@@ -217,6 +242,7 @@ BarWidget {
   function _finishDocWrite(code) {
     var sameFlow = root.inFlightFlowId === root.flowId
     var committed = code === 0 && !root.docWriteConflict
+    var writeConflict = root.docWriteConflict
     root.docWriteConflict = false
     root.inFlightExpectedRaw = ""
     root.inFlightFlowId = ""
@@ -224,9 +250,18 @@ BarWidget {
       // Store will adopt the exact text and emit externallyChanged; remember
       // it so that self-refresh does not cancel the next queued edit.
       root.ignoreDocRaw = root.inFlightDocRaw
+      if (root.pendingDoc === null) root.localDoc = null
+      root.docWriteBlocked = false
+      root.docSaveStatus = "Canvas edits saved."
       docStore.reload()
     } else {
       root.ignoreDocRaw = ""
+      if (sameFlow && root.localDoc !== null) {
+        if (writeConflict || code === 2) root.docWriteBlocked = true
+        root.docSaveStatus = writeConflict || code === 2
+          ? "The flow file changed elsewhere. Your canvas edits are still here; retry to save over that version, or discard them."
+          : "Could not save the flow. Your canvas edits are still here; retry or discard them."
+      }
       docStore.reload()
     }
     root.inFlightDocRaw = ""
@@ -236,6 +271,29 @@ BarWidget {
       root.pendingDocRaw = ""
       root.pendingExpectedRaw = ""
     }
+  }
+
+  function retryDocSave() {
+    if (root.localDoc === null || docWriteProc.running) return
+    root.docWriteBlocked = false
+    root.pendingDoc = root.localDoc
+    root.pendingDocRaw = Model.serializeDoc(root.localDoc)
+    // Retrying is an explicit choice to write the retained canvas over the
+    // currently observed version, including after a compare-and-swap conflict.
+    root.pendingExpectedRaw = docStore._lastRaw
+    root.docSaveStatus = "Saving canvas edits…"
+    docWriteTimer.restart()
+  }
+
+  function discardDocEdits() {
+    docWriteTimer.stop()
+    root.pendingDoc = null
+    root.pendingDocRaw = ""
+    root.pendingExpectedRaw = ""
+    root.localDoc = null
+    root.docWriteBlocked = false
+    root.docSaveStatus = "Canvas edits discarded."
+    docStore.reload()
   }
 
   // ---- IPC -----------------------------------------------------------------

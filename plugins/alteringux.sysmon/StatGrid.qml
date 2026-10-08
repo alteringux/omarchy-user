@@ -2,6 +2,7 @@ import QtQuick
 import qs.Commons
 import qs.Ui
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Shared min / avg / max / now readout under each panel's sparkline. `stats`
 // is a { min, avg, max, cur, n } from Model.historyStats; `format` turns a
@@ -33,14 +34,17 @@ Column {
       ]
       delegate: Column {
         required property var modelData
+        width: Math.max(0, (parent.width - parent.columnSpacing * 3) / 4)
         spacing: Style.space(2)
-        Kit.MetaText { width: implicitWidth; content: modelData.l; foreground: root.foreground }
-        Text {
+        Kit.MetaText { width: parent.width; content: modelData.l; foreground: root.foreground }
+        MarqueeText {
+          width: parent.width
           text: modelData.v
           color: root.foreground
-          font.family: Style.font.family
-          font.pixelSize: Style.font.bodySmall
-          font.bold: true
+          textFont.family: Style.font.family
+          textFont.pixelSize: Style.font.bodySmall
+          textFont.bold: true
+          requestedElide: Text.ElideRight
         }
       }
     }

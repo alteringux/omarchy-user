@@ -11,10 +11,11 @@ import "../alteringux.kit" as Kit
 // Validation is Model.validateCustom's, surfaced next to the field that broke
 // rather than as a lump at the bottom, and Save stays disabled while invalid.
 Column {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
-  property color foreground: Color.foreground
+  property color foreground: _webPalette.foreground
 
   // Empty for a new pattern; a custom technique's id to edit it in place.
   property string editingId: ""
@@ -137,10 +138,10 @@ Column {
   }
 
   function toneColor(tone) {
-    if (tone === "positive") return Kit.Palette.positive
-    if (tone === "negative") return Kit.Palette.negative
-    if (tone === "warning") return Kit.Palette.warning
-    if (tone === "info") return Kit.Palette.info
+    if (tone === "positive") return _webPalette.positive
+    if (tone === "negative") return _webPalette.negative
+    if (tone === "warning") return _webPalette.warning
+    if (tone === "info") return _webPalette.info
     return root.foreground
   }
 
@@ -162,7 +163,7 @@ Column {
       required property var modelData
       width: parent.width
       text: modelData
-      color: Kit.Palette.negative
+      color: _webPalette.negative
       wrapMode: Text.WordWrap
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
@@ -206,7 +207,7 @@ Column {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       text: parent.pos ? parent.pos.phaseLabel : "Add a phase to preview it"
-      color: parent.pos ? root.foreground : Kit.Palette.faint
+      color: parent.pos ? root.foreground : _webPalette.faint
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -221,7 +222,7 @@ Column {
       return root.preview.pattern + "  ·  " + Model.formatDuration(root.cycleSeconds) + " per cycle"
         + "  ·  " + Model.formatDuration(root.cycleSeconds * root.draftCycles) + " total"
     }
-    color: Kit.Palette.faint
+    color: _webPalette.faint
     font.family: Style.font.family
     font.pixelSize: Style.font.caption
     font.letterSpacing: 1.1
@@ -251,7 +252,7 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           width: Style.space(16)
           text: String(phaseRow.index + 1)
-          color: Kit.Palette.faint
+          color: _webPalette.faint
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
         }
@@ -261,6 +262,11 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           width: Style.space(124)
           showLabel: false
+          Accessible.role: Accessible.ComboBox
+          Accessible.name: "Breathing phase"
+          Accessible.description: "Current phase: " + value
+          Accessible.focusable: true
+          Accessible.onPressAction: kindDrop.toggle()
           options: [
             Model.PHASE.INHALE, Model.PHASE.HOLD_IN, Model.PHASE.EXHALE, Model.PHASE.HOLD_OUT,
             Model.PHASE.INHALE_TOP, Model.PHASE.RETENTION, Model.PHASE.RECOVERY,
@@ -285,6 +291,9 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           iconText: ""                    // fa-angle-up
           tooltipText: "Move up"
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
           foreground: root.foreground
           onClicked: root.movePhase(phaseRow.index, -1)
         }
@@ -292,6 +301,9 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           iconText: ""                    // fa-angle-down
           tooltipText: "Move down"
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
           foreground: root.foreground
           onClicked: root.movePhase(phaseRow.index, 1)
         }
@@ -299,7 +311,10 @@ Column {
           anchors.verticalCenter: parent.verticalCenter
           iconText: ""                    // fa-times
           tooltipText: "Remove this phase"
-          foreground: Kit.Palette.negative
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: tooltipText
+          foreground: _webPalette.negative
           onClicked: root.removePhase(phaseRow.index)
         }
       }
@@ -311,7 +326,7 @@ Column {
           required property var modelData
           width: phaseRow.width
           text: modelData
-          color: Kit.Palette.negative
+          color: _webPalette.negative
           wrapMode: Text.WordWrap
           font.family: Style.font.family
           font.pixelSize: Style.font.caption
@@ -324,7 +339,10 @@ Column {
     width: parent.width
     spacing: Style.space(8)
 
-    Button {
+    Kit.ActionButton {
+      focusable: true
+      Accessible.role: Accessible.Button
+      Accessible.name: text
       text: "  Add phase"
       bordered: true
       foreground: root.foreground
@@ -338,7 +356,7 @@ Column {
       required property var modelData
       width: parent.width
       text: modelData
-      color: Kit.Palette.negative
+      color: _webPalette.negative
       wrapMode: Text.WordWrap
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
@@ -365,7 +383,6 @@ Column {
       width: Style.space(60)
       text: "Colour"
       color: root.foreground
-      opacity: 0.6
       font.family: Style.font.family
       font.pixelSize: Style.font.bodySmall
     }
@@ -375,17 +392,40 @@ Column {
       Rectangle {
         required property var modelData
         anchors.verticalCenter: parent.verticalCenter
-        width: Style.space(22)
+        width: Style.spacing.controlHeight
         height: width
         radius: width / 2
-        color: root.toneColor(modelData)
-        opacity: root.draftTone === modelData ? 1 : 0.35
-        border.width: root.draftTone === modelData ? 2 : 0
+        color: "transparent"
+        activeFocusOnTab: true
+        Accessible.role: Accessible.RadioButton
+        Accessible.name: "Colour " + modelData
+        Accessible.checkable: true
+        Accessible.checked: root.draftTone === modelData
+        Accessible.focusable: true
+        Accessible.onPressAction: selectTone()
+        Accessible.onToggleAction: selectTone()
+        border.width: activeFocus ? Style.spacing.hairline : 0
         border.color: root.foreground
+
+        function selectTone() { root.draftTone = modelData }
+        Keys.onReturnPressed: selectTone()
+        Keys.onEnterPressed: selectTone()
+        Keys.onSpacePressed: selectTone()
+
+        Rectangle {
+          anchors.centerIn: parent
+          width: Style.space(22)
+          height: width
+          radius: width / 2
+          color: root.toneColor(modelData)
+          opacity: root.draftTone === modelData ? 1 : 0.35
+          border.width: root.draftTone === modelData ? 2 : 0
+          border.color: root.foreground
+        }
 
         MouseArea {
           anchors.fill: parent
-          onClicked: root.draftTone = modelData
+          onClicked: { parent.forceActiveFocus(); parent.selectTone() }
         }
       }
     }
@@ -400,7 +440,7 @@ Column {
     Text {
       width: parent.width
       text: "Or start from an existing pattern"
-      color: Kit.Palette.faint
+      color: _webPalette.faint
       font.family: Style.font.family
       font.pixelSize: Style.font.caption
     }
@@ -411,7 +451,10 @@ Column {
 
       Repeater {
         model: Model.TECHNIQUES
-        Button {
+        Kit.ActionButton {
+          focusable: true
+          Accessible.role: Accessible.Button
+          Accessible.name: text
           required property var modelData
           text: modelData.name
           bordered: true
@@ -430,24 +473,33 @@ Column {
     width: parent.width
     spacing: Style.space(8)
 
-    Button {
+    Kit.ActionButton {
+      focusable: true
+      Accessible.role: Accessible.Button
+      Accessible.name: text
       text: "Save"
       bordered: true
-      foreground: root.valid ? Kit.Palette.positive : Kit.Palette.faint
+      foreground: root.valid ? _webPalette.positive : _webPalette.faint
       opacity: root.valid ? 1 : 0.5
       onClicked: root.save()
     }
-    Button {
+    Kit.ActionButton {
+      focusable: true
+      Accessible.role: Accessible.Button
+      Accessible.name: text
       text: "Cancel"
       bordered: true
       foreground: root.foreground
       onClicked: root.closed()
     }
-    Button {
+    Kit.ActionButton {
+      focusable: true
+      Accessible.role: Accessible.Button
+      Accessible.name: text
       text: "Delete"
       bordered: true
       visible: root.editingId !== ""
-      foreground: Kit.Palette.negative
+      foreground: _webPalette.negative
       onClicked: {
         if (root.hostWidget) root.hostWidget.deleteCustomTechnique(root.editingId)
         root.closed()

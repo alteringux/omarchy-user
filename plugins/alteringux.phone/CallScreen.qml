@@ -15,6 +15,7 @@ import "../alteringux.kit" as Kit
 // running and the bar keeps the pill), and ending lives on the button only —
 // the same lesson as the breathe overlay.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   property var hostWidget: null
@@ -29,7 +30,7 @@ Item {
   readonly property string turn: root.call.turn || "idle"
   readonly property int elapsed: hostWidget ? hostWidget.elapsedSeconds : 0
 
-  readonly property color accent: Color.foreground
+  readonly property color accent: _webPalette.foreground
 
   // "Call ended" grace: the daemon resets call.json to IDLE the moment a call
   // finishes; hold the screen briefly so the ending is legible, then dismiss.
@@ -80,7 +81,7 @@ Item {
     // ---- scrim ------------------------------------------------------
     Rectangle {
       anchors.fill: parent
-      color: Qt.rgba(Color.background.r, Color.background.g, Color.background.b, 1)
+      color: Qt.rgba(_webPalette.background.r, _webPalette.background.g, _webPalette.background.b, 1)
       opacity: 0.9
       Behavior on opacity { NumberAnimation { duration: 300 } }
     }
@@ -157,8 +158,8 @@ Item {
           radius: width / 2
           color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
           border.width: Math.max(1.5, win.shortSide * 0.002)
-          border.color: root.ended ? Kit.Palette.faint
-                       : root.ringing ? Kit.Palette.urgent
+          border.color: root.ended ? _webPalette.faint
+                       : root.ringing ? _webPalette.urgent
                        : root.accent
           Behavior on width { NumberAnimation { duration: 420; easing.type: Easing.InOutSine } }
 
@@ -168,7 +169,6 @@ Item {
             font.family: Style.font.family
             font.pixelSize: win.shortSide * 0.09
             color: root.accent
-            opacity: 0.9
           }
         }
 
@@ -189,7 +189,7 @@ Item {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: root.call.contactName || "Call"
-        color: Color.foreground
+        color: _webPalette.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.display
         font.bold: true
@@ -197,7 +197,7 @@ Item {
       Text {
         anchors.horizontalCenter: parent.horizontalCenter
         text: root.stateLine
-        color: root.ringing ? Kit.Palette.urgent : Kit.Palette.faint
+        color: root.ringing ? _webPalette.urgent : _webPalette.faint
         font.family: Style.font.family
         font.pixelSize: Style.font.subtitle
         font.letterSpacing: 1.1
@@ -206,12 +206,25 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         visible: !!(root.call.lastError && root.call.lastError.length) && !root.ended
         text: root.call.lastError
-        color: Kit.Palette.warning
+        color: _webPalette.warning
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
         wrapMode: Text.WordWrap
         width: parent.width
         horizontalAlignment: Text.AlignHCenter
+      }
+      Text {
+        anchors.horizontalCenter: parent.horizontalCenter
+        visible: !!(root.hostWidget && root.hostWidget.actionStatus)
+        text: root.hostWidget ? root.hostWidget.actionStatus : ""
+        color: root.hostWidget && root.hostWidget.actionFailed ? _webPalette.negative : _webPalette.faint
+        font.family: Style.font.family
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        width: Math.min(parent.width, Style.space(520))
+        horizontalAlignment: Text.AlignHCenter
+        Accessible.role: Accessible.StaticText
+        Accessible.name: text
       }
 
       // ---- transcript -------------------------------------------
@@ -221,7 +234,7 @@ Item {
         width: parent.width
         height: Math.min(Style.space(220), transcriptFlick.contentHeight + Style.space(20))
         radius: Style.cornerRadius
-        color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.05)
+        color: _webPalette.cardBackgroundFor(_webPalette.foreground)
 
         Flickable {
           id: transcriptFlick
@@ -247,7 +260,7 @@ Item {
                 text: (modelData.role === "assistant"
                         ? (root.call.contactName || "Them")
                         : "You") + ":  " + modelData.text
-                color: modelData.role === "assistant" ? Color.foreground : Kit.Palette.faint
+                color: modelData.role === "assistant" ? _webPalette.foreground : _webPalette.faint
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
               }
@@ -302,19 +315,25 @@ Item {
         }
       }
 
-      Text {
+      Column {
         anchors.horizontalCenter: parent.horizontalCenter
         visible: root.connected
-        text: (root.showTranscript ? "Hide transcript" : "Show transcript") + "  ·  M mute  ·  Esc hide"
-        color: Kit.Palette.faint
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-        opacity: 0.75
+        spacing: Style.space(4)
 
-        MouseArea {
-          anchors.fill: parent
-          cursorShape: Qt.PointingHandCursor
-          onClicked: root.showTranscript = !root.showTranscript
+        PhoneButton {
+          anchors.horizontalCenter: parent.horizontalCenter
+          label: root.showTranscript ? "Hide transcript" : "Show transcript"
+          onActivated: root.showTranscript = !root.showTranscript
+        }
+
+        Text {
+          anchors.horizontalCenter: parent.horizontalCenter
+          text: "M mute · Esc hide"
+          color: _webPalette.faint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+          Accessible.role: Accessible.StaticText
+          Accessible.name: text
         }
       }
     }
@@ -328,18 +347,23 @@ Item {
     property string tone: "neutral" // neutral | positive | negative
     property bool active: false
     signal activated()
+    Accessible.role: Accessible.Button
+    Accessible.name: pb.label
+    Accessible.onPressAction: if (pb.enabled && pb.visible) pb.activated()
+    Accessible.description: pb.active ? "Active" : ""
+    activeFocusOnTab: true
 
-    readonly property color toneColor: pb.tone === "positive" ? Kit.Palette.positive
-                                     : pb.tone === "negative" ? Kit.Palette.negative
-                                     : Color.foreground
+    readonly property color toneColor: pb.tone === "positive" ? _webPalette.positive
+                                     : pb.tone === "negative" ? _webPalette.negative
+                                     : _webPalette.foreground
 
     implicitWidth: pbRow.implicitWidth + Style.space(26)
     implicitHeight: pbRow.implicitHeight + Style.space(16)
     radius: height / 2
     color: pb.active ? Qt.rgba(pb.toneColor.r, pb.toneColor.g, pb.toneColor.b, 0.22)
           : (pbArea.containsMouse ? Qt.rgba(pb.toneColor.r, pb.toneColor.g, pb.toneColor.b, 0.12) : "transparent")
-    border.width: 1
-    border.color: pb.active ? pb.toneColor : Qt.rgba(pb.toneColor.r, pb.toneColor.g, pb.toneColor.b, 0.45)
+    border.width: activeFocus ? 2 : 1
+    border.color: activeFocus ? _webPalette.accent : (pb.active ? pb.toneColor : Qt.rgba(pb.toneColor.r, pb.toneColor.g, pb.toneColor.b, 0.45))
 
     Row {
       id: pbRow
@@ -354,7 +378,7 @@ Item {
       }
       Text {
         text: pb.label
-        color: Color.foreground
+        color: _webPalette.foreground
         font.family: Style.font.family
         font.pixelSize: Style.font.body
       }
@@ -365,7 +389,10 @@ Item {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
-      onClicked: pb.activated()
+      onClicked: { pb.forceActiveFocus(); pb.activated() }
     }
+    Keys.onReturnPressed: pb.activated()
+    Keys.onEnterPressed: pb.activated()
+    Keys.onSpacePressed: pb.activated()
   }
 }

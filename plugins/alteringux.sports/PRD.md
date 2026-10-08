@@ -260,7 +260,8 @@ The UI must not fail because an image host is slow or unavailable.
 
 Emoji identify sports directly in the selector and match cards so the
 dashboard remains recognizable when a nerd font is unavailable. Small semantic
-labels may use additional emoji such as `📰` Articles and `🤖` model picks.
+labels use Omarchy Nerd Font glyphs for icons, such as newspaper and robot
+glyphs for article sections and model picks.
 
 Match cards expose provider-supplied videos plus YouTube searches for highlights
 and official coverage. The plugin must not link to unlicensed stream

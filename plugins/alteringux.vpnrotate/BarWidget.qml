@@ -115,7 +115,7 @@ BarWidget {
 
   // ── persistence ─────────────────────────────────────────────────────────
   // Status file: the script owns every write (create on first connect, rewrite
-  // on each state change, never deleted). watch + a 2 s idle poll covers
+  // on each state change, never deleted). watch + a 60 s fallback poll covers
   // FileView's watch-on-create blind spot the same way the other plugins do.
   Kit.Store {
     id: stateStore
@@ -174,7 +174,7 @@ BarWidget {
   }
 
   // Ask the script to refresh the volatile metrics while a tunnel is up. Each
-  // run spawns `protonvpn status` (a Python CLI), so 10 s keeps the box quiet
+  // run spawns `protonvpn status` (a Python CLI), so 60 s keeps the box quiet
   // while still giving a live-enough throughput readout; the latency probe
   // inside rate-limits itself further to ~25 s. Only runs while the panel is
   // open or auto-rotate needs the numbers — no point polling for a hidden UI.

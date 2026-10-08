@@ -10,11 +10,22 @@ STATE_DIR="${XDG_RUNTIME_DIR:-/tmp}/omarchy-countdown"
 STATE_FILE="$STATE_DIR/state"
 CACHE_DIR="$HOME/Music/omarchy-countdown-cache"
 
+_OMARCHY_BIN_DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
+if [[ -r "$_OMARCHY_BIN_DIR/omarchy-audio-lib" ]]; then
+  # shellcheck source=/dev/null
+  source "$_OMARCHY_BIN_DIR/omarchy-audio-lib"
+else
+  omarchy_output_muted() { return 1; }
+fi
+
 # Phrases repeat a lot across countdowns ("10 seconds remaining.", etc.), so
 # cache each rendered clip by a hash of its text and only call Piper on a
 # cache miss.
 speak() {
   local text=$1
+  if omarchy_output_muted; then
+    return 0
+  fi
   local hash cache_file
   hash=$(printf '%s' "$text" | sha256sum | cut -d' ' -f1)
   cache_file="$CACHE_DIR/$hash.wav"
@@ -206,4 +217,6 @@ main() {
   esac
 }
 
-main "$@"
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  main "$@"
+fi

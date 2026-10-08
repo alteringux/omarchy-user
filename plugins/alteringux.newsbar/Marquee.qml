@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import "../alteringux.kit" as Kit
 
 // A continuous right-to-left news crawl. The headline row is laid out twice
 // end to end inside a clipped viewport and translated by half its width on an
@@ -8,14 +9,15 @@ import qs.Commons
 // target that emits activate(url). When there are no headlines a centered
 // placeholder is shown and nothing animates.
 Item {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
 
   // Age-annotated headline objects: { source, title, url, age }.
   property var headlines: []
   property real pxPerSec: 60
-  property color textColor: Color.bar.text
-  property color accentColor: Color.bar.active
-  property color dimColor: Qt.rgba(textColor.r, textColor.g, textColor.b, 0.55)
+  property color textColor: _webPalette.barForeground
+  property color accentColor: _webPalette.barActive
+  property color dimColor: _webPalette.contrastColorFor(_webPalette.muted, _webPalette.barBackground)
   property string fontFamily: Style.font.family
   property int fontSize: Style.font.body
   property string placeholder: ""
@@ -29,22 +31,23 @@ Item {
 
   signal activate(string url)
 
-  // Fixed per-sector hues — distinct from each other and from the source
-  // colour, and legible on the dark bar regardless of theme. "other" and any
-  // unknown bucket fall back to the dim colour.
+  // Per-sector hues use the shared 216-color RGB cube. categoryColor adjusts
+  // each hue for readable text on the active bar surface.
   property var sectorColors: ({
-    world: "#6ea8fe",
-    business: "#4ec9a5",
-    politics: "#e0637a",
-    tech: "#b48ead",
-    science: "#56c2d6",
-    health: "#8fbf6b",
-    sport: "#e6a95b",
-    culture: "#d98fc0"
+    world: "#6699FF",
+    business: "#00CC99",
+    politics: "#FF6699",
+    tech: "#CC99FF",
+    science: "#00CCFF",
+    health: "#66CC00",
+    sport: "#FFCC00",
+    culture: "#FF66CC"
   })
 
   function categoryColor(bucket) {
-    return sectorColors[bucket] || dimColor
+    return sectorColors[bucket]
+      ? _webPalette.contrastColorFor(sectorColors[bucket], _webPalette.barBackground)
+      : dimColor
   }
 
   clip: true
@@ -63,7 +66,7 @@ Item {
     color: root.dimColor
     font.family: root.fontFamily
     font.pixelSize: root.fontSize
-    renderType: Text.NativeRendering
+
   }
 
   Row {
@@ -91,42 +94,60 @@ Item {
 
           Text {
             text: cell.modelData.source
+            textFormat: Text.PlainText
             color: root.accentColor
             font.family: root.fontFamily
             font.pixelSize: root.fontSize
             font.bold: true
             // Extra breathing room between the source and what follows it.
             rightPadding: Style.space(3)
-            renderType: Text.NativeRendering
+
             verticalAlignment: Text.AlignVCenter
           }
           Text {
-            visible: !!cell.modelData.category
             text: cell.modelData.category ? cell.modelData.category.toUpperCase() : ""
+            textFormat: Text.PlainText
+            visible: !!cell.modelData.category
             color: root.categoryColor(cell.modelData.categoryBucket)
             font.family: root.fontFamily
             font.pixelSize: Math.max(1, root.fontSize - 1)
             font.bold: true
-            rightPadding: Style.space(1)
-            renderType: Text.NativeRendering
+            // Was Style.space(1) — nearly touching the title that follows,
+            // out of step with the source label's own Style.space(3) and the
+            // bullet's Style.space(4). Matches the rest of the row's rhythm.
+            rightPadding: Style.space(4)
+
             verticalAlignment: Text.AlignVCenter
           }
           Text {
             text: cell.modelData.title
+            textFormat: Text.PlainText
             color: hover.hovered ? root.accentColor : root.textColor
             font.family: root.fontFamily
             font.pixelSize: root.fontSize
             font.underline: hover.hovered
-            renderType: Text.NativeRendering
+
             verticalAlignment: Text.AlignVCenter
           }
           Text {
-            visible: !!cell.modelData.age
             text: cell.modelData.age ? "· " + cell.modelData.age : ""
-            color: root.dimColor
+            textFormat: Text.PlainText
+            visible: !!cell.modelData.age
             font.family: root.fontFamily
             font.pixelSize: root.fontSize
-            renderType: Text.NativeRendering
+
+            verticalAlignment: Text.AlignVCenter
+          }
+          // Estimated reading time — ero-news only (world-news headlines have
+          // no article body to measure, so this stays blank there).
+          Text {
+            text: cell.modelData.readTime ? "· " + cell.modelData.readTime : ""
+            textFormat: Text.PlainText
+            visible: !!cell.modelData.readTime
+            color: root.dimColor
+            font.family: root.fontFamily
+            font.pixelSize: Math.max(1, root.fontSize - 1)
+
             verticalAlignment: Text.AlignVCenter
           }
           Text {
@@ -135,7 +156,7 @@ Item {
             font.family: root.fontFamily
             font.pixelSize: root.fontSize
             leftPadding: Style.space(4)
-            renderType: Text.NativeRendering
+
             verticalAlignment: Text.AlignVCenter
           }
         }
@@ -171,27 +192,45 @@ Item {
   }
 
   // Restart from a clean origin whenever the content width changes (new
-  // headlines, font/DPI change). Without this the running animation keeps its
-  // stale from/to and the crawl speed drifts or the seam gaps.
+  // headlines, font/DPI change). The tick binding keeps running on its own.
   function restartScroll() {
-    scrollAnim.stop()
     track.x = 0
-    if (root.hasHeadlines && track.halfWidth > 1)
-      scrollAnim.start()
   }
 
-  NumberAnimation {
-    id: scrollAnim
-    target: track
-    property: "x"
-    from: 0
-    to: -track.halfWidth
-    duration: Math.max(1, Math.round(track.halfWidth / Math.max(1, root.pxPerSec) * 1000))
-    loops: Animation.Infinite
-    easing.type: Easing.Linear
-    paused: root.paused && running
+  // A time-stepped crawl at ~30fps rather than a per-frame NumberAnimation.
+  // The top bar is otherwise idle, so a 60fps translate here was the single
+  // thing keeping that surface's render loop from ever parking; 30fps is
+  // indistinguishable for a linear text scroll and halves the repaints. A
+  // hover-pause (or no headlines) stops the tick entirely, so a static ticker
+  // costs nothing.
+  Timer {
+    id: scrollTick
+    interval: 33
+    repeat: true
+    running: root.hasHeadlines && track.halfWidth > 1 && !root.paused
+    onTriggered: {
+      track.x -= root.pxPerSec * (interval / 1000)
+      if (track.x <= -track.halfWidth) track.x += track.halfWidth
+    }
   }
 
-  onHeadlinesChanged: Qt.callLater(restartScroll)
+  // A content swap (source switch, or the first crawl landing) crossfades
+  // instead of snapping. The crawl dims out, restartScroll rebuilds the track
+  // at x=0, then it fades back up, so the ~1-frame rebuild and the scroll-
+  // position reset read as a soft dissolve rather than a jump.
+  SequentialAnimation {
+    id: swapAnim
+    NumberAnimation {
+      target: track; property: "opacity"; to: 0
+      duration: 110; easing.type: Easing.OutQuad
+    }
+    ScriptAction { script: root.restartScroll() }
+    NumberAnimation {
+      target: track; property: "opacity"; to: 1
+      duration: 170; easing.type: Easing.InQuad
+    }
+  }
+
+  onHeadlinesChanged: Qt.callLater(swapAnim.restart)
   Component.onCompleted: Qt.callLater(restartScroll)
 }

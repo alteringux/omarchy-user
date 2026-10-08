@@ -5,12 +5,14 @@ import qs.Commons
 import qs.Ui
 import "Model.js" as Model
 import "../alteringux.kit" as Kit
+import "../shared"
 
 // Month grid you can click a date on to see/add a time block, plus an Ask AI
 // box wired to omarchy-calendar-ai. All state (month cells, selected day,
 // AI answer) lives on the bar widget (hostWidget) — this panel just renders
 // it and forwards actions, same shape as alteringux.conductor's cockpit.
 Panel {
+  property QtObject _webPalette: Kit.Palette {}
   id: root
   moduleName: "alteringux.calendar"
   ipcTarget: ""
@@ -59,7 +61,7 @@ Panel {
     if (opened && hostWidget && !root.selectedDate) root.selectDate(root.state.date || hostWidget.currentMonth + "-01")
   }
 
-  KeyboardPanel {
+  Kit.KeyboardPanel {
     id: panel
     anchorItem: root.anchorItem
     owner: root
@@ -69,11 +71,14 @@ Panel {
     contentHeight: panel.fittedContentHeight(Math.min(content.implicitHeight, Style.space(620)))
     focusTarget: null
 
-    PanelKeyCatcher {
+    Kit.PanelKeys {
       anchors.fill: parent
       blocked: root.inputFocused
 
       onCloseRequested: root.close()
+      additionalShortcutDescriptions: [
+        { keys: "Enter / Return / Space", description: "Select the focused date", context: "Calendar · control focus" }
+      ]
 
       Kit.PanelScroll {
         anchors.fill: parent
@@ -97,7 +102,7 @@ Panel {
             width: content.width
             visible: hostWidget && hostWidget.lastError.length > 0
             text: hostWidget ? hostWidget.lastError : ""
-            color: Kit.Palette.negative
+            color: _webPalette.negative
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
             wrapMode: Text.WordWrap
@@ -108,14 +113,17 @@ Panel {
             width: content.width
             spacing: Style.space(8)
 
-            Text {
+            Kit.ActionButton {
+              id: prevMonthButton
               text: "‹"
-              color: Color.accent
-              font.pixelSize: Style.font.title
-              MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goMonth(-1) }
+              foreground: _webPalette.accent
+              bordered: true
+              Accessible.name: "Previous month"
+              onClicked: root.goMonth(-1)
             }
             Text {
-              width: content.width - Style.space(120)
+              width: Math.max(0, content.width - prevMonthButton.implicitWidth
+                - nextMonthButton.implicitWidth - todayButton.implicitWidth - parent.spacing * 3)
               horizontalAlignment: Text.AlignHCenter
               text: Model.monthTitle(root.currentMonth)
               color: root.barForeground
@@ -123,18 +131,21 @@ Panel {
               font.pixelSize: Style.font.body
               font.bold: true
             }
-            Text {
+            Kit.ActionButton {
+              id: nextMonthButton
               text: "›"
-              color: Color.accent
-              font.pixelSize: Style.font.title
-              MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goMonth(1) }
+              foreground: _webPalette.accent
+              bordered: true
+              Accessible.name: "Next month"
+              onClicked: root.goMonth(1)
             }
-            Text {
+            Kit.ActionButton {
+              id: todayButton
               text: "Today"
-              color: Kit.Palette.faint
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              MouseArea { anchors.fill: parent; anchors.margins: -6; cursorShape: Qt.PointingHandCursor; onClicked: root.goToday() }
+              foreground: _webPalette.faint
+              bordered: true
+              Accessible.name: "Go to today"
+              onClicked: root.goToday()
             }
           }
 
@@ -153,7 +164,7 @@ Panel {
                   width: grid.cellW
                   horizontalAlignment: Text.AlignHCenter
                   text: modelData
-                  color: Kit.Palette.faint
+                  color: _webPalette.faint
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
                   font.bold: true
@@ -179,11 +190,25 @@ Panel {
                     width: grid.cellW
                     height: grid.cellW
                     radius: Style.cornerRadius
+                    activeFocusOnTab: cell.inMonth
+                    Accessible.role: Accessible.RadioButton
+                    Accessible.ignored: !cell.inMonth
+                    Accessible.name: "Select date " + Model.formatDateTitle(cell.date)
+                    Accessible.description: (cell.date === root.selectedDate ? "Selected. " : "")
+                      + (cell.isToday ? "Today." : "")
+                    Accessible.checkable: true
+                    Accessible.checked: cell.date === root.selectedDate
+                    Accessible.onPressAction: activate()
                     color: cell.date !== "" && cell.date === root.selectedDate
-                      ? Util.alpha(Color.accent, 0.25)
+                      ? Util.alpha(_webPalette.accent, 0.25)
                       : (dayMouse.containsMouse && cell.inMonth ? Util.alpha(root.barForeground, 0.08) : "transparent")
-                    border.width: cell.isToday ? 1 : 0
-                    border.color: Color.accent
+                    border.width: cell.isToday || activeFocus ? Style.spacing.hairline : 0
+                    border.color: _webPalette.accent
+
+                    function activate() { if (dayCell.cell.inMonth) root.selectDate(dayCell.cell.date) }
+                    Keys.onReturnPressed: activate()
+                    Keys.onEnterPressed: activate()
+                    Keys.onSpacePressed: activate()
 
                     Column {
                       anchors.centerIn: parent
@@ -198,9 +223,9 @@ Panel {
                       Row {
                         anchors.horizontalCenter: parent.horizontalCenter
                         spacing: 2
-                        Rectangle { visible: dayCell.cell.hasHoliday; width: 4; height: 4; radius: 2; color: Kit.Palette.warning }
-                        Rectangle { visible: dayCell.cell.hasBirthday; width: 4; height: 4; radius: 2; color: Kit.Palette.info }
-                        Rectangle { visible: dayCell.cell.hasEvent; width: 4; height: 4; radius: 2; color: Kit.Palette.positive }
+                        Rectangle { visible: dayCell.cell.hasHoliday; width: 4; height: 4; radius: 2; color: _webPalette.warning }
+                        Rectangle { visible: dayCell.cell.hasBirthday; width: 4; height: 4; radius: 2; color: _webPalette.info }
+                        Rectangle { visible: dayCell.cell.hasEvent; width: 4; height: 4; radius: 2; color: _webPalette.positive }
                       }
                     }
 
@@ -210,7 +235,7 @@ Panel {
                       hoverEnabled: true
                       enabled: dayCell.cell.inMonth
                       cursorShape: dayCell.cell.inMonth ? Qt.PointingHandCursor : Qt.ArrowCursor
-                      onClicked: root.selectDate(dayCell.cell.date)
+                      onClicked: { dayCell.forceActiveFocus(); dayCell.activate() }
                     }
                   }
                 }
@@ -227,18 +252,18 @@ Panel {
 
             Row {
               spacing: Style.space(4)
-              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.warning }
-              Text { text: "holiday"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: _webPalette.warning }
+              Text { text: "holiday"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
             }
             Row {
               spacing: Style.space(4)
-              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.info }
-              Text { text: "birthday"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: _webPalette.info }
+              Text { text: "birthday"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
             }
             Row {
               spacing: Style.space(4)
-              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: Kit.Palette.positive }
-              Text { text: "event/block"; color: Kit.Palette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+              Rectangle { width: 6; height: 6; radius: 3; anchors.verticalCenter: parent.verticalCenter; color: _webPalette.positive }
+              Text { text: "event/block"; color: _webPalette.faint; font.family: Style.font.family; font.pixelSize: Style.font.caption }
             }
           }
 
@@ -263,7 +288,7 @@ Panel {
               delegate: Text {
                 required property string modelData
                 width: content.width
-                text: "🎉 " + modelData
+                text: "󱁖 " + modelData
                 color: root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -274,7 +299,7 @@ Panel {
               delegate: Text {
                 required property var modelData
                 width: content.width
-                text: "🎂 " + modelData.name + (modelData.age ? "  (turns " + modelData.age + ")" : "")
+                text: "󰃥 " + modelData.name + (modelData.age ? "  (turns " + modelData.age + ")" : "")
                 color: root.barForeground
                 font.family: Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -295,24 +320,21 @@ Panel {
                 width: content.width
                 spacing: Style.space(8)
 
-                Text {
-                  width: content.width - Style.space(24)
-                  text: (modelData.kind === "block" ? "⏱ " : "• ") + modelData.title + "  ·  " + Model.entrySubtitle(modelData)
+                MarqueeText {
+                  width: Math.max(0, content.width - removeEntryButton.implicitWidth - parent.spacing)
+                  text: (modelData.kind === "block" ? "󱎫 " : "• ") + modelData.title + "  ·  " + Model.entrySubtitle(modelData)
                   color: root.barForeground
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
+                  textFont.family: Style.font.family
+                  textFont.pixelSize: Style.font.bodySmall
+                  requestedElide: Text.ElideRight
                 }
-                Text {
-                  text: "✕"
-                  color: Kit.Palette.negative
-                  font.pixelSize: Style.font.bodySmall
-                  MouseArea {
-                    anchors.fill: parent
-                    anchors.margins: -4
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: if (hostWidget) hostWidget.removeEntry(modelData.id)
-                  }
+                Kit.ActionButton {
+                  id: removeEntryButton
+                  text: "×"
+                  foreground: _webPalette.negative
+                  bordered: true
+                  Accessible.name: "Remove calendar entry " + modelData.title
+                  onClicked: if (hostWidget) hostWidget.removeEntry(modelData.id)
                 }
               }
             }
@@ -335,37 +357,34 @@ Panel {
 
             TextField {
               id: startField
-              width: (content.width - Style.space(140)) / 2
+              width: Math.max(0, (parent.width - addBlockButton.implicitWidth - parent.spacing * 2) / 2)
               placeholderText: "9:00 AM"
               foreground: root.barForeground
+              Accessible.name: "Block start time"
               onActiveFocusChanged: root.inputFocused = activeFocus || endField.activeFocus || activityField.activeFocus
             }
             TextField {
               id: endField
-              width: (content.width - Style.space(140)) / 2
+              width: Math.max(0, (parent.width - addBlockButton.implicitWidth - parent.spacing * 2) / 2)
               placeholderText: "10:00 AM"
               foreground: root.barForeground
+              Accessible.name: "Block end time"
               onActiveFocusChanged: root.inputFocused = activeFocus || startField.activeFocus || activityField.activeFocus
             }
-            Text {
+            Kit.ActionButton {
+              id: addBlockButton
               text: "Add"
-              color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
-              MouseArea {
-                anchors.fill: parent
-                anchors.margins: -6
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  var start = Model.normalizeTime(startField.text.trim() || "9:00 AM")
-                  var end = Model.normalizeTime(endField.text.trim() || "10:00 AM")
-                  if (!start || !end) return
-                  hostWidget.addBlock(root.selectedDate, start, end, activityField.text.trim())
-                  activityField.text = ""
-                }
+              foreground: _webPalette.accent
+              bordered: true
+              Accessible.name: "Add calendar block"
+              onClicked: {
+                var start = Model.normalizeTime(startField.text.trim() || "9:00 AM")
+                var end = Model.normalizeTime(endField.text.trim() || "10:00 AM")
+                if (!hostWidget || !start || !end) return
+                hostWidget.addBlock(root.selectedDate, start, end, activityField.text.trim())
+                activityField.text = ""
               }
-          }
+            }
           }
           TextField {
             id: activityField
@@ -373,6 +392,7 @@ Panel {
             visible: root.selectedDate !== ""
             placeholderText: "What are you blocking time for?"
             foreground: root.barForeground
+            Accessible.name: "Calendar block description"
             onActiveFocusChanged: root.inputFocused = activeFocus || startField.activeFocus || endField.activeFocus
             onAccepted: {
               if (!hostWidget || text.trim().length === 0) return
@@ -395,36 +415,42 @@ Panel {
             foreground: root.barForeground
           }
 
+          Text {
+            width: content.width
+            text: "For schedule changes, the assistant can add, move, or remove entries directly. Review the result below."
+            color: _webPalette.faint
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
           Row {
             width: content.width
             spacing: Style.space(6)
 
             TextField {
               id: aiField
-              width: content.width - Style.space(60)
+              width: Math.max(0, parent.width - askButton.implicitWidth - parent.spacing)
               placeholderText: "“Move my dentist to Friday afternoon”…"
               foreground: root.barForeground
               enabled: hostWidget ? !hostWidget.aiBusy : true
+              Accessible.name: "Ask AI about calendar changes"
               onActiveFocusChanged: root.inputFocused = activeFocus
               onAccepted: {
                 if (!hostWidget || text.trim().length === 0) return
                 hostWidget.askAi(text.trim())
               }
             }
-            Text {
+            Kit.ActionButton {
+              id: askButton
               text: hostWidget && hostWidget.aiBusy ? "…" : "Ask"
-              color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
-              MouseArea {
-                anchors.fill: parent
-                anchors.margins: -6
-                cursorShape: Qt.PointingHandCursor
-                onClicked: {
-                  if (!hostWidget || aiField.text.trim().length === 0) return
-                  hostWidget.askAi(aiField.text.trim())
-                }
+              foreground: _webPalette.accent
+              bordered: true
+              enabled: hostWidget && !hostWidget.aiBusy && aiField.text.trim().length > 0
+              Accessible.name: hostWidget && hostWidget.aiBusy ? "Asking calendar assistant" : "Ask calendar assistant"
+              onClicked: {
+                if (!hostWidget || aiField.text.trim().length === 0) return
+                hostWidget.askAi(aiField.text.trim())
               }
             }
           }
@@ -433,7 +459,7 @@ Panel {
             width: content.width
             visible: hostWidget && hostWidget.aiBusy
             text: "Thinking…"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
@@ -450,7 +476,7 @@ Panel {
           Text {
             width: content.width
             text: "Right-click widget: refresh  ·  Esc: close"
-            color: Kit.Palette.faint
+            color: _webPalette.faint
             font.family: Style.font.family
             font.pixelSize: Style.font.caption
           }
